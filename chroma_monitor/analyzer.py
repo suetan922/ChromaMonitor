@@ -1,20 +1,19 @@
-import time
+# Windows window enumeration（pywin32 が無い場合は ctypes で代替）
+import sys
 import threading
+import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Callable, Optional
 
 import cv2
 import mss
 import numpy as np
-
-from PySide6.QtCore import QRect, Signal, QObject, QPoint
+from PySide6.QtCore import QObject, QPoint, QRect, Signal
 from PySide6.QtGui import QGuiApplication
 
 from .util import constants as C
-from .util.functions import resize_by_long_edge
+from .util.functions import clamp_int, resize_by_long_edge
 
-# Windows window enumeration（pywin32 が無い場合は ctypes で代替）
-import sys
 HAS_WIN32 = sys.platform.startswith("win")
 
 _ctypes_win = None
@@ -56,6 +55,7 @@ def list_windows():
         return []
     out = []
     if win32gui:
+
         def enum_proc(hwnd, _):
             if not win32gui.IsWindowVisible(hwnd):
                 return
@@ -63,6 +63,7 @@ def list_windows():
             if not title or not title.strip():
                 return
             out.append((hwnd, title))
+
         win32gui.EnumWindows(enum_proc, None)
     elif _ctypes_win:
         import ctypes
@@ -93,11 +94,232 @@ def list_windows():
     return out
 
 
+def _compute_wheel_histogram(h_wheel: np.ndarray) -> np.ndarray:
+    if h_wheel.size == 0:
+        return np.zeros(180, dtype=np.int64)
+
+    hist_raw = np.bincount(h_wheel.reshape(-1), minlength=180)
+    kernel = np.array([1, 2, 3, 2, 1], dtype=np.float32)
+    kernel = kernel / kernel.sum()
+    hist_pad = np.concatenate([hist_raw[-2:], hist_raw, hist_raw[:2]]).astype(np.float32)
+    hist_smooth = np.convolve(hist_pad, kernel, mode="valid")
+    return hist_smooth.astype(np.int64)
+
+
+def _compute_warm_cool_ratios(h_wheel: np.ndarray) -> tuple[float, float, float]:
+    if h_wheel.size == 0:
+        return 0.0, 0.0, 0.0
+
+    warm = np.logical_or(h_wheel < 30, h_wheel >= 150)
+    cool = np.logical_and(h_wheel >= 75, h_wheel < 135)
+    warm_count = float(warm.sum())
+    cool_count = float(cool.sum())
+    total_color = float(h_wheel.size)
+    other_count = max(0.0, total_color - warm_count - cool_count)
+    return warm_count / total_color, cool_count / total_color, other_count / total_color
+
+
+def _compute_top_colors(bgr: np.ndarray, h_wheel: np.ndarray, wheel_mask: np.ndarray) -> list[tuple[float, tuple[int, int, int]]]:
+    top_colors: list[tuple[float, tuple[int, int, int]]] = []
+    if not wheel_mask.any():
+        return top_colors
+
+    rgb_full = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    rgb_masked = rgb_full[wheel_mask]
+    seg_size = 10  # 2度/ビン *10 = 20度
+    seg_idx = (h_wheel // seg_size).astype(np.int32)
+    seg_counts = np.bincount(seg_idx, minlength=18)[:18]
+    order = np.argsort(seg_counts)[::-1]
+    top5_idx = [i for i in order if seg_counts[i] > 0][:C.TOP_COLORS_COUNT]
+    top_sum = float(seg_counts[top5_idx].sum()) if top5_idx else 0.0
+    for seg in top5_idx:
+        cnt = int(seg_counts[seg])
+        if cnt <= 0:
+            continue
+        ratio = cnt / top_sum if top_sum > 0 else 0.0  # 上位5で正規化し合計100%に
+        mask_seg = seg_idx == seg
+        sel = rgb_masked[mask_seg]
+        if sel.size == 0:
+            hue_center = int((seg * seg_size + seg_size / 2) * 2)
+            hsv_val = np.uint8([[[hue_center, 255, 255]]])
+            rgb_val = cv2.cvtColor(hsv_val, cv2.COLOR_HSV2RGB)[0, 0]
+        else:
+            rgb_val = np.mean(sel, axis=0).astype(np.uint8)
+        top_colors.append((ratio, (int(rgb_val[0]), int(rgb_val[1]), int(rgb_val[2]))))
+    return top_colors
+
+
+def _sample_sv_and_rgb(s: np.ndarray, v: np.ndarray, bgr: np.ndarray, sample_points: int) -> tuple[np.ndarray, np.ndarray]:
+    flat_s = s.reshape(-1)
+    flat_v = v.reshape(-1)
+    n = flat_s.size
+    points = max(1, int(sample_points))
+    k = min(points, n)
+    if k < n:
+        idx = np.random.randint(0, n, size=k, dtype=np.int32)
+    else:
+        idx = np.arange(n, dtype=np.int32)
+    sv = np.column_stack([flat_s[idx], flat_v[idx]])
+    rgb_flat = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).reshape(-1, 3)
+    rgb = rgb_flat[idx]
+    return sv, rgb
+
+
+def _analyze_bgr_frame(
+    bgr: np.ndarray,
+    sample_points: int,
+    wheel_sat_threshold: int,
+    progress_cb: Optional[Callable[[int, str], None]] = None,
+    cancel_cb: Optional[Callable[[], bool]] = None,
+) -> Optional[dict]:
+    """Analyze one BGR frame and return the same payload shape as live capture."""
+
+    def _emit_progress(percent: int, text: str):
+        if progress_cb is not None:
+            progress_cb(int(percent), text)
+
+    def _is_canceled() -> bool:
+        if cancel_cb is None:
+            return False
+        try:
+            return bool(cancel_cb())
+        except Exception:
+            return False
+
+    if bgr is None or bgr.size == 0:
+        raise ValueError("empty frame")
+
+    _emit_progress(15, "HSVへ変換中…")
+    if _is_canceled():
+        return None
+    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+    h, s, v = cv2.split(hsv)
+
+    # H/S/Vヒストグラム側は色相未定義(S=0)のみ除外
+    hue_valid_mask = s > 0
+    # カラーサークル側は設定可能な彩度しきい値で集計
+    sat_th = clamp_int(wheel_sat_threshold, C.WHEEL_SAT_THRESHOLD_MIN, C.WHEEL_SAT_THRESHOLD_MAX)
+    wheel_mask = s >= sat_th
+
+    _emit_progress(30, "色相ヒストグラム集計中…")
+    if _is_canceled():
+        return None
+    h_masked = h[hue_valid_mask]
+    h_wheel = h[wheel_mask]
+    hist = _compute_wheel_histogram(h_wheel)
+    warm_ratio, cool_ratio, other_ratio = _compute_warm_cool_ratios(h_wheel)
+
+    h_std = float(np.std(h))
+    s_std = float(np.std(s))
+    v_std = float(np.std(v))
+
+    _emit_progress(45, "散布図サンプル生成中…")
+    if _is_canceled():
+        return None
+    sv, rgb = _sample_sv_and_rgb(s, v, bgr, sample_points)
+
+    _emit_progress(65, "トップ色を計算中…")
+    if _is_canceled():
+        return None
+    top_colors = _compute_top_colors(bgr, h_wheel, wheel_mask)
+
+    h_img, w_img = bgr.shape[:2]
+    _emit_progress(85, "結果を反映中…")
+    if _is_canceled():
+        return None
+    return {
+        "bgr_preview": bgr,
+        "hist": hist,
+        "sv": sv,
+        "rgb": rgb,
+        "h_plane": h_masked,
+        "s_plane": s,
+        "v_plane": v,
+        "top_colors": top_colors,
+        "h_std": h_std,
+        "s_std": s_std,
+        "v_std": v_std,
+        "warm_ratio": warm_ratio,
+        "cool_ratio": cool_ratio,
+        "other_ratio": other_ratio,
+        "dt_ms": 0.0,  # caller fills actual timing
+        "cap": (0, 0, int(w_img), int(h_img)),
+        "graph_update": True,
+    }
+
+
+class ImageFileAnalyzeWorker(QObject):
+    progress = Signal(int, str)
+    finished = Signal(dict)
+    failed = Signal(str)
+    canceled = Signal()
+
+    def __init__(self, path: str, sample_points: int, wheel_sat_threshold: int):
+        super().__init__()
+        self.path = str(path)
+        self.sample_points = int(sample_points)
+        self.wheel_sat_threshold = int(wheel_sat_threshold)
+        self._cancel = threading.Event()
+
+    def request_cancel(self):
+        self._cancel.set()
+
+    def _is_canceled(self) -> bool:
+        return self._cancel.is_set()
+
+    def _emit_progress(self, percent: int, text: str):
+        self.progress.emit(int(percent), text)
+
+    def run(self):
+        try:
+            self._emit_progress(1, "画像を読み込み中…")
+            if self._is_canceled():
+                self.canceled.emit()
+                return
+
+            buf = np.fromfile(self.path, dtype=np.uint8)
+            if buf.size == 0:
+                self.failed.emit("画像ファイルを読み込めませんでした。")
+                return
+            bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            if bgr is None or bgr.size == 0:
+                self.failed.emit("画像データのデコードに失敗しました。")
+                return
+
+            h_img, w_img = bgr.shape[:2]
+            self._emit_progress(8, f"解析準備中… ({w_img}x{h_img})")
+            if self._is_canceled():
+                self.canceled.emit()
+                return
+
+            t0 = time.perf_counter()
+            res = _analyze_bgr_frame(
+                bgr=bgr,
+                sample_points=self.sample_points,
+                wheel_sat_threshold=self.wheel_sat_threshold,
+                progress_cb=self._emit_progress,
+                cancel_cb=self._is_canceled,
+            )
+            if res is None:
+                self.canceled.emit()
+                return
+            res["dt_ms"] = (time.perf_counter() - t0) * 1000.0
+
+            self._emit_progress(100, "解析完了")
+            if self._is_canceled():
+                self.canceled.emit()
+                return
+            self.finished.emit(res)
+        except Exception:
+            self.failed.emit("画像解析に失敗しました。")
+
+
 @dataclass
 class AnalyzerConfig:
     interval_sec: float = C.DEFAULT_INTERVAL_SEC
     sample_points: int = C.DEFAULT_SAMPLE_POINTS
     max_dim: int = C.ANALYZER_MAX_DIM
+    wheel_sat_threshold: int = C.DEFAULT_WHEEL_SAT_THRESHOLD
     graph_every: int = C.ANALYZER_MIN_GRAPH_EVERY
     mode: str = C.DEFAULT_MODE
     diff_threshold: float = C.DEFAULT_DIFF_THRESHOLD
@@ -143,7 +365,17 @@ class AnalyzerWorker(QObject):
         self.cfg.interval_sec = max(C.ANALYZER_MIN_INTERVAL_SEC, float(sec))
 
     def set_sample_points(self, n: int):
-        self.cfg.sample_points = max(C.ANALYZER_MIN_SAMPLE_POINTS, int(n))
+        self.cfg.sample_points = clamp_int(
+            n, C.ANALYZER_MIN_SAMPLE_POINTS, C.ANALYZER_MAX_SAMPLE_POINTS
+        )
+
+    def set_max_dim(self, n: int):
+        self.cfg.max_dim = clamp_int(n, C.ANALYZER_MAX_DIM_MIN, C.ANALYZER_MAX_DIM_MAX)
+
+    def set_wheel_sat_threshold(self, n: int):
+        self.cfg.wheel_sat_threshold = clamp_int(
+            n, C.WHEEL_SAT_THRESHOLD_MIN, C.WHEEL_SAT_THRESHOLD_MAX
+        )
 
     def set_graph_every(self, n: int):
         self.cfg.graph_every = max(C.ANALYZER_MIN_GRAPH_EVERY, int(n))
@@ -163,6 +395,7 @@ class AnalyzerWorker(QObject):
 
     def set_stable_frames(self, n: int):
         self.cfg.stable_frames = max(C.ANALYZER_MIN_STABLE_FRAMES, int(n))
+
     def set_target_window(self, hwnd: Optional[int]):
         self.target_hwnd = hwnd
 
@@ -189,6 +422,7 @@ class AnalyzerWorker(QObject):
             if (left is None or right is None or bottom is None) and _ctypes_win:
                 import ctypes
                 from ctypes import wintypes
+
                 rect = wintypes.RECT()
                 if not _ctypes_win["GetWindowRect"](hwnd, ctypes.byref(rect)):
                     return None
@@ -230,11 +464,13 @@ class AnalyzerWorker(QObject):
         qt_infos = []
         for screen in qt_screens:
             g = screen.geometry()
-            qt_infos.append({
-                "screen": screen,
-                "rect": g,
-                "dpr": max(0.5, float(screen.devicePixelRatio())),
-            })
+            qt_infos.append(
+                {
+                    "screen": screen,
+                    "rect": g,
+                    "dpr": max(0.5, float(screen.devicePixelRatio())),
+                }
+            )
 
         q_left = min(info["rect"].left() for info in qt_infos)
         q_top = min(info["rect"].top() for info in qt_infos)
@@ -407,7 +643,9 @@ class AnalyzerWorker(QObject):
                 bmi.bmiHeader.biCompression = BI_RGB
 
                 bits = ctypes.c_void_p()
-                h_bitmap = gdi32.CreateDIBSection(mem_dc, ctypes.byref(bmi), DIB_RGB_COLORS, ctypes.byref(bits), None, 0)
+                h_bitmap = gdi32.CreateDIBSection(
+                    mem_dc, ctypes.byref(bmi), DIB_RGB_COLORS, ctypes.byref(bits), None, 0
+                )
                 if not h_bitmap or not bits:
                     return None
 
@@ -445,14 +683,29 @@ class AnalyzerWorker(QObject):
         if self.roi_rel is None:
             return full, wrect
 
-        x = max(0, int(self.roi_rel.left()))
-        y = max(0, int(self.roi_rel.top()))
-        w = min(int(self.roi_rel.width()), full.shape[1] - x)
-        h = min(int(self.roi_rel.height()), full.shape[0] - y)
+        # roi_rel はウィンドウ矩形座標系で保持し、実キャプチャ解像度との差はここで吸収する。
+        full_h, full_w = full.shape[:2]
+        ww = max(1, int(wrect.width()))
+        wh = max(1, int(wrect.height()))
+        sx = float(full_w) / float(ww)
+        sy = float(full_h) / float(wh)
+        x = max(0, int(round(float(self.roi_rel.left()) * sx)))
+        y = max(0, int(round(float(self.roi_rel.top()) * sy)))
+        w = max(1, int(round(float(self.roi_rel.width()) * sx)))
+        h = max(1, int(round(float(self.roi_rel.height()) * sy)))
+        if x + w > full_w:
+            w = max(1, full_w - x)
+        if y + h > full_h:
+            h = max(1, full_h - y)
         if w <= 1 or h <= 1:
             return None, None
-        crop = full[y:y + h, x:x + w]
-        cap = QRect(wrect.left() + x, wrect.top() + y, w, h)
+        crop = full[y : y + h, x : x + w]
+        cap = QRect(
+            wrect.left() + int(self.roi_rel.left()),
+            wrect.top() + int(self.roi_rel.top()),
+            int(self.roi_rel.width()),
+            int(self.roi_rel.height()),
+        )
         return crop, cap
 
     def capture_once(self) -> tuple[Optional[np.ndarray], Optional[QRect], Optional[str]]:
@@ -460,7 +713,11 @@ class AnalyzerWorker(QObject):
         try:
             if self.target_hwnd is not None and HAS_WIN32:
                 if self._is_window_minimized(self.target_hwnd):
-                    return None, None, "ターゲットウィンドウが最小化されています（色を取得できません）"
+                    return (
+                        None,
+                        None,
+                        "ターゲットウィンドウが最小化されています（色を取得できません）",
+                    )
                 bgr, cap = self._capture_target_window_region()
                 if bgr is None or cap is None:
                     return None, None, "選択ウィンドウのキャプチャに失敗しました"
@@ -485,7 +742,12 @@ class AnalyzerWorker(QObject):
                 if width <= 1 or height <= 1:
                     return None, None, "領域が画面外です（範囲を選び直してください）"
 
-                mon = {"left": int(left), "top": int(top), "width": int(width), "height": int(height)}
+                mon = {
+                    "left": int(left),
+                    "top": int(top),
+                    "width": int(width),
+                    "height": int(height),
+                }
                 try:
                     img = np.array(sct.grab(mon))
                 except mss.exception.ScreenShotError:
@@ -506,7 +768,9 @@ class AnalyzerWorker(QObject):
                 # （画面領域選択とは排他的に扱う）
                 if self.target_hwnd is not None and HAS_WIN32:
                     if self._is_window_minimized(self.target_hwnd):
-                        self.status.emit("ターゲットウィンドウが最小化されています（色を取得できません）")
+                        self.status.emit(
+                            "ターゲットウィンドウが最小化されています（色を取得できません）"
+                        )
                         time.sleep(0.5)
                         continue
                     bgr, cap = self._capture_target_window_region()
@@ -535,11 +799,18 @@ class AnalyzerWorker(QObject):
                         time.sleep(0.3)
                         continue
 
-                    mon = {"left": int(left), "top": int(top), "width": int(width), "height": int(height)}
+                    mon = {
+                        "left": int(left),
+                        "top": int(top),
+                        "width": int(width),
+                        "height": int(height),
+                    }
                     try:
                         img = np.array(sct.grab(mon))
                     except mss.exception.ScreenShotError:
-                        self.status.emit("画面キャプチャに失敗しました（権限/表示/Wayland設定を確認）")
+                        self.status.emit(
+                            "画面キャプチャに失敗しました（権限/表示/Wayland設定を確認）"
+                        )
                         time.sleep(0.5)
                         continue
                     bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
@@ -552,52 +823,29 @@ class AnalyzerWorker(QObject):
 
                 hsv = cv2.cvtColor(bgr_small, cv2.COLOR_BGR2HSV)
                 h, s, v = cv2.split(hsv)
-                mask_color = np.logical_and(s > C.SAT_MASK_THRESHOLD, v > C.VAL_MASK_THRESHOLD)
+                # H/S/Vヒストグラム側は従来どおり色相未定義(S=0)のみ除外
+                hue_valid_mask = s > 0
+                # カラーサークル側は設定可能な彩度しきい値で集計
+                sat_th = clamp_int(
+                    self.cfg.wheel_sat_threshold,
+                    C.WHEEL_SAT_THRESHOLD_MIN,
+                    C.WHEEL_SAT_THRESHOLD_MAX,
+                )
+                wheel_mask = s >= sat_th
 
                 h_std = float(np.std(h))
                 s_std = float(np.std(s))
                 v_std = float(np.std(v))
 
-                h_masked = h[mask_color]
-                if h_masked.size == 0:
-                    hist = np.zeros(180, dtype=np.int64)
-                else:
-                    hist_raw = np.bincount(h_masked.reshape(-1), minlength=180)
-                    k = np.array([1, 2, 3, 2, 1], dtype=np.float32)
-                    k = k / k.sum()
-                    hist_pad = np.concatenate([hist_raw[-2:], hist_raw, hist_raw[:2]]).astype(np.float32)
-                    hist_smooth = np.convolve(hist_pad, k, mode="valid")
-                    hist = hist_smooth.astype(np.int64)
-
-                warm = np.logical_or(h_masked < 30, h_masked >= 150) if h_masked.size else np.array([], dtype=bool)
-                cool = np.logical_and(h_masked >= 75, h_masked < 135) if h_masked.size else np.array([], dtype=bool)
-                warm_count = float(warm.sum()) if warm.size else 0.0
-                cool_count = float(cool.sum()) if cool.size else 0.0
-                total_color = float(h_masked.size)
-                other_count = max(0.0, total_color - warm_count - cool_count)
-                if total_color > 0:
-                    warm_ratio = warm_count / total_color
-                    cool_ratio = cool_count / total_color
-                    other_ratio = other_count / total_color
-                else:
-                    warm_ratio = cool_ratio = other_ratio = 0.0
-
-                flat_s = s.reshape(-1)
-                flat_v = v.reshape(-1)
-                n = flat_s.size
-                k = min(self.cfg.sample_points, n)
-                if k < n:
-                    idx = np.random.randint(0, n, size=k, dtype=np.int32)
-                else:
-                    idx = np.arange(n, dtype=np.int32)
-                sv = np.column_stack([flat_s[idx], flat_v[idx]])
-
-                rgb_small = cv2.cvtColor(bgr_small, cv2.COLOR_BGR2RGB).reshape(-1, 3)
-                rgb = rgb_small[idx]
+                h_masked = h[hue_valid_mask]
+                h_wheel = h[wheel_mask]
+                hist = _compute_wheel_histogram(h_wheel)
+                warm_ratio, cool_ratio, other_ratio = _compute_warm_cool_ratios(h_wheel)
+                sv, rgb = _sample_sv_and_rgb(s, v, bgr_small, self.cfg.sample_points)
 
                 dt_ms = (time.perf_counter() - t0) * 1000.0
                 self._frame += 1
-                graph_update = (self._frame % self.cfg.graph_every == 0)
+                graph_update = self._frame % self.cfg.graph_every == 0
 
                 emit_now = True
                 if self.cfg.mode == C.UPDATE_MODE_CHANGE:
@@ -610,15 +858,23 @@ class AnalyzerWorker(QObject):
                         hue_diff = np.minimum(hue_diff, 180 - hue_diff)
                         metric = (
                             float(np.mean(hue_diff))
-                            + float(np.mean(np.abs(s.astype(np.int16) - self._prev_s.astype(np.int16)))) * 0.5
-                            + float(np.mean(np.abs(v.astype(np.int16) - self._prev_v.astype(np.int16)))) * 0.5
+                            + float(
+                                np.mean(np.abs(s.astype(np.int16) - self._prev_s.astype(np.int16)))
+                            )
+                            * 0.5
+                            + float(
+                                np.mean(np.abs(v.astype(np.int16) - self._prev_v.astype(np.int16)))
+                            )
+                            * 0.5
                         )
                         if metric < self.cfg.diff_threshold:
                             self._stable_frames += 1
                         else:
                             self._stable_frames = 0
                             self._was_stable = False
-                        emit_now = self._stable_frames >= self.cfg.stable_frames and not self._was_stable
+                        emit_now = (
+                            self._stable_frames >= self.cfg.stable_frames and not self._was_stable
+                        )
                         if emit_now:
                             self._was_stable = True
                     self._prev_h = h
@@ -630,55 +886,30 @@ class AnalyzerWorker(QObject):
                     graph_update = True
 
                 if emit_now:
-                    # 実画素に基づくトップ5色（色と割合）を計算（20度ごとに集約し、上位5セグメントを100%に正規化）
-                    top_colors = []
-                    if mask_color.any():
-                        rgb_full = cv2.cvtColor(bgr_small, cv2.COLOR_BGR2RGB)
-                        rgb_masked = rgb_full[mask_color]
-                        # Hue を 20度 (bin 10) ごとの18セグメントに集約
-                        seg_size = 10  # 2度/ビン *10 = 20度
-                        seg_idx = (h_masked // seg_size).astype(np.int32)
-                        seg_counts = np.bincount(seg_idx, minlength=18)[:18]
-                        order = np.argsort(seg_counts)[::-1]
-                        top5_idx = [i for i in order if seg_counts[i] > 0][:C.TOP_COLORS_COUNT]
-                        top_sum = float(seg_counts[top5_idx].sum()) if top5_idx else 0.0
-                        for seg in top5_idx:
-                            cnt = int(seg_counts[seg])
-                            if cnt <= 0:
-                                continue
-                            ratio = cnt / top_sum if top_sum > 0 else 0.0  # 上位5で正規化し合計100%に
-                            # セグメント内のピクセル平均色
-                            mask_seg = seg_idx == seg
-                            sel = rgb_masked[mask_seg]
-                            if sel.size == 0:
-                                # セグメント中心色で代用
-                                hue_center = int((seg * seg_size + seg_size / 2) * 2)  # 度数に戻す
-                                hsv = np.uint8([[[hue_center, 255, 255]]])
-                                rgb_val = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)[0, 0]
-                            else:
-                                rgb_val = np.mean(sel, axis=0).astype(np.uint8)
-                            top_colors.append((ratio, (int(rgb_val[0]), int(rgb_val[1]), int(rgb_val[2]))))
+                    top_colors = _compute_top_colors(bgr_small, h_wheel, wheel_mask)
 
-                    self.resultReady.emit({
-                        "bgr_preview": bgr,
-                        "hist": hist if graph_update else None,
-                        "sv": sv if graph_update else None,
-                        "rgb": rgb if graph_update else None,
-                        "h_plane": h_masked if graph_update else None,
-                        # S/Vヒストグラムは全画素を表示し、低彩度(0付近)も確認できるようにする
-                        "s_plane": s if graph_update else None,
-                        "v_plane": v if graph_update else None,
-                        "top_colors": top_colors if graph_update else None,
-                        "h_std": h_std,
-                        "s_std": s_std,
-                        "v_std": v_std,
-                        "warm_ratio": warm_ratio,
-                        "cool_ratio": cool_ratio,
-                        "other_ratio": other_ratio,
-                        "dt_ms": dt_ms,
-                        "cap": (cap.left(), cap.top(), cap.width(), cap.height()),
-                        "graph_update": graph_update,
-                    })
+                    self.resultReady.emit(
+                        {
+                            "bgr_preview": bgr,
+                            "hist": hist if graph_update else None,
+                            "sv": sv if graph_update else None,
+                            "rgb": rgb if graph_update else None,
+                            "h_plane": h_masked if graph_update else None,
+                            # S/Vヒストグラムは全画素を表示し、低彩度(0付近)も確認できるようにする
+                            "s_plane": s if graph_update else None,
+                            "v_plane": v if graph_update else None,
+                            "top_colors": top_colors if graph_update else None,
+                            "h_std": h_std,
+                            "s_std": s_std,
+                            "v_std": v_std,
+                            "warm_ratio": warm_ratio,
+                            "cool_ratio": cool_ratio,
+                            "other_ratio": other_ratio,
+                            "dt_ms": dt_ms,
+                            "cap": (cap.left(), cap.top(), cap.width(), cap.height()),
+                            "graph_update": graph_update,
+                        }
+                    )
                     if self.cfg.mode == C.UPDATE_MODE_CHANGE:
                         # 連続発火を抑えるクールダウンを interval_sec に設定
                         self._cooldown_until = time.perf_counter() + self.cfg.interval_sec

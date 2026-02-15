@@ -1,11 +1,11 @@
-from contextlib import contextmanager
 import math
+from contextlib import contextmanager
 from typing import Any, Iterator, List, Optional, Sequence, Tuple, TypeVar
 
 import cv2
 import numpy as np
-from PySide6.QtCore import Qt, QRect, QObject, QSignalBlocker
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+from PySide6.QtCore import QObject, QRect, QSignalBlocker, Qt
+from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QComboBox
 
 from . import constants as C
@@ -26,6 +26,30 @@ def blocked_signals(obj: QObject) -> Iterator[None]:
 
 def clamp_int(value: int, low: int, high: int) -> int:
     return max(low, min(high, int(value)))
+
+
+def clamp_float(value: float, low: float, high: float) -> float:
+    return max(float(low), min(float(high), float(value)))
+
+
+def screen_union_geometry(available: bool = False) -> QRect:
+    """Return the union rect of all screens with a safe fallback."""
+    screens = QGuiApplication.screens()
+    if screens:
+        first = screens[0].availableGeometry() if available else screens[0].geometry()
+        rect = QRect(first)
+        for screen in screens[1:]:
+            part = screen.availableGeometry() if available else screen.geometry()
+            rect = rect.united(part)
+        if rect.isValid() and rect.width() > 0 and rect.height() > 0:
+            return rect
+
+    ps = QGuiApplication.primaryScreen()
+    if ps is not None:
+        fallback_rect = ps.availableGeometry() if available else ps.virtualGeometry()
+        if fallback_rect.isValid() and fallback_rect.width() > 0 and fallback_rect.height() > 0:
+            return fallback_rect
+    return QRect(0, 0, 1920, 1080)
 
 
 def safe_choice(value: T, allowed: Sequence[T], default: T) -> T:
@@ -58,7 +82,9 @@ def set_combobox_data_blocked(combo: QComboBox, data: Any, default_data: Any = N
     return index
 
 
-def resize_by_long_edge(img: np.ndarray, max_dim: int, interpolation: int = cv2.INTER_AREA) -> np.ndarray:
+def resize_by_long_edge(
+    img: np.ndarray, max_dim: int, interpolation: int = cv2.INTER_AREA
+) -> np.ndarray:
     if img is None:
         return img
     h, w = img.shape[:2]
@@ -107,7 +133,9 @@ def bgr_to_qpixmap(bgr: np.ndarray, max_w: int = 560, max_h: int = 420) -> QPixm
     return rgb_to_qpixmap(rgb, max_w=max_w, max_h=max_h)
 
 
-def top_hue_bars(hist: Optional[np.ndarray]) -> Tuple[str, List[Tuple[str, float, Tuple[int, int, int]]]]:
+def top_hue_bars(
+    hist: Optional[np.ndarray],
+) -> Tuple[str, List[Tuple[str, float, Tuple[int, int, int]]]]:
     """
     実際に使われている色相の上位色をそのまま出す。
     Hueビン（0-179）のうち出現が多い順に C.TOP_COLORS_COUNT 個取り、各ビンの色をそのHueで塗る。
@@ -121,7 +149,7 @@ def top_hue_bars(hist: Optional[np.ndarray]) -> Tuple[str, List[Tuple[str, float
 
     top_idx = np.argsort(hist)[::-1]
     bars: List[Tuple[str, float, Tuple[int, int, int]]] = []
-    for idx in top_idx[:C.TOP_COLORS_COUNT]:
+    for idx in top_idx[: C.TOP_COLORS_COUNT]:
         count = hist[idx]
         if count <= 0:
             continue

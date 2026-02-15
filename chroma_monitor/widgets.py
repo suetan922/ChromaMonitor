@@ -3,19 +3,21 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from PySide6.QtCore import Qt, QRect, QPoint, Signal, QSize
-from PySide6.QtGui import QColor, QPainter, QPen, QImage, QPixmap, QGuiApplication
-from PySide6.QtWidgets import QWidget, QLabel, QVBoxLayout, QSizePolicy
+from PySide6.QtCore import QPoint, QRect, QSize, Qt, Signal
+from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from .util import constants as C
 from .util.functions import (
     bgr_to_qpixmap,
-    clamp_render_size,
+    clamp_float,
     clamp_int,
+    clamp_render_size,
     gray_to_qpixmap,
     resize_by_long_edge,
     rgb_to_qpixmap,
     safe_choice,
+    screen_union_geometry,
 )
 
 
@@ -56,26 +58,32 @@ def _apply_composition_guides(bgr: np.ndarray, guide: str) -> np.ndarray:
     if guide == C.COMPOSITION_GUIDE_THIRDS:
         x1, x2 = w // 3, (w * 2) // 3
         y1, y2 = h // 3, (h * 2) // 3
-        lines.extend([
-            ((x1, 0), (x1, h - 1)),
-            ((x2, 0), (x2, h - 1)),
-            ((0, y1), (w - 1, y1)),
-            ((0, y2), (w - 1, y2)),
-        ])
+        lines.extend(
+            [
+                ((x1, 0), (x1, h - 1)),
+                ((x2, 0), (x2, h - 1)),
+                ((0, y1), (w - 1, y1)),
+                ((0, y2), (w - 1, y2)),
+            ]
+        )
         # 三分割の注目点を補助表示
         points.extend([(x1, y1), (x1, y2), (x2, y1), (x2, y2)])
     elif guide == C.COMPOSITION_GUIDE_CENTER:
         cx, cy = w // 2, h // 2
-        lines.extend([
-            ((cx, 0), (cx, h - 1)),
-            ((0, cy), (w - 1, cy)),
-        ])
+        lines.extend(
+            [
+                ((cx, 0), (cx, h - 1)),
+                ((0, cy), (w - 1, cy)),
+            ]
+        )
         points.append((cx, cy))
     elif guide == C.COMPOSITION_GUIDE_DIAGONAL:
-        lines.extend([
-            ((0, 0), (w - 1, h - 1)),
-            ((0, h - 1), (w - 1, 0)),
-        ])
+        lines.extend(
+            [
+                ((0, 0), (w - 1, h - 1)),
+                ((0, h - 1), (w - 1, 0)),
+            ]
+        )
 
     if not lines:
         return out
@@ -109,7 +117,9 @@ def _apply_composition_guides(bgr: np.ndarray, guide: str) -> np.ndarray:
 class RoiSelector(QWidget):
     roiSelected = Signal(QRect)  # screen coords
 
-    def __init__(self, bounds: Optional[QRect] = None, help_text: str = "", as_window: bool = False):
+    def __init__(
+        self, bounds: Optional[QRect] = None, help_text: str = "", as_window: bool = False
+    ):
         super().__init__(None)
         flags = Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
         # 全画面選択時は Window として出し、マルチモニタ全域を覆えるようにする
@@ -128,18 +138,7 @@ class RoiSelector(QWidget):
         self._end_local = QPoint()
 
     def _all_screens_geometry(self) -> QRect:
-        ps = QGuiApplication.primaryScreen()
-        if ps is not None:
-            vg = ps.virtualGeometry()
-            if vg.isValid() and vg.width() > 0 and vg.height() > 0:
-                return vg
-        screens = QGuiApplication.screens()
-        if not screens:
-            return QRect(0, 0, 1920, 1080)
-        rect = screens[0].geometry()
-        for screen in screens[1:]:
-            rect = rect.united(screen.geometry())
-        return rect
+        return screen_union_geometry(available=False)
 
     def _event_local_point(self, event) -> QPoint:
         # Pen displays may report globalPosition with a different scale.
@@ -233,7 +232,11 @@ class RoiSelector(QWidget):
 
             if self._help_text:
                 p.setPen(QColor(255, 255, 255, 200))
-                p.drawText(self.rect().adjusted(12, 10, -12, -10), Qt.AlignTop | Qt.AlignLeft, self._help_text)
+                p.drawText(
+                    self.rect().adjusted(12, 10, -12, -10),
+                    Qt.AlignTop | Qt.AlignLeft,
+                    self._help_text,
+                )
 
             if self._dragging:
                 r = QRect(self._start_local, self._end_local).normalized()
@@ -255,23 +258,77 @@ class RoiSelector(QWidget):
             p.end()
 
 
+def _build_hue180_to_munsell40_weights() -> np.ndarray:
+    """Build overlap weights to resample HSV180 hue bins into 40 equal 9-degree bins.
+
+    This avoids 4/5-bin bias that happens when simply flooring each 2-degree HSV bin.
+    """
+    src_bins = 180
+    dst_bins = len(C.MUNSELL_HUE_LABELS)
+    src_step = 360.0 / float(src_bins)  # 2 deg
+    dst_step = 360.0 / float(dst_bins)  # 9 deg
+
+    weights = np.zeros((dst_bins, src_bins), dtype=np.float32)
+    for src_idx in range(src_bins):
+        src_start = src_idx * src_step
+        src_end = src_start + src_step
+        pos = src_start
+        while pos < src_end - 1e-9:
+            dst_idx = int(math.floor(pos / dst_step)) % dst_bins
+            dst_end = (math.floor(pos / dst_step) + 1.0) * dst_step
+            overlap = min(src_end, dst_end) - pos
+            if overlap <= 0.0:
+                break
+            weights[dst_idx, src_idx] += float(overlap / src_step)
+            pos += overlap
+
+    col_sum = np.sum(weights, axis=0, keepdims=True)
+    col_sum[col_sum <= 0.0] = 1.0
+    return (weights / col_sum).astype(np.float32)
+
+
+HUE180_TO_MUNSELL40_WEIGHTS = _build_hue180_to_munsell40_weights()
+
+
 class ColorWheelWidget(QWidget):
     def __init__(self):
         super().__init__()
         self.setMinimumSize(64, 64)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._hist = np.zeros(180, dtype=np.float32)
-        self._max = 1.0
+        self._mode = C.DEFAULT_WHEEL_MODE
         self._base_ratio = 0.33
         self._min_thickness_ratio = 0.06
 
     def update_hist(self, hist: np.ndarray):
-        hist = hist.astype(np.float32)
-        self._hist = hist
-        self._max = float(hist.max()) if hist.size else 1.0
-        if self._max <= 0:
-            self._max = 1.0
+        self._hist = np.asarray(hist, dtype=np.float32)
         self.update()
+
+    def set_mode(self, mode: str):
+        self._mode = safe_choice(mode, C.WHEEL_MODES, C.DEFAULT_WHEEL_MODE)
+        self.update()
+
+    def _munsell_hist(self) -> np.ndarray:
+        src = np.asarray(self._hist, dtype=np.float32)
+        if src.size != 180:
+            return np.zeros(len(C.MUNSELL_HUE_LABELS), dtype=np.float32)
+        return (HUE180_TO_MUNSELL40_WEIGHTS @ src).astype(np.float32)
+
+    def _wheel_bins(self):
+        mode = safe_choice(self._mode, C.WHEEL_MODES, C.DEFAULT_WHEEL_MODE)
+        if mode == C.WHEEL_MODE_MUNSELL40:
+            counts = self._munsell_hist()
+            colors = [QColor(r, g, b, 255) for (r, g, b) in C.MUNSELL_COLORS_RGB]
+            return counts, colors
+
+        counts = np.asarray(self._hist, dtype=np.float32)
+        colors = []
+        for h in range(180):
+            hue_deg = int((h / 180.0) * 360.0)
+            c = QColor()
+            c.setHsv(hue_deg, 255, 255)
+            colors.append(c)
+        return counts, colors
 
     def paintEvent(self, _):
         p = QPainter(self)
@@ -297,24 +354,32 @@ class ColorWheelWidget(QWidget):
 
             # ヒストグラム風のリング帯を扇形で描画する
             # 角度を少し重ねて、見た目の切れ目を減らす
-            base_thickness = max(2, int(ring_max * max(0.08, self._min_thickness_ratio)))
-            step_deg = 2.0
+            base_thickness = max(2, int(round(ring_max * self._min_thickness_ratio)))
+            counts, colors = self._wheel_bins()
+            n_bins = max(1, int(len(counts)))
+            step_deg = 360.0 / float(n_bins)
             overlap_deg = 0.25
-            for h in range(180):
-                count = float(self._hist[h])
-                norm = min(1.0, count / self._max) if self._max > 0 else 0.0
-                thickness_ratio = self._min_thickness_ratio + (1.0 - self._min_thickness_ratio) * norm
-                thickness = max(base_thickness, int(ring_max * thickness_ratio))
+            local_max = float(np.max(counts)) if counts.size else 0.0
+            if local_max <= 0.0:
+                local_max = 1.0
+            for h in range(n_bins):
+                count = float(counts[h])
+                norm = min(1.0, count / local_max)
+                # 低頻度の色も潰れにくいように、軽いガンマ補正で持ち上げる
+                norm = math.pow(norm, 0.78) if norm > 0.0 else 0.0
+                thickness_ratio = (
+                    self._min_thickness_ratio + (1.0 - self._min_thickness_ratio) * norm
+                )
+                thickness = max(base_thickness, int(round(ring_max * thickness_ratio)))
                 outer_r = inner_r + thickness
-                hue_deg = int((h / 180.0) * 360.0)
-                c = QColor()
-                c.setHsv(hue_deg, 255, 255)
-                alpha = 90 if count <= 0 else 225
+                c = QColor(colors[h])
+                alpha = 36 if count <= 0 else 225
                 c.setAlpha(alpha)
                 p.setPen(Qt.NoPen)
                 p.setBrush(c)
-                start_deg = 90.0 - (h * step_deg) + overlap_deg
-                span_deg = -(step_deg + overlap_deg * 2.0)
+                center_deg = (float(C.COLOR_WHEEL_HUE_OFFSET_DEG) + (h * step_deg)) % 360.0
+                start_deg = center_deg - (step_deg / 2.0) - overlap_deg
+                span_deg = step_deg + overlap_deg * 2.0
                 p.drawPie(
                     int(cx - outer_r),
                     int(cy - outer_r),
@@ -349,15 +414,26 @@ class ScatterRasterWidget(QLabel):
         self.setMinimumSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setStyleSheet("background:#FFFFFF; border:none; color:#222;")
-        self._last_pm: Optional[QPixmap] = None
         self._square_limit = True
         self._last_sv: Optional[np.ndarray] = None
         self._last_rgb: Optional[np.ndarray] = None
         self._shape = "square"  # square | triangle
+        self._point_alpha = float(C.DEFAULT_SCATTER_POINT_ALPHA)
         self._show_scatter_frame_only()
 
     def set_shape(self, shape: str):
         self._shape = "triangle" if shape == "triangle" else "square"
+        if self._last_sv is not None and self._last_rgb is not None:
+            self.update_scatter(self._last_sv, self._last_rgb)
+        else:
+            self._show_scatter_frame_only()
+
+    def set_point_alpha(self, alpha: float):
+        try:
+            a = float(alpha)
+        except Exception:
+            a = C.DEFAULT_SCATTER_POINT_ALPHA
+        self._point_alpha = clamp_float(a, C.SCATTER_POINT_ALPHA_MIN, C.SCATTER_POINT_ALPHA_MAX)
         if self._last_sv is not None and self._last_rgb is not None:
             self.update_scatter(self._last_sv, self._last_rgb)
         else:
@@ -396,9 +472,15 @@ class ScatterRasterWidget(QLabel):
     def _make_scatter_pixmap(self, img: np.ndarray) -> Optional[QPixmap]:
         img = np.flipud(img).copy()
         qimg = QImage(img.data, 256, 256, 256 * 4, QImage.Format_RGBA8888).copy()
-        base_side = min(self.width(), self.height()) if self._square_limit else max(self.width(), self.height())
+        base_side = (
+            min(self.width(), self.height())
+            if self._square_limit
+            else max(self.width(), self.height())
+        )
         target_side, _ = clamp_render_size(base_side, base_side)
-        pm = QPixmap.fromImage(qimg).scaled(target_side, target_side, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        pm = QPixmap.fromImage(qimg).scaled(
+            target_side, target_side, Qt.KeepAspectRatio, Qt.SmoothTransformation
+        )
         if pm.isNull():
             return None
         self._draw_scatter_frame(pm)
@@ -408,7 +490,6 @@ class ScatterRasterWidget(QLabel):
         img = np.zeros((256, 256, 4), dtype=np.uint8)
         pm = self._make_scatter_pixmap(img)
         if pm is not None:
-            self._last_pm = pm
             self.setText("")
             self.setPixmap(pm)
         else:
@@ -422,8 +503,10 @@ class ScatterRasterWidget(QLabel):
             self._show_scatter_frame_only()
             return
 
+        alpha_u8 = np.uint8(np.clip(round(self._point_alpha * 255.0), 0, 255))
+
         def paint_points(x: np.ndarray, y: np.ndarray, colors: np.ndarray):
-            a = np.full((len(x),), 160, dtype=np.uint8)
+            a = np.full((len(x),), alpha_u8, dtype=np.uint8)
             for dy in (0, 1):
                 for dx in (0, 1):
                     yy = np.clip(y + dy, 0, 255)
@@ -478,7 +561,6 @@ class ScatterRasterWidget(QLabel):
             self._show_scatter_frame_only()
             return
 
-        self._last_pm = pm
         self.setText("")
         self.setPixmap(pm)
 
@@ -576,26 +658,42 @@ class ChannelHistogram(QWidget):
             p.drawText(axis_rect, Qt.AlignRight | Qt.AlignVCenter, str(self._max_value))
 
             stats = f"平均 {self._mean:.1f} / 標準偏差 {self._std:.1f}"
-            p.drawText(QRect(plot.left(), plot.bottom() + 20, plot.width(), 18), Qt.AlignCenter | Qt.AlignVCenter, stats)
+            p.drawText(
+                QRect(plot.left(), plot.bottom() + 20, plot.width(), 18),
+                Qt.AlignCenter | Qt.AlignVCenter,
+                stats,
+            )
         finally:
             p.end()
 
 
-class EdgeView(QLabel):
-    def __init__(self):
+_DEFAULT_IMAGE_VIEW_STYLE = "background:#111; border:1px solid #333; color:#AAA;"
+
+
+class _BaseImageLabelView(QLabel):
+    def __init__(self, empty_text: str, style: str = _DEFAULT_IMAGE_VIEW_STYLE):
         super().__init__()
         self.setAlignment(Qt.AlignCenter)
         self.setMinimumSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setStyleSheet("background:#111; border:1px solid #333; color:#AAA;")
-        self._last_bgr: Optional[np.ndarray] = None
-        self._sensitivity = C.DEFAULT_EDGE_SENSITIVITY  # 1..100
+        self.setStyleSheet(style)
+        self._empty_text = empty_text
 
     def minimumSizeHint(self):
         return QSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
 
     def sizeHint(self):
         return QSize(240, 240)
+
+    def _show_empty(self):
+        self.setText(self._empty_text)
+
+
+class EdgeView(_BaseImageLabelView):
+    def __init__(self):
+        super().__init__("エッジ未検出")
+        self._last_bgr: Optional[np.ndarray] = None
+        self._sensitivity = C.DEFAULT_EDGE_SENSITIVITY  # 1..100
 
     def set_sensitivity(self, value: int):
         self._sensitivity = clamp_int(value, C.EDGE_SENSITIVITY_MIN, C.EDGE_SENSITIVITY_MAX)
@@ -605,7 +703,7 @@ class EdgeView(QLabel):
     def update_edge(self, bgr: np.ndarray):
         self._last_bgr = bgr
         if bgr.size == 0:
-            self.setText("エッジ未検出")
+            self._show_empty()
             return
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         gray = resize_by_long_edge(gray, C.ANALYZER_MAX_DIM)
@@ -627,25 +725,15 @@ class EdgeView(QLabel):
             self.update_edge(self._last_bgr)
 
 
-class GrayscaleView(QLabel):
+class GrayscaleView(_BaseImageLabelView):
     def __init__(self):
-        super().__init__()
-        self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setStyleSheet("background:#111; border:1px solid #333; color:#AAA;")
+        super().__init__("グレースケールなし")
         self._last_bgr: Optional[np.ndarray] = None
-
-    def minimumSizeHint(self):
-        return QSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
-
-    def sizeHint(self):
-        return QSize(240, 240)
 
     def update_gray(self, bgr: np.ndarray):
         self._last_bgr = bgr
         if bgr.size == 0:
-            self.setText("グレースケールなし")
+            self._show_empty()
             return
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         pm = gray_to_qpixmap(gray, max_w=self.width(), max_h=self.height())
@@ -657,21 +745,11 @@ class GrayscaleView(QLabel):
             self.update_gray(self._last_bgr)
 
 
-class BinaryView(QLabel):
+class BinaryView(_BaseImageLabelView):
     def __init__(self):
-        super().__init__()
-        self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setStyleSheet("background:#111; border:1px solid #333; color:#AAA;")
+        super().__init__("2値化なし")
         self._last_bgr: Optional[np.ndarray] = None
         self._preset = C.DEFAULT_BINARY_PRESET  # auto | more_white | more_black
-
-    def minimumSizeHint(self):
-        return QSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
-
-    def sizeHint(self):
-        return QSize(240, 240)
 
     def set_preset(self, preset: str):
         self._preset = safe_choice(preset, C.BINARY_PRESETS, C.DEFAULT_BINARY_PRESET)
@@ -681,7 +759,7 @@ class BinaryView(QLabel):
     def update_binary(self, bgr: np.ndarray):
         self._last_bgr = bgr
         if bgr.size == 0:
-            self.setText("2値化なし")
+            self._show_empty()
             return
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         gray = resize_by_long_edge(gray, C.ANALYZER_MAX_DIM)
@@ -703,21 +781,11 @@ class BinaryView(QLabel):
             self.update_binary(self._last_bgr)
 
 
-class TernaryView(QLabel):
+class TernaryView(_BaseImageLabelView):
     def __init__(self):
-        super().__init__()
-        self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setStyleSheet("background:#111; border:1px solid #333; color:#AAA;")
+        super().__init__("3値化なし")
         self._last_bgr: Optional[np.ndarray] = None
         self._preset = C.DEFAULT_TERNARY_PRESET  # standard | soft | strong
-
-    def minimumSizeHint(self):
-        return QSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
-
-    def sizeHint(self):
-        return QSize(240, 240)
 
     def set_preset(self, preset: str):
         self._preset = safe_choice(preset, C.TERNARY_PRESETS, C.DEFAULT_TERNARY_PRESET)
@@ -727,7 +795,7 @@ class TernaryView(QLabel):
     def update_ternary(self, bgr: np.ndarray):
         self._last_bgr = bgr
         if bgr.size == 0:
-            self.setText("3値化なし")
+            self._show_empty()
             return
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
         gray = resize_by_long_edge(gray, C.ANALYZER_MAX_DIM)
@@ -757,13 +825,9 @@ class TernaryView(QLabel):
             self.update_ternary(self._last_bgr)
 
 
-class SaliencyView(QLabel):
+class SaliencyView(_BaseImageLabelView):
     def __init__(self):
-        super().__init__()
-        self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setStyleSheet("background:#111; border:1px solid #333; color:#AAA;")
+        super().__init__("サリエンシーなし")
         self._last_bgr: Optional[np.ndarray] = None
         self._last_saliency: Optional[np.ndarray] = None
         self._last_overlay_rgba: Optional[np.ndarray] = None
@@ -771,12 +835,6 @@ class SaliencyView(QLabel):
         self._guide = C.DEFAULT_COMPOSITION_GUIDE  # none | thirds | center | diagonal
         self._sr_detector = None
         self._sr_detector_ready = False
-
-    def minimumSizeHint(self):
-        return QSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
-
-    def sizeHint(self):
-        return QSize(240, 240)
 
     def set_overlay_alpha(self, value: int):
         self._overlay_alpha = clamp_int(value, C.SALIENCY_ALPHA_MIN, C.SALIENCY_ALPHA_MAX)
@@ -802,7 +860,9 @@ class SaliencyView(QLabel):
         if not self._sr_detector_ready:
             self._sr_detector_ready = True
             try:
-                if hasattr(cv2, "saliency") and hasattr(cv2.saliency, "StaticSaliencySpectralResidual_create"):
+                if hasattr(cv2, "saliency") and hasattr(
+                    cv2.saliency, "StaticSaliencySpectralResidual_create"
+                ):
                     self._sr_detector = cv2.saliency.StaticSaliencySpectralResidual_create()
             except Exception:
                 self._sr_detector = None
@@ -858,13 +918,15 @@ class SaliencyView(QLabel):
         sal_u8 = np.clip(np.round(saliency * 255.0), 0, 255).astype(np.uint8)
         heat_bgr = cv2.applyColorMap(sal_u8, cv2.COLORMAP_JET)
         heat_rgb = cv2.cvtColor(heat_bgr, cv2.COLOR_BGR2RGB)
-        alpha = np.clip(np.round(saliency * (self._overlay_alpha / 100.0) * 255.0), 0, 255).astype(np.uint8)
+        alpha = np.clip(np.round(saliency * (self._overlay_alpha / 100.0) * 255.0), 0, 255).astype(
+            np.uint8
+        )
         return np.dstack([heat_rgb, alpha])
 
     def update_saliency(self, bgr: np.ndarray):
         self._last_bgr = bgr
         if bgr.size == 0:
-            self.setText("サリエンシーなし")
+            self._show_empty()
             return
 
         try:
@@ -875,7 +937,9 @@ class SaliencyView(QLabel):
         self._last_saliency = saliency
         self._last_overlay_rgba = self._make_overlay_rgba(saliency)
 
-        overlay_bgr = cv2.cvtColor(self._last_overlay_rgba[:, :, :3], cv2.COLOR_RGB2BGR).astype(np.float32)
+        overlay_bgr = cv2.cvtColor(self._last_overlay_rgba[:, :, :3], cv2.COLOR_RGB2BGR).astype(
+            np.float32
+        )
         alpha = (self._last_overlay_rgba[:, :, 3].astype(np.float32) / 255.0)[:, :, None]
         # 元画像をグレースケール化して残差を見やすくする
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
@@ -893,26 +957,18 @@ class SaliencyView(QLabel):
             self.update_saliency(self._last_bgr)
 
 
-class FocusPeakingView(QLabel):
+class FocusPeakingView(_BaseImageLabelView):
     def __init__(self):
-        super().__init__()
-        self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setStyleSheet("background:#111; border:1px solid #333; color:#AAA;")
+        super().__init__("フォーカスピーキングなし")
         self._last_bgr: Optional[np.ndarray] = None
         self._sensitivity = C.DEFAULT_FOCUS_PEAK_SENSITIVITY
         self._color = C.DEFAULT_FOCUS_PEAK_COLOR
         self._thickness = C.DEFAULT_FOCUS_PEAK_THICKNESS
 
-    def minimumSizeHint(self):
-        return QSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
-
-    def sizeHint(self):
-        return QSize(240, 240)
-
     def set_sensitivity(self, value: int):
-        self._sensitivity = clamp_int(value, C.FOCUS_PEAK_SENSITIVITY_MIN, C.FOCUS_PEAK_SENSITIVITY_MAX)
+        self._sensitivity = clamp_int(
+            value, C.FOCUS_PEAK_SENSITIVITY_MIN, C.FOCUS_PEAK_SENSITIVITY_MAX
+        )
         if self._last_bgr is not None:
             self.update_focus(self._last_bgr)
 
@@ -922,7 +978,7 @@ class FocusPeakingView(QLabel):
             self.update_focus(self._last_bgr)
 
     def set_thickness(self, value: float):
-        self._thickness = max(C.FOCUS_PEAK_THICKNESS_MIN, min(C.FOCUS_PEAK_THICKNESS_MAX, float(value)))
+        self._thickness = clamp_float(value, C.FOCUS_PEAK_THICKNESS_MIN, C.FOCUS_PEAK_THICKNESS_MAX)
         if self._last_bgr is not None:
             self.update_focus(self._last_bgr)
 
@@ -952,7 +1008,7 @@ class FocusPeakingView(QLabel):
     def update_focus(self, bgr: np.ndarray):
         self._last_bgr = bgr
         if bgr.size == 0:
-            self.setText("フォーカスピーキングなし")
+            self._show_empty()
             return
 
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
@@ -961,7 +1017,9 @@ class FocusPeakingView(QLabel):
 
         base = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR).astype(np.float32) * 0.72
         color = np.array(
-            C.FOCUS_PEAK_COLOR_BGR.get(self._color, C.FOCUS_PEAK_COLOR_BGR[C.DEFAULT_FOCUS_PEAK_COLOR]),
+            C.FOCUS_PEAK_COLOR_BGR.get(
+                self._color, C.FOCUS_PEAK_COLOR_BGR[C.DEFAULT_FOCUS_PEAK_COLOR]
+            ),
             dtype=np.float32,
         ).reshape(1, 1, 3)
         sigma = max(0.5, 0.35 + float(self._thickness) * 0.45)
@@ -978,23 +1036,13 @@ class FocusPeakingView(QLabel):
             self.update_focus(self._last_bgr)
 
 
-class SquintView(QLabel):
+class SquintView(_BaseImageLabelView):
     def __init__(self):
-        super().__init__()
-        self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setStyleSheet("background:#111; border:1px solid #333; color:#AAA;")
+        super().__init__("スクイントなし")
         self._last_bgr: Optional[np.ndarray] = None
         self._mode = C.DEFAULT_SQUINT_MODE
         self._scale_percent = C.DEFAULT_SQUINT_SCALE_PERCENT
         self._blur_sigma = C.DEFAULT_SQUINT_BLUR_SIGMA
-
-    def minimumSizeHint(self):
-        return QSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
-
-    def sizeHint(self):
-        return QSize(240, 240)
 
     def set_mode(self, mode: str):
         self._mode = safe_choice(mode, C.SQUINT_MODES, C.DEFAULT_SQUINT_MODE)
@@ -1002,17 +1050,22 @@ class SquintView(QLabel):
             self.update_squint(self._last_bgr)
 
     def set_scale_percent(self, value: int):
-        self._scale_percent = clamp_int(value, C.SQUINT_SCALE_PERCENT_MIN, C.SQUINT_SCALE_PERCENT_MAX)
+        self._scale_percent = clamp_int(
+            value, C.SQUINT_SCALE_PERCENT_MIN, C.SQUINT_SCALE_PERCENT_MAX
+        )
         if self._last_bgr is not None:
             self.update_squint(self._last_bgr)
 
     def set_blur_sigma(self, value: float):
-        self._blur_sigma = max(C.SQUINT_BLUR_SIGMA_MIN, min(C.SQUINT_BLUR_SIGMA_MAX, float(value)))
+        self._blur_sigma = clamp_float(value, C.SQUINT_BLUR_SIGMA_MIN, C.SQUINT_BLUR_SIGMA_MAX)
         if self._last_bgr is not None:
             self.update_squint(self._last_bgr)
 
     def _apply_scale_up(self, bgr: np.ndarray) -> np.ndarray:
-        ratio = max(C.SQUINT_SCALE_PERCENT_MIN, min(C.SQUINT_SCALE_PERCENT_MAX, int(self._scale_percent))) / 100.0
+        ratio = (
+            clamp_int(self._scale_percent, C.SQUINT_SCALE_PERCENT_MIN, C.SQUINT_SCALE_PERCENT_MAX)
+            / 100.0
+        )
         if ratio >= 0.999:
             return bgr.copy()
         h, w = bgr.shape[:2]
@@ -1022,7 +1075,7 @@ class SquintView(QLabel):
         return cv2.resize(small, (w, h), interpolation=cv2.INTER_LINEAR)
 
     def _apply_blur(self, bgr: np.ndarray) -> np.ndarray:
-        sigma = max(C.SQUINT_BLUR_SIGMA_MIN, min(C.SQUINT_BLUR_SIGMA_MAX, float(self._blur_sigma)))
+        sigma = clamp_float(self._blur_sigma, C.SQUINT_BLUR_SIGMA_MIN, C.SQUINT_BLUR_SIGMA_MAX)
         if sigma <= 0.001:
             return bgr
         return cv2.GaussianBlur(bgr, (0, 0), sigmaX=sigma, sigmaY=sigma)
@@ -1030,7 +1083,7 @@ class SquintView(QLabel):
     def update_squint(self, bgr: np.ndarray):
         self._last_bgr = bgr
         if bgr.size == 0:
-            self.setText("スクイントなし")
+            self._show_empty()
             return
 
         src = resize_by_long_edge(bgr, C.ANALYZER_MAX_DIM)
@@ -1051,51 +1104,129 @@ class SquintView(QLabel):
             self.update_squint(self._last_bgr)
 
 
-class VectorScopeView(QLabel):
+class VectorScopeView(_BaseImageLabelView):
     def __init__(self):
-        super().__init__()
-        self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
-        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setStyleSheet("background:#111; border:1px solid #333; color:#AAA;")
+        super().__init__(
+            "ベクトルスコープなし",
+            style="background:#0d1015; border:1px solid #2c3440; color:#9aa7ba;",
+        )
         self._last_bgr: Optional[np.ndarray] = None
         self._show_skin_tone_line = C.DEFAULT_VECTORSCOPE_SHOW_SKIN_LINE
-
-    def minimumSizeHint(self):
-        return QSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
-
-    def sizeHint(self):
-        return QSize(240, 240)
+        self._warn_threshold = C.DEFAULT_VECTORSCOPE_WARN_THRESHOLD
+        self._last_high_sat_ratio = 0.0
 
     def set_show_skin_tone_line(self, enabled: bool):
         self._show_skin_tone_line = bool(enabled)
         if self._last_bgr is not None:
             self.update_scope(self._last_bgr)
 
-    def _background(self, size: int) -> np.ndarray:
-        bg = np.full((size, size, 3), 10, dtype=np.uint8)
+    def set_warn_threshold(self, value: int):
+        self._warn_threshold = clamp_int(
+            value, C.VECTORSCOPE_WARN_THRESHOLD_MIN, C.VECTORSCOPE_WARN_THRESHOLD_MAX
+        )
+        if self._last_bgr is not None:
+            self.update_scope(self._last_bgr)
+
+    def high_saturation_ratio(self) -> float:
+        return float(self._last_high_sat_ratio)
+
+    def _render_size(self) -> int:
+        # 表示サイズに追従して描画解像度を上げ、拡大ぼけを抑える
+        target = min(self.width(), self.height())
+        target = clamp_int(target, max(160, C.VECTORSCOPE_SIZE), 640)
+        return int(target)
+
+    def _scope_geometry(self, size: int):
         cx = (size - 1) // 2
         cy = (size - 1) // 2
-        radius = max(8, int(round(size * 0.46)))
-        cv2.rectangle(bg, (0, 0), (size - 1, size - 1), (26, 26, 26), 1, cv2.LINE_AA)
-        for ratio in (0.25, 0.5, 0.75, 1.0):
+        radius = max(8, int(round(size * float(C.VECTORSCOPE_SCOPE_RADIUS_RATIO))))
+        full = max(1.0, float(C.VECTORSCOPE_CHROMA_FULL_SCALE))
+        scale = radius / full
+        return cx, cy, radius, scale
+
+    def _scope_mask(self, size: int) -> np.ndarray:
+        cx, cy, radius, _ = self._scope_geometry(size)
+        yy, xx = np.ogrid[:size, :size]
+        return ((xx - cx) * (xx - cx) + (yy - cy) * (yy - cy)) <= (radius * radius)
+
+    def _angle_point(
+        self, size: int, angle_deg: float, radius_ratio: float = 1.0
+    ) -> tuple[int, int]:
+        cx, cy, radius, _ = self._scope_geometry(size)
+        angle = math.radians(float(angle_deg) % 360.0)
+        rr = radius * float(radius_ratio)
+        x = int(round(cx + math.cos(angle) * rr))
+        y = int(round(cy - math.sin(angle) * rr))
+        return x, y
+
+    def _ref_angle_from_bgr(self, bgr_color: tuple[int, int, int]) -> float:
+        ref = np.array([[bgr_color]], dtype=np.uint8)
+        yuv = cv2.cvtColor(ref, cv2.COLOR_BGR2YUV)[0, 0]
+        u = float(yuv[1]) - 128.0
+        v = float(yuv[2]) - 128.0
+        return (math.degrees(math.atan2(v, u)) + 360.0) % 360.0
+
+    def _reference_vectors(self):
+        refs = (
+            ("R", (0, 0, 255), (70, 70, 255)),
+            ("Y", (0, 255, 255), (30, 220, 255)),
+            ("G", (0, 255, 0), (70, 230, 120)),
+            ("C", (255, 255, 0), (235, 220, 100)),
+            ("B", (255, 0, 0), (255, 140, 90)),
+            ("M", (255, 0, 255), (245, 110, 220)),
+        )
+        return [(label, self._ref_angle_from_bgr(ref_bgr), color) for label, ref_bgr, color in refs]
+
+    def _background(self, size: int) -> np.ndarray:
+        bg = np.full((size, size, 3), (8, 10, 13), dtype=np.uint8)
+        cx, cy, radius, _ = self._scope_geometry(size)
+        mask = self._scope_mask(size)
+        bg[mask] = (12, 16, 22)
+        cv2.rectangle(bg, (0, 0), (size - 1, size - 1), (28, 34, 42), 1, cv2.LINE_AA)
+
+        # グリッドは控えめにして、信号を見やすくする
+        for ratio in (0.25, 0.5, 0.75):
             rr = max(1, int(round(radius * ratio)))
-            cv2.circle(bg, (cx, cy), rr, (40, 40, 40), 1, cv2.LINE_AA)
-        cv2.line(bg, (cx, 0), (cx, size - 1), (52, 52, 52), 1, cv2.LINE_AA)
-        cv2.line(bg, (0, cy), (size - 1, cy), (52, 52, 52), 1, cv2.LINE_AA)
-        cv2.circle(bg, (cx, cy), 1, (105, 105, 105), -1, cv2.LINE_AA)
+            cv2.circle(bg, (cx, cy), rr, (42, 50, 60), 1, cv2.LINE_AA)
+        cv2.circle(bg, (cx, cy), radius, (74, 86, 102), 1, cv2.LINE_AA)
+        cv2.line(bg, (cx - radius, cy), (cx + radius, cy), (54, 62, 74), 1, cv2.LINE_AA)
+        cv2.line(bg, (cx, cy - radius), (cx, cy + radius), (54, 62, 74), 1, cv2.LINE_AA)
+        for _label, angle, _color in self._reference_vectors():
+            px, py = self._angle_point(size, angle, 1.0)
+            cv2.line(bg, (cx, cy), (px, py), (35, 42, 51), 1, cv2.LINE_AA)
+        cv2.circle(bg, (cx, cy), 1, (120, 130, 142), -1, cv2.LINE_AA)
         return bg
+
+    def _draw_saturation_guide(self, view: np.ndarray):
+        size = view.shape[0]
+        cx, cy, radius, _ = self._scope_geometry(size)
+        rr = max(2, int(round(radius * (self._warn_threshold / 100.0))))
+        cv2.circle(view, (cx, cy), rr, (28, 36, 50), 2, cv2.LINE_AA)
+        cv2.circle(view, (cx, cy), rr, (124, 142, 166), 1, cv2.LINE_AA)
+
+    def _draw_color_direction_legend(self, view: np.ndarray):
+        size = view.shape[0]
+        for label, angle, color in self._reference_vectors():
+            x, y = self._angle_point(size, angle, 1.0)
+            tx, ty = self._angle_point(size, angle, 1.14)
+            tx = clamp_int(tx, 2, size - 16)
+            ty = clamp_int(ty, 10, size - 3)
+            cv2.circle(view, (x, y), 2, color, -1, cv2.LINE_AA)
+            cv2.putText(
+                view, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.34, (0, 0, 0), 2, cv2.LINE_AA
+            )
+            cv2.putText(
+                view, label, (tx, ty), cv2.FONT_HERSHEY_SIMPLEX, 0.34, color, 1, cv2.LINE_AA
+            )
 
     def _draw_skin_tone_line(self, view: np.ndarray):
         if not self._show_skin_tone_line:
             return
         size = view.shape[0]
-        cx = (size - 1) // 2
-        cy = (size - 1) // 2
-        radius = max(8, int(round(size * 0.46)))
+        cx, cy, radius, _ = self._scope_geometry(size)
         angle = math.radians(float(C.VECTORSCOPE_SKIN_LINE_ANGLE_DEG))
-        r1 = int(round(radius * float(C.VECTORSCOPE_SKIN_LINE_INNER_RATIO)))
-        r2 = int(round(radius * float(C.VECTORSCOPE_SKIN_LINE_OUTER_RATIO)))
+        r1 = 0
+        r2 = radius
         p1 = (
             int(round(cx + math.cos(angle) * r1)),
             int(round(cy - math.sin(angle) * r1)),
@@ -1104,37 +1235,69 @@ class VectorScopeView(QLabel):
             int(round(cx + math.cos(angle) * r2)),
             int(round(cy - math.sin(angle) * r2)),
         )
-        cv2.line(view, p1, p2, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.line(view, p1, p2, (20, 170, 255), 1, cv2.LINE_AA)
+        cv2.line(view, p1, p2, (30, 38, 52), 2, cv2.LINE_AA)
+        cv2.line(view, p1, p2, (132, 166, 202), 1, cv2.LINE_AA)
 
     def update_scope(self, bgr: np.ndarray):
         self._last_bgr = bgr
         if bgr.size == 0:
-            self.setText("ベクトルスコープなし")
+            self._last_high_sat_ratio = 0.0
+            self._show_empty()
             return
 
         src = resize_by_long_edge(bgr, C.ANALYZER_MAX_DIM)
         yuv = cv2.cvtColor(src, cv2.COLOR_BGR2YUV)
-        u = yuv[:, :, 1].astype(np.float32)
-        v = yuv[:, :, 2].astype(np.float32)
+        u = yuv[:, :, 1].astype(np.float32) - 128.0
+        v = yuv[:, :, 2].astype(np.float32) - 128.0
 
-        size = max(64, int(C.VECTORSCOPE_SIZE))
-        scale = (size - 1) / 255.0
-        xs = np.clip(np.round(u * scale), 0, size - 1).astype(np.int32)
-        ys = np.clip(np.round((255.0 - v) * scale), 0, size - 1).astype(np.int32)
+        size = max(64, self._render_size())
+        cx, cy, _radius, scale = self._scope_geometry(size)
+        scope_mask = self._scope_mask(size)
+        xs = np.round(cx + u * scale).astype(np.int32)
+        ys = np.round(cy - v * scale).astype(np.int32)
+        valid = (xs >= 0) & (xs < size) & (ys >= 0) & (ys < size)
+        if np.any(valid):
+            inside = np.zeros_like(valid, dtype=bool)
+            inside[valid] = scope_mask[ys[valid], xs[valid]]
+            valid &= inside
 
         hist = np.zeros((size, size), dtype=np.float32)
-        np.add.at(hist, (ys.ravel(), xs.ravel()), 1.0)
-        hist = cv2.GaussianBlur(hist, (0, 0), 0.8)
+        if np.any(valid):
+            np.add.at(hist, (ys[valid], xs[valid]), 1.0)
+        hist = cv2.GaussianBlur(hist, (0, 0), 1.0)
         density = _normalize_map(np.log1p(hist))
 
-        heat_u8 = np.clip(np.round(density * 255.0), 0, 255).astype(np.uint8)
-        colormap = cv2.COLORMAP_TURBO if hasattr(cv2, "COLORMAP_TURBO") else cv2.COLORMAP_JET
-        heat = cv2.applyColorMap(heat_u8, colormap)
         base = self._background(size).astype(np.float32)
-        alpha = np.clip(density[:, :, None] * 1.25, 0.0, 1.0)
-        view = np.clip(base * (1.0 - alpha) + heat.astype(np.float32) * alpha, 0, 255).astype(np.uint8)
+        energy = np.power(density, 0.62)
+        glow = cv2.GaussianBlur(energy, (0, 0), 1.3)
+        layer = np.zeros((size, size, 3), dtype=np.float32)
+        layer[:, :, 0] = 255.0 * glow * 0.90
+        layer[:, :, 1] = 255.0 * glow * 0.95
+        layer[:, :, 2] = 255.0 * energy * 0.88
+        view_f = np.clip(base + layer, 0, 255)
+        view_f[~scope_mask] = base[~scope_mask]
+
+        # しきい値を超える高彩度域を控えめに警告する
+        thr = float(self._warn_threshold) / 100.0 * float(C.VECTORSCOPE_CHROMA_FULL_SCALE)
+        sat = np.sqrt(u * u + v * v)
+        over = valid & (sat >= thr)
+        if np.any(over):
+            over_hist = np.zeros((size, size), dtype=np.float32)
+            np.add.at(over_hist, (ys[over], xs[over]), 1.0)
+            over_hist = cv2.GaussianBlur(over_hist, (0, 0), 1.0)
+            over_density = _normalize_map(np.log1p(over_hist))
+            over_alpha = np.clip(over_density[:, :, None] * 0.55, 0.0, 0.55)
+            warn_color = np.array(C.VECTORSCOPE_WARN_COLOR_BGR, dtype=np.float32).reshape(1, 1, 3)
+            view_f = np.clip(view_f * (1.0 - over_alpha) + warn_color * over_alpha, 0, 255)
+
+        view = view_f.astype(np.uint8)
+        total_valid = int(np.count_nonzero(valid))
+        over_count = int(np.count_nonzero(over))
+        self._last_high_sat_ratio = (over_count * 100.0 / total_valid) if total_valid > 0 else 0.0
+
+        self._draw_saturation_guide(view)
         self._draw_skin_tone_line(view)
+        self._draw_color_direction_legend(view)
 
         pm = bgr_to_qpixmap(view, max_w=self.width(), max_h=self.height())
         self.setPixmap(pm)

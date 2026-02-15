@@ -1,58 +1,63 @@
 import sys
+from pathlib import Path
 
-from PySide6.QtCore import Qt, QRect, QTimer, QEvent
-from PySide6.QtGui import QGuiApplication, QCursor
+from PySide6.QtCore import QEvent, QRect, Qt, QThread, QTimer
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (
+    QAbstractSpinBox,
     QApplication,
     QCheckBox,
     QComboBox,
+    QDialog,
+    QDockWidget,
     QDoubleSpinBox,
-    QAbstractSpinBox,
+    QFileDialog,
     QHBoxLayout,
     QLabel,
+    QLineEdit,
+    QListWidget,
     QMainWindow,
+    QMenuBar,
     QMessageBox,
+    QProgressDialog,
     QPushButton,
+    QSizePolicy,
     QSpinBox,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
-    QSizePolicy,
-    QDockWidget,
-    QMenuBar,
-    QDialog,
-    QListWidget,
-    QStackedWidget,
-    QLineEdit,
 )
 
-from .analyzer import AnalyzerWorker, HAS_WIN32, list_windows
+from .analyzer import HAS_WIN32, AnalyzerWorker, ImageFileAnalyzeWorker, list_windows
+from .util import constants as C
+from .util.config import load_config, save_config
 from .util.functions import (
     blocked_signals,
+    clamp_float,
     clamp_int,
+    render_top_color_bar,
     safe_choice,
+    screen_union_geometry,
     set_checked_blocked,
     set_combobox_data_blocked,
     set_current_index_blocked,
     set_value_blocked,
     top_hue_bars,
-    render_top_color_bar,
 )
-from .util import constants as C
-from .util.config import load_config, save_config
-from .util.layout_state import capture_layout_state, apply_layout_state
+from .util.layout_state import apply_layout_state, capture_layout_state
 from .widgets import (
-    ColorWheelWidget,
-    ScatterRasterWidget,
+    BinaryView,
     ChannelHistogram,
+    ColorWheelWidget,
+    EdgeView,
+    FocusPeakingView,
+    GrayscaleView,
     PreviewWindow,
     RoiSelector,
-    EdgeView,
-    GrayscaleView,
-    BinaryView,
-    TernaryView,
     SaliencyView,
-    FocusPeakingView,
+    ScatterRasterWidget,
     SquintView,
+    TernaryView,
     VectorScopeView,
 )
 
@@ -69,12 +74,13 @@ def _make_labeled_row(label_text: str, widget: QWidget) -> QWidget:
 SETTINGS_PAGE_CAPTURE = 0
 SETTINGS_PAGE_UPDATE = 1
 SETTINGS_PAGE_SCATTER = 2
-SETTINGS_PAGE_IMAGE = 3
-SETTINGS_PAGE_SALIENCY = 4
-SETTINGS_PAGE_FOCUS = 5
-SETTINGS_PAGE_SQUINT = 6
-SETTINGS_PAGE_VECTORSCOPE = 7
-SETTINGS_PAGE_LAYOUT = 8
+SETTINGS_PAGE_WHEEL = 3
+SETTINGS_PAGE_IMAGE = 4
+SETTINGS_PAGE_SALIENCY = 5
+SETTINGS_PAGE_FOCUS = 6
+SETTINGS_PAGE_SQUINT = 7
+SETTINGS_PAGE_VECTORSCOPE = 8
+SETTINGS_PAGE_LAYOUT = 9
 
 
 class MainWindow(QMainWindow):
@@ -87,7 +93,9 @@ class MainWindow(QMainWindow):
         self._layout_save_timer = QTimer(self)
         self._layout_save_timer.setSingleShot(True)
         self._layout_save_timer.setInterval(600)
-        self._layout_save_timer.timeout.connect(lambda: self.save_current_layout_to_config(silent=True))
+        self._layout_save_timer.timeout.connect(
+            lambda: self.save_current_layout_to_config(silent=True)
+        )
         self._fit_window_timer = QTimer(self)
         self._fit_window_timer.setSingleShot(True)
         self._fit_window_timer.setInterval(80)
@@ -98,10 +106,14 @@ class MainWindow(QMainWindow):
         self._dock_rebalance_timer.timeout.connect(self._rebalance_dock_layout)
 
         self._roi_selector = None
+        self._roi_selectors = []
 
         self.worker = AnalyzerWorker()
         self.worker.resultReady.connect(self.on_result)
         self.worker.status.connect(self.on_status)
+        self._image_thread = None
+        self._image_worker = None
+        self._image_progress = None
 
         # Controls
         self.btn_refresh = QPushButton("ウィンドウ一覧更新")
@@ -120,12 +132,28 @@ class MainWindow(QMainWindow):
         self.spin_interval.setMinimumHeight(28)
 
         self.spin_points = QSpinBox()
-        self.spin_points.setRange(C.ANALYZER_MIN_SAMPLE_POINTS, 60000)
+        self.spin_points.setRange(C.ANALYZER_MIN_SAMPLE_POINTS, C.ANALYZER_MAX_SAMPLE_POINTS)
         self.spin_points.setSingleStep(500)
         self.spin_points.setValue(C.DEFAULT_SAMPLE_POINTS)
         self.spin_points.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
         self.spin_points.setMinimumWidth(110)
         self.spin_points.setMinimumHeight(28)
+        self.spin_scatter_alpha = QDoubleSpinBox()
+        self.spin_scatter_alpha.setRange(C.SCATTER_POINT_ALPHA_MIN, C.SCATTER_POINT_ALPHA_MAX)
+        self.spin_scatter_alpha.setSingleStep(C.SCATTER_POINT_ALPHA_STEP)
+        self.spin_scatter_alpha.setDecimals(2)
+        self.spin_scatter_alpha.setValue(C.DEFAULT_SCATTER_POINT_ALPHA)
+        self.spin_scatter_alpha.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
+        self.spin_scatter_alpha.setMinimumWidth(110)
+        self.spin_scatter_alpha.setMinimumHeight(28)
+        self.spin_analysis_max_dim = QSpinBox()
+        self.spin_analysis_max_dim.setRange(C.ANALYZER_MAX_DIM_MIN, C.ANALYZER_MAX_DIM_MAX)
+        self.spin_analysis_max_dim.setSingleStep(C.ANALYZER_MAX_DIM_STEP)
+        self.spin_analysis_max_dim.setValue(C.ANALYZER_MAX_DIM)
+        self.spin_analysis_max_dim.setSuffix(" px")
+        self.spin_analysis_max_dim.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
+        self.spin_analysis_max_dim.setMinimumWidth(110)
+        self.spin_analysis_max_dim.setMinimumHeight(28)
 
         self.combo_capture_source = QComboBox()
         self.combo_capture_source.addItem("ウィンドウを選んで取得", C.CAPTURE_SOURCE_WINDOW)
@@ -134,6 +162,17 @@ class MainWindow(QMainWindow):
         self.combo_scatter_shape = QComboBox()
         self.combo_scatter_shape.addItem("四角", C.SCATTER_SHAPE_SQUARE)
         self.combo_scatter_shape.addItem("三角", C.SCATTER_SHAPE_TRIANGLE)
+        self.combo_wheel_mode = QComboBox()
+        self.combo_wheel_mode.addItem("HSV 180ビン", C.WHEEL_MODE_HSV180)
+        self.combo_wheel_mode.addItem("マンセル基準（40色相）", C.WHEEL_MODE_MUNSELL40)
+        self.spin_wheel_sat_threshold = QSpinBox()
+        self.spin_wheel_sat_threshold.setRange(C.WHEEL_SAT_THRESHOLD_MIN, C.WHEEL_SAT_THRESHOLD_MAX)
+        self.spin_wheel_sat_threshold.setValue(C.DEFAULT_WHEEL_SAT_THRESHOLD)
+        self.spin_wheel_sat_threshold.setSingleStep(1)
+        self.spin_wheel_sat_threshold.setSuffix(" / 255")
+        self.spin_wheel_sat_threshold.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
+        self.spin_wheel_sat_threshold.setMinimumWidth(110)
+        self.spin_wheel_sat_threshold.setMinimumHeight(28)
 
         self.combo_mode = QComboBox()
         self.combo_mode.addItem("一定間隔で更新", C.UPDATE_MODE_INTERVAL)
@@ -180,7 +219,9 @@ class MainWindow(QMainWindow):
         self.combo_composition_guide.addItem("中央クロス", C.COMPOSITION_GUIDE_CENTER)
         self.combo_composition_guide.addItem("対角線", C.COMPOSITION_GUIDE_DIAGONAL)
         self.spin_focus_peak_sensitivity = QSpinBox()
-        self.spin_focus_peak_sensitivity.setRange(C.FOCUS_PEAK_SENSITIVITY_MIN, C.FOCUS_PEAK_SENSITIVITY_MAX)
+        self.spin_focus_peak_sensitivity.setRange(
+            C.FOCUS_PEAK_SENSITIVITY_MIN, C.FOCUS_PEAK_SENSITIVITY_MAX
+        )
         self.spin_focus_peak_sensitivity.setValue(C.DEFAULT_FOCUS_PEAK_SENSITIVITY)
         self.spin_focus_peak_sensitivity.setSuffix(" / 100")
         self.spin_focus_peak_sensitivity.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
@@ -192,7 +233,9 @@ class MainWindow(QMainWindow):
         self.combo_focus_peak_color.addItem("イエロー", C.FOCUS_PEAK_COLOR_YELLOW)
         self.combo_focus_peak_color.addItem("レッド", C.FOCUS_PEAK_COLOR_RED)
         self.spin_focus_peak_thickness = QDoubleSpinBox()
-        self.spin_focus_peak_thickness.setRange(C.FOCUS_PEAK_THICKNESS_MIN, C.FOCUS_PEAK_THICKNESS_MAX)
+        self.spin_focus_peak_thickness.setRange(
+            C.FOCUS_PEAK_THICKNESS_MIN, C.FOCUS_PEAK_THICKNESS_MAX
+        )
         self.spin_focus_peak_thickness.setValue(C.DEFAULT_FOCUS_PEAK_THICKNESS)
         self.spin_focus_peak_thickness.setDecimals(1)
         self.spin_focus_peak_thickness.setSingleStep(C.FOCUS_PEAK_THICKNESS_STEP)
@@ -222,6 +265,16 @@ class MainWindow(QMainWindow):
         self.spin_squint_blur.setMinimumHeight(28)
         self.chk_vectorscope_skin_line = QCheckBox("スキントーンラインを表示")
         self.chk_vectorscope_skin_line.setChecked(C.DEFAULT_VECTORSCOPE_SHOW_SKIN_LINE)
+        self.spin_vectorscope_warn_threshold = QSpinBox()
+        self.spin_vectorscope_warn_threshold.setRange(
+            C.VECTORSCOPE_WARN_THRESHOLD_MIN,
+            C.VECTORSCOPE_WARN_THRESHOLD_MAX,
+        )
+        self.spin_vectorscope_warn_threshold.setValue(C.DEFAULT_VECTORSCOPE_WARN_THRESHOLD)
+        self.spin_vectorscope_warn_threshold.setSuffix(" %")
+        self.spin_vectorscope_warn_threshold.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
+        self.spin_vectorscope_warn_threshold.setMinimumWidth(110)
+        self.spin_vectorscope_warn_threshold.setMinimumHeight(28)
 
         self.chk_preview_window = QCheckBox("領域プレビュー")
         self.chk_preview_window.setChecked(C.DEFAULT_PREVIEW_WINDOW)
@@ -233,10 +286,6 @@ class MainWindow(QMainWindow):
         self.btn_load_preset = QPushButton("適用")
         self.btn_delete_preset = QPushButton("削除")
         self._row_target_settings = None
-        self._row_capture_source_settings = None
-        self._row_interval_controls = None
-        self._row_diff_controls = None
-        self._row_stable_controls = None
         self._row_interval_settings = None
         self._row_diff_settings = None
         self._row_stable_settings = None
@@ -252,8 +301,12 @@ class MainWindow(QMainWindow):
         self.btn_pick_roi_screen.clicked.connect(self.pick_roi_on_screen)
         self.combo_capture_source.currentIndexChanged.connect(self.apply_capture_source)
         self.spin_interval.valueChanged.connect(lambda v: self.worker.set_interval(float(v)))
-        self.spin_points.valueChanged.connect(lambda v: self.worker.set_sample_points(int(v)))
-        self.combo_scatter_shape.currentIndexChanged.connect(self.apply_scatter_shape)
+        self.spin_points.valueChanged.connect(self.apply_sample_points_settings)
+        self.spin_analysis_max_dim.valueChanged.connect(self.apply_analysis_resolution_settings)
+        self.combo_scatter_shape.currentIndexChanged.connect(self.apply_scatter_settings)
+        self.spin_scatter_alpha.valueChanged.connect(self.apply_scatter_settings)
+        self.combo_wheel_mode.currentIndexChanged.connect(self.apply_wheel_settings)
+        self.spin_wheel_sat_threshold.valueChanged.connect(self.apply_wheel_settings)
         self.combo_mode.currentIndexChanged.connect(lambda _: self.apply_mode_settings())
         self.spin_diff.valueChanged.connect(lambda _: self.apply_mode_settings())
         self.spin_stable.valueChanged.connect(lambda _: self.apply_mode_settings())
@@ -261,7 +314,9 @@ class MainWindow(QMainWindow):
         self.combo_binary_preset.currentIndexChanged.connect(self.apply_binary_settings)
         self.combo_ternary_preset.currentIndexChanged.connect(self.apply_ternary_settings)
         self.spin_saliency_alpha.valueChanged.connect(self.apply_saliency_settings)
-        self.combo_composition_guide.currentIndexChanged.connect(self.apply_composition_guide_settings)
+        self.combo_composition_guide.currentIndexChanged.connect(
+            self.apply_composition_guide_settings
+        )
         self.spin_focus_peak_sensitivity.valueChanged.connect(self.apply_focus_peaking_settings)
         self.combo_focus_peak_color.currentIndexChanged.connect(self.apply_focus_peaking_settings)
         self.spin_focus_peak_thickness.valueChanged.connect(self.apply_focus_peaking_settings)
@@ -269,6 +324,7 @@ class MainWindow(QMainWindow):
         self.spin_squint_scale.valueChanged.connect(self.apply_squint_settings)
         self.spin_squint_blur.valueChanged.connect(self.apply_squint_settings)
         self.chk_vectorscope_skin_line.toggled.connect(self.apply_vectorscope_settings)
+        self.spin_vectorscope_warn_threshold.valueChanged.connect(self.apply_vectorscope_settings)
         self.chk_preview_window.toggled.connect(self.on_preview_toggled)
         self.btn_save_preset.clicked.connect(self.save_layout_preset)
         self.btn_load_preset.clicked.connect(self.load_selected_layout_preset)
@@ -278,47 +334,62 @@ class MainWindow(QMainWindow):
         mb = self.menuBar() if hasattr(self, "menuBar") else QMenuBar(self)
         win_menu = mb.addMenu("ウィンドウ")
         self.act_color = win_menu.addAction("カラーサークル")
-        self.act_color.setCheckable(True); self.act_color.setChecked(True)
+        self.act_color.setCheckable(True)
+        self.act_color.setChecked(True)
         self.act_color.toggled.connect(lambda v: self.toggle_dock(self.dock_color, v))
-        self.act_scatter = win_menu.addAction("S-V 散布図")
-        self.act_scatter.setCheckable(True); self.act_scatter.setChecked(True)
-        self.act_scatter.toggled.connect(lambda v: self.toggle_dock(self.dock_scatter, v))
         self.act_hist = win_menu.addAction("H/S/V ヒストグラム")
-        self.act_hist.setCheckable(True); self.act_hist.setChecked(True)
+        self.act_hist.setCheckable(True)
+        self.act_hist.setChecked(True)
         self.act_hist.toggled.connect(lambda v: self.toggle_dock(self.dock_hist, v))
-        self.act_edge = win_menu.addAction("エッジ検出")
-        self.act_edge.setCheckable(True); self.act_edge.setChecked(True)
-        self.act_edge.toggled.connect(lambda v: self.toggle_dock(self.dock_edge, v))
+        self.act_scatter = win_menu.addAction("S-V 散布図")
+        self.act_scatter.setCheckable(True)
+        self.act_scatter.setChecked(True)
+        self.act_scatter.toggled.connect(lambda v: self.toggle_dock(self.dock_scatter, v))
+        self.act_vectorscope = win_menu.addAction("ベクトルスコープ")
+        self.act_vectorscope.setCheckable(True)
+        self.act_vectorscope.setChecked(True)
+        self.act_vectorscope.toggled.connect(lambda v: self.toggle_dock(self.dock_vectorscope, v))
         self.act_gray = win_menu.addAction("グレースケール")
-        self.act_gray.setCheckable(True); self.act_gray.setChecked(True)
+        self.act_gray.setCheckable(True)
+        self.act_gray.setChecked(True)
         self.act_gray.toggled.connect(lambda v: self.toggle_dock(self.dock_gray, v))
-        self.act_binary = win_menu.addAction("2値化")
-        self.act_binary.setCheckable(True); self.act_binary.setChecked(True)
-        self.act_binary.toggled.connect(lambda v: self.toggle_dock(self.dock_binary, v))
-        self.act_ternary = win_menu.addAction("3値化")
-        self.act_ternary.setCheckable(True); self.act_ternary.setChecked(True)
-        self.act_ternary.toggled.connect(lambda v: self.toggle_dock(self.dock_ternary, v))
-        self.act_saliency = win_menu.addAction("サリエンシーマップ")
-        self.act_saliency.setCheckable(True); self.act_saliency.setChecked(True)
-        self.act_saliency.toggled.connect(lambda v: self.toggle_dock(self.dock_saliency, v))
+        self.act_edge = win_menu.addAction("エッジ検出")
+        self.act_edge.setCheckable(True)
+        self.act_edge.setChecked(True)
+        self.act_edge.toggled.connect(lambda v: self.toggle_dock(self.dock_edge, v))
         self.act_focus = win_menu.addAction("フォーカスピーキング")
-        self.act_focus.setCheckable(True); self.act_focus.setChecked(True)
+        self.act_focus.setCheckable(True)
+        self.act_focus.setChecked(True)
         self.act_focus.toggled.connect(lambda v: self.toggle_dock(self.dock_focus, v))
         self.act_squint = win_menu.addAction("スクイント表示")
-        self.act_squint.setCheckable(True); self.act_squint.setChecked(True)
+        self.act_squint.setCheckable(True)
+        self.act_squint.setChecked(True)
         self.act_squint.toggled.connect(lambda v: self.toggle_dock(self.dock_squint, v))
-        self.act_vectorscope = win_menu.addAction("ベクトルスコープ")
-        self.act_vectorscope.setCheckable(True); self.act_vectorscope.setChecked(True)
-        self.act_vectorscope.toggled.connect(lambda v: self.toggle_dock(self.dock_vectorscope, v))
+        self.act_saliency = win_menu.addAction("サリエンシーマップ")
+        self.act_saliency.setCheckable(True)
+        self.act_saliency.setChecked(True)
+        self.act_saliency.toggled.connect(lambda v: self.toggle_dock(self.dock_saliency, v))
+        self.act_binary = win_menu.addAction("2値化")
+        self.act_binary.setCheckable(True)
+        self.act_binary.setChecked(True)
+        self.act_binary.toggled.connect(lambda v: self.toggle_dock(self.dock_binary, v))
+        self.act_ternary = win_menu.addAction("3値化")
+        self.act_ternary.setCheckable(True)
+        self.act_ternary.setChecked(True)
+        self.act_ternary.toggled.connect(lambda v: self.toggle_dock(self.dock_ternary, v))
 
         menu = mb.addMenu("設定")
         self.settings_action = menu.addAction("設定ウィンドウを開く")
-        self.settings_action.triggered.connect(lambda: self.show_settings_window(SETTINGS_PAGE_CAPTURE))
+        self.settings_action.triggered.connect(
+            lambda: self.show_settings_window(SETTINGS_PAGE_CAPTURE)
+        )
 
         layout_menu = mb.addMenu("レイアウト")
         self.presets_menu = layout_menu.addMenu("プリセットを適用")
         self.act_open_layout_settings = layout_menu.addAction("レイアウト設定を開く")
-        self.act_open_layout_settings.triggered.connect(lambda: self.show_settings_window(SETTINGS_PAGE_LAYOUT))
+        self.act_open_layout_settings.triggered.connect(
+            lambda: self.show_settings_window(SETTINGS_PAGE_LAYOUT)
+        )
 
         # Toolbar for Start/Stop
         tb = self.addToolBar("コントロール")
@@ -332,8 +403,11 @@ class MainWindow(QMainWindow):
         self.btn_stop_bar.setCheckable(True)
         self.btn_start_bar.clicked.connect(self.on_start)
         self.btn_stop_bar.clicked.connect(self.on_stop)
+        self.btn_load_image_bar = QPushButton("画像読み込み")
+        self.btn_load_image_bar.clicked.connect(self.on_load_image)
         tb.addWidget(self.btn_start_bar)
         tb.addWidget(self.btn_stop_bar)
+        tb.addWidget(self.btn_load_image_bar)
         self.btn_stop_bar.setChecked(True)
 
         # Displays
@@ -365,43 +439,6 @@ class MainWindow(QMainWindow):
         self.lbl_warmcool.setWordWrap(True)
         self.lbl_warmcool.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
 
-        # Controls dock (vertical)
-        controls = QWidget()
-        cl = QVBoxLayout(controls)
-        cl.setContentsMargins(10, 10, 10, 10)
-        cl.setSpacing(8)
-
-        row_target = QHBoxLayout()
-        row_target.addWidget(self.btn_refresh)
-        row_target.addWidget(QLabel("ターゲット:"))
-        row_target.addWidget(self.combo_win, 1)
-        cl.addLayout(row_target)
-
-        cl.addWidget(self.btn_pick_roi_win)
-        cl.addWidget(self.btn_pick_roi_screen)
-
-        cl.addWidget(_make_labeled_row("更新モード:", self.combo_mode))
-
-        self._row_interval_controls = _make_labeled_row("更新間隔:", self.spin_interval)
-        cl.addWidget(self._row_interval_controls)
-
-        row_points = QHBoxLayout()
-        row_points.addWidget(QLabel("散布点数:"))
-        row_points.addWidget(self.spin_points)
-        cl.addLayout(row_points)
-
-        self._row_diff_controls = _make_labeled_row("差分閾値:", self.spin_diff)
-        cl.addWidget(self._row_diff_controls)
-
-        self._row_stable_controls = _make_labeled_row("安定フレーム:", self.spin_stable)
-        cl.addWidget(self._row_stable_controls)
-
-        cl.addWidget(self.chk_preview_window)
-
-        cl.addWidget(self.lbl_status)
-
-        self.settings_widget = controls  # standalone dialog only; not docked
-
         # ドックのネスティングを有効化（3段以上に自由配置できるように）
         self.setDockNestingEnabled(True)
 
@@ -414,21 +451,10 @@ class MainWindow(QMainWindow):
         cw_l.addWidget(self.lbl_top5_title)
         cw_l.addWidget(self.top_colors_bar)
         cw_l.addWidget(self.lbl_warmcool)
-        color_dock = QDockWidget("カラーサークル", self)
-        color_dock.setObjectName("dock_color")
-        color_dock.setWidget(color_widget)
-        color_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self.addDockWidget(Qt.RightDockWidgetArea, color_dock)
+        color_dock = self._create_dock("カラーサークル", "dock_color", color_widget)
 
-        scatter_dock = QDockWidget("S-V 散布図", self)
-        scatter_dock.setObjectName("dock_scatter")
-        scatter_container = QWidget()
-        sc_l = QVBoxLayout(scatter_container)
-        sc_l.setContentsMargins(6, 6, 6, 6)
-        sc_l.addWidget(self.scatter, 1)
-        scatter_dock.setWidget(scatter_container)
-        scatter_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self.addDockWidget(Qt.RightDockWidgetArea, scatter_dock)
+        scatter_container = self._build_single_view_container(self.scatter)
+        scatter_dock = self._create_dock("S-V 散布図", "dock_scatter", scatter_container)
 
         hist_container = QWidget()
         hg_l = QHBoxLayout(hist_container)
@@ -437,104 +463,53 @@ class MainWindow(QMainWindow):
         hg_l.addWidget(self.hist_h)
         hg_l.addWidget(self.hist_s)
         hg_l.addWidget(self.hist_v)
-        hist_dock = QDockWidget("H/S/V ヒストグラム", self)
-        hist_dock.setObjectName("dock_hist")
-        hist_dock.setWidget(hist_container)
-        hist_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self.addDockWidget(Qt.BottomDockWidgetArea, hist_dock)
+        hist_dock = self._create_dock(
+            "H/S/V ヒストグラム",
+            "dock_hist",
+            hist_container,
+            area=Qt.BottomDockWidgetArea,
+        )
 
         self.edge_view = EdgeView()
-        edge_container = QWidget()
-        ev_l = QVBoxLayout(edge_container)
-        ev_l.setContentsMargins(6, 6, 6, 6)
-        ev_l.addWidget(self.edge_view, 1)
-        edge_dock = QDockWidget("エッジ検出", self)
-        edge_dock.setObjectName("dock_edge")
-        edge_dock.setWidget(edge_container)
-        edge_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self.addDockWidget(Qt.RightDockWidgetArea, edge_dock)
+        edge_container = self._build_single_view_container(self.edge_view)
+        edge_dock = self._create_dock("エッジ検出", "dock_edge", edge_container)
 
         self.gray_view = GrayscaleView()
-        gray_container = QWidget()
-        gv_l = QVBoxLayout(gray_container)
-        gv_l.setContentsMargins(6, 6, 6, 6)
-        gv_l.addWidget(self.gray_view, 1)
-        gray_dock = QDockWidget("グレースケール", self)
-        gray_dock.setObjectName("dock_gray")
-        gray_dock.setWidget(gray_container)
-        gray_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self.addDockWidget(Qt.RightDockWidgetArea, gray_dock)
+        gray_container = self._build_single_view_container(self.gray_view)
+        gray_dock = self._create_dock("グレースケール", "dock_gray", gray_container)
 
         self.binary_view = BinaryView()
-        binary_container = QWidget()
-        bv_l = QVBoxLayout(binary_container)
-        bv_l.setContentsMargins(6, 6, 6, 6)
-        bv_l.addWidget(self.binary_view, 1)
-        binary_dock = QDockWidget("2値化", self)
-        binary_dock.setObjectName("dock_binary")
-        binary_dock.setWidget(binary_container)
-        binary_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self.addDockWidget(Qt.RightDockWidgetArea, binary_dock)
+        binary_container = self._build_single_view_container(self.binary_view)
+        binary_dock = self._create_dock("2値化", "dock_binary", binary_container)
 
         self.ternary_view = TernaryView()
-        ternary_container = QWidget()
-        tv_l = QVBoxLayout(ternary_container)
-        tv_l.setContentsMargins(6, 6, 6, 6)
-        tv_l.addWidget(self.ternary_view, 1)
-        ternary_dock = QDockWidget("3値化", self)
-        ternary_dock.setObjectName("dock_ternary")
-        ternary_dock.setWidget(ternary_container)
-        ternary_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self.addDockWidget(Qt.RightDockWidgetArea, ternary_dock)
+        ternary_container = self._build_single_view_container(self.ternary_view)
+        ternary_dock = self._create_dock("3値化", "dock_ternary", ternary_container)
 
         self.saliency_view = SaliencyView()
-        saliency_container = QWidget()
-        sv_l = QVBoxLayout(saliency_container)
-        sv_l.setContentsMargins(6, 6, 6, 6)
-        sv_l.addWidget(self.saliency_view, 1)
-        saliency_dock = QDockWidget("サリエンシーマップ", self)
-        saliency_dock.setObjectName("dock_saliency")
-        saliency_dock.setWidget(saliency_container)
-        saliency_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self.addDockWidget(Qt.RightDockWidgetArea, saliency_dock)
+        saliency_container = self._build_single_view_container(self.saliency_view)
+        saliency_dock = self._create_dock("サリエンシーマップ", "dock_saliency", saliency_container)
 
         self.focus_peaking_view = FocusPeakingView()
-        focus_container = QWidget()
-        fp_l = QVBoxLayout(focus_container)
-        fp_l.setContentsMargins(6, 6, 6, 6)
-        fp_l.addWidget(self.focus_peaking_view, 1)
-        focus_dock = QDockWidget("フォーカスピーキング", self)
-        focus_dock.setObjectName("dock_focus")
-        focus_dock.setWidget(focus_container)
-        focus_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self.addDockWidget(Qt.RightDockWidgetArea, focus_dock)
+        focus_container = self._build_single_view_container(self.focus_peaking_view)
+        focus_dock = self._create_dock("フォーカスピーキング", "dock_focus", focus_container)
 
         self.squint_view = SquintView()
-        squint_container = QWidget()
-        sq_l = QVBoxLayout(squint_container)
-        sq_l.setContentsMargins(6, 6, 6, 6)
-        sq_l.addWidget(self.squint_view, 1)
-        squint_dock = QDockWidget("スクイント表示", self)
-        squint_dock.setObjectName("dock_squint")
-        squint_dock.setWidget(squint_container)
-        squint_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self.addDockWidget(Qt.RightDockWidgetArea, squint_dock)
+        squint_container = self._build_single_view_container(self.squint_view)
+        squint_dock = self._create_dock("スクイント表示", "dock_squint", squint_container)
 
         self.vectorscope_view = VectorScopeView()
         vectorscope_container = QWidget()
         vs_l = QVBoxLayout(vectorscope_container)
         vs_l.setContentsMargins(6, 6, 6, 6)
+        vs_l.setSpacing(6)
         vs_l.addWidget(self.vectorscope_view, 1)
-        vectorscope_dock = QDockWidget("ベクトルスコープ", self)
-        vectorscope_dock.setObjectName("dock_vectorscope")
-        vectorscope_dock.setWidget(vectorscope_container)
-        vectorscope_dock.setAllowedAreas(Qt.AllDockWidgetAreas)
-        self.addDockWidget(Qt.RightDockWidgetArea, vectorscope_dock)
+        self.lbl_vectorscope_warning = QLabel("高彩度警告: 入力待ち")
+        self.lbl_vectorscope_warning.setStyleSheet("color:#8b97a8;")
+        vs_l.addWidget(self.lbl_vectorscope_warning, 0)
+        vectorscope_dock = self._create_dock("ベクトルスコープ", "dock_vectorscope", vectorscope_container)
 
-        self.setDockOptions(
-            QMainWindow.AllowTabbedDocks
-            | QMainWindow.AllowNestedDocks
-        )
+        self.setDockOptions(QMainWindow.AllowTabbedDocks | QMainWindow.AllowNestedDocks)
 
         # Central placeholder
         self.placeholder = QLabel("🖼️ ウィンドウメニューから表示したいビューを選択してください")
@@ -648,62 +623,29 @@ class MainWindow(QMainWindow):
         self.addDockWidget(Qt.BottomDockWidgetArea, hist_dock)
         self.resizeDocks([color_dock, scatter_dock, edge_dock], [700, 700, 700], Qt.Horizontal)
         self.resizeDocks(
-            [scatter_dock, edge_dock, gray_dock, binary_dock, ternary_dock, saliency_dock, focus_dock, squint_dock, vectorscope_dock],
+            [
+                scatter_dock,
+                edge_dock,
+                gray_dock,
+                binary_dock,
+                ternary_dock,
+                saliency_dock,
+                focus_dock,
+                squint_dock,
+                vectorscope_dock,
+            ],
             [280, 200, 180, 170, 160, 180, 170, 170, 170],
             Qt.Vertical,
         )
 
-        # Styling
-        self.setStyleSheet("""
-            QMainWindow { background:#f3f4f6; }
-            QWidget#centralWidget { background:#f3f4f6; }
-            QLabel { color:#111; }
-            QPushButton { background:#f7f8fb; border:1px solid #cdd1d6; padding:6px 12px; border-radius:4px; color:#111; }
-            QPushButton:hover { border:1px solid #b6bac0; background:#eef0f3; }
-            QPushButton:pressed { background:#e4e6ea; }
-            QDoubleSpinBox, QSpinBox, QComboBox { background:#ffffff; border:1px solid #cdd1d6; padding:4px 6px; color:#111; border-radius:4px; }
-            QSpinBox::up-button, QDoubleSpinBox::up-button { subcontrol-origin:border; width:20px; }
-            QSpinBox::down-button, QDoubleSpinBox::down-button { subcontrol-origin:border; width:20px; }
-            QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { padding:0; margin:0; }
-            QCheckBox { color:#111; spacing:6px; }
-            QCheckBox::indicator { width:16px; height:16px; border-radius:3px; border:1px solid #c0c4ca; background:#ffffff; }
-            QCheckBox::indicator:checked { background:#4a90e2; border:1px solid #3578c8; }
-            QDockWidget::title { background:#f9fafc; padding:4px 8px; border:1px solid #dfe3e8; border-radius:4px; }
-            QToolBar { spacing:8px; border:none; background:#f3f4f6; padding:4px 8px; }
-            QPushButton#runStartBtn, QPushButton#runStopBtn {
-                font-weight:600; padding:6px 12px; border-radius:8px; min-width:72px;
-                border:1px solid #c7ced7; color:#111827; background:#ffffff;
-            }
-            QPushButton#runStartBtn:checked { background:#16a34a; border:1px solid #15803d; color:#ffffff; }
-            QPushButton#runStopBtn:checked { background:#dc2626; border:1px solid #b91c1c; color:#ffffff; }
-        """)
-
-        light_group_style = """
-            QWidget { background: #FAFBFD; color:#111; }
-            QGroupBox { background: #FAFBFD; color:#111; border:1px solid #D5D5D8; border-radius:6px; margin-top:8px; }
-            QGroupBox::title { subcontrol-origin: margin; left:10px; padding:2px 8px 2px 8px; background:#FAFBFD; border-radius:4px; }
-            QLabel { color:#111; }
-        """
-        for dock in (
-            self.dock_color,
-            self.dock_scatter,
-            self.dock_hist,
-            self.dock_edge,
-            self.dock_gray,
-            self.dock_binary,
-            self.dock_ternary,
-            self.dock_saliency,
-            self.dock_focus,
-            self.dock_squint,
-            self.dock_vectorscope,
-        ):
-            w = dock.widget()
-            if isinstance(w, QWidget):
-                w.setStyleSheet(light_group_style)
+        # Styling (theme)
+        self._apply_ui_style()
 
         # Init
         self.worker.set_interval(self.spin_interval.value())
         self.worker.set_sample_points(self.spin_points.value())
+        self.worker.set_max_dim(self.spin_analysis_max_dim.value())
+        self.worker.set_wheel_sat_threshold(self.spin_wheel_sat_threshold.value())
         self.worker.set_graph_every(C.DEFAULT_GRAPH_EVERY)
         self.refresh_windows()
         self.load_settings()
@@ -713,6 +655,27 @@ class MainWindow(QMainWindow):
         self._layout_autosave_enabled = True
         self._schedule_layout_autosave()
         self._schedule_dock_rebalance()
+
+    def _build_single_view_container(self, view: QWidget) -> QWidget:
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(6, 6, 6, 6)
+        layout.addWidget(view, 1)
+        return container
+
+    def _create_dock(
+        self,
+        title: str,
+        object_name: str,
+        content: QWidget,
+        area: Qt.DockWidgetArea = Qt.RightDockWidgetArea,
+    ) -> QDockWidget:
+        dock = QDockWidget(title, self)
+        dock.setObjectName(object_name)
+        dock.setWidget(content)
+        dock.setAllowedAreas(Qt.AllDockWidgetAreas)
+        self.addDockWidget(area, dock)
+        return dock
 
     def showEvent(self, event):
         super().showEvent(event)
@@ -736,13 +699,7 @@ class MainWindow(QMainWindow):
         self._schedule_window_fit()
 
     def _desktop_available_geometry(self) -> QRect:
-        screens = QGuiApplication.screens()
-        if not screens:
-            return QRect(0, 0, 1920, 1080)
-        rect = screens[0].availableGeometry()
-        for screen in screens[1:]:
-            rect = rect.united(screen.availableGeometry())
-        return rect
+        return screen_union_geometry(available=True)
 
     def _fit_window_to_desktop(self):
         if self.isMaximized() or self.isFullScreen():
@@ -793,8 +750,11 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "_right_stack_order"):
             return
         docks = [
-            d for d in self._right_stack_order
-            if d.isVisible() and not d.isFloating() and self.dockWidgetArea(d) == Qt.RightDockWidgetArea
+            d
+            for d in self._right_stack_order
+            if d.isVisible()
+            and not d.isFloating()
+            and self.dockWidgetArea(d) == Qt.RightDockWidgetArea
         ]
         if len(docks) < 2:
             return
@@ -886,14 +846,125 @@ class MainWindow(QMainWindow):
     def on_status(self, s: str):
         self.lbl_status.setText(s)
         if getattr(self, "_last_top_bars", None):
-            self.top_colors_bar.setPixmap(render_top_color_bar(self._last_top_bars, width=self.top_colors_bar.width(), height=self.top_colors_bar.height()))
+            self.top_colors_bar.setPixmap(
+                render_top_color_bar(
+                    self._last_top_bars,
+                    width=self.top_colors_bar.width(),
+                    height=self.top_colors_bar.height(),
+                )
+            )
+
+    def _is_image_analysis_running(self) -> bool:
+        return self._image_thread is not None and self._image_thread.isRunning()
+
+    def _set_image_analysis_busy(self, busy: bool):
+        self.btn_load_image_bar.setEnabled(not busy)
+
+    def _cleanup_image_analysis(self):
+        if self._image_progress is not None:
+            try:
+                self._image_progress.close()
+            except Exception:
+                pass
+            self._image_progress = None
+        if self._image_thread is not None:
+            try:
+                self._image_thread.quit()
+                self._image_thread.wait(1500)
+            except Exception:
+                pass
+        self._image_worker = None
+        self._image_thread = None
+        self._set_image_analysis_busy(False)
+
+    def _cancel_image_analysis(self):
+        if self._image_worker is not None:
+            try:
+                self._image_worker.request_cancel()
+            except Exception:
+                pass
+
+    def on_load_image(self):
+        if self._is_image_analysis_running():
+            self.on_status("画像解析を実行中です。キャンセルしてから再実行してください。")
+            return
+
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "画像を読み込む",
+            "",
+            "Images (*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff);;All Files (*)",
+        )
+        if not file_path:
+            return
+
+        self.worker.stop()
+        self.btn_stop_bar.setChecked(True)
+        self.btn_start_bar.setChecked(False)
+
+        worker = ImageFileAnalyzeWorker(
+            path=file_path,
+            sample_points=int(self.spin_points.value()),
+            wheel_sat_threshold=self._selected_wheel_sat_threshold(),
+        )
+        thread = QThread(self)
+        worker.moveToThread(thread)
+        worker.progress.connect(self.on_image_analysis_progress)
+        worker.finished.connect(self.on_image_analysis_finished)
+        worker.failed.connect(self.on_image_analysis_failed)
+        worker.canceled.connect(self.on_image_analysis_canceled)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.canceled.connect(thread.quit)
+        thread.started.connect(worker.run)
+        self._image_worker = worker
+        self._image_thread = thread
+
+        dlg = QProgressDialog("画像を解析中…", "キャンセル", 0, 100, self)
+        dlg.setWindowTitle("画像解析")
+        dlg.setWindowModality(Qt.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setValue(0)
+        dlg.canceled.connect(self._cancel_image_analysis)
+        self._image_progress = dlg
+        self._set_image_analysis_busy(True)
+
+        self.on_status(f"画像解析を開始: {Path(file_path).name}")
+        thread.start()
+        dlg.show()
+
+    def on_image_analysis_progress(self, percent: int, text: str):
+        if self._image_progress is not None:
+            self._image_progress.setLabelText(text)
+            self._image_progress.setValue(max(0, min(100, int(percent))))
+
+    def on_image_analysis_finished(self, res: dict):
+        self._cleanup_image_analysis()
+        self.on_result(res)
+        self.on_status(f"画像解析完了 ({res.get('dt_ms', 0.0):.1f} ms)")
+
+    def on_image_analysis_failed(self, message: str):
+        self._cleanup_image_analysis()
+        self.on_status(message)
+        QMessageBox.warning(self, "画像解析", message)
+
+    def on_image_analysis_canceled(self):
+        self._cleanup_image_analysis()
+        self.on_status("画像解析をキャンセルしました")
 
     def on_start(self):
+        if self._is_image_analysis_running():
+            self.on_status("画像解析中です。キャンセル完了後にStartしてください。")
+            return
         self.worker.start()
         self.btn_start_bar.setChecked(True)
         self.btn_stop_bar.setChecked(False)
 
     def on_stop(self):
+        if self._is_image_analysis_running():
+            self._cancel_image_analysis()
+            self.on_status("画像解析のキャンセルを要求しました")
+            return
         self.worker.stop()
         self.btn_stop_bar.setChecked(True)
         self.btn_start_bar.setChecked(False)
@@ -901,6 +972,8 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         # メイン終了時に補助ウィンドウも確実に閉じる
         self.save_current_layout_to_config(silent=True)
+        self._cancel_image_analysis()
+        self._cleanup_image_analysis()
         self.worker.stop()
         try:
             if self.preview_window.isVisible():
@@ -913,9 +986,7 @@ class MainWindow(QMainWindow):
         except Exception:
             pass
         try:
-            if self._roi_selector is not None:
-                self._roi_selector.close()
-                self._roi_selector = None
+            self._close_roi_selectors()
         except Exception:
             pass
         super().closeEvent(event)
@@ -925,7 +996,7 @@ class MainWindow(QMainWindow):
         with blocked_signals(self.combo_win):
             self.combo_win.clear()
             self.combo_win.addItem("（未選択）", None)
-            for hwnd, title in wins[:C.WINDOW_LIST_MAX_ITEMS]:
+            for hwnd, title in wins[: C.WINDOW_LIST_MAX_ITEMS]:
                 self.combo_win.addItem(title, hwnd)
         if not HAS_WIN32:
             self.on_status("この環境ではウィンドウ選択は使えません（画面の領域選択を使用）")
@@ -1003,7 +1074,9 @@ class MainWindow(QMainWindow):
         if rect is None:
             self.on_status("ターゲット設定: 取得失敗")
             return
-        self.on_status(f"ターゲット設定: {self.combo_win.currentText()}  ({rect.width()}x{rect.height()}) / 次にウィンドウ内領域を選択してください")
+        self.on_status(
+            f"ターゲット設定: {self.combo_win.currentText()}  ({rect.width()}x{rect.height()}) / 次にウィンドウ内領域を選択してください"
+        )
         if self.chk_preview_window.isChecked():
             self._update_preview_snapshot()
 
@@ -1011,14 +1084,72 @@ class MainWindow(QMainWindow):
         mode = self.combo_mode.currentData()
         return safe_choice(mode, C.UPDATE_MODES, C.DEFAULT_MODE)
 
+    def _selected_wheel_mode(self) -> str:
+        mode = self.combo_wheel_mode.currentData()
+        return safe_choice(mode, C.WHEEL_MODES, C.DEFAULT_WHEEL_MODE)
+
+    def _selected_wheel_sat_threshold(self) -> int:
+        return clamp_int(
+            self.spin_wheel_sat_threshold.value(),
+            C.WHEEL_SAT_THRESHOLD_MIN,
+            C.WHEEL_SAT_THRESHOLD_MAX,
+        )
+
+    def _apply_ui_style(self):
+        app_style = """
+            QMainWindow { background:#f3f4f6; }
+            QWidget#centralWidget { background:#f3f4f6; }
+            QLabel { color:#111; }
+            QPushButton { background:#f7f8fb; border:1px solid #cdd1d6; padding:6px 12px; border-radius:4px; color:#111; }
+            QPushButton:hover { border:1px solid #b6bac0; background:#eef0f3; }
+            QPushButton:pressed { background:#e4e6ea; }
+            QDoubleSpinBox, QSpinBox, QComboBox { background:#ffffff; border:1px solid #cdd1d6; padding:4px 6px; color:#111; border-radius:4px; }
+            QSpinBox::up-button, QDoubleSpinBox::up-button { subcontrol-origin:border; width:20px; }
+            QSpinBox::down-button, QDoubleSpinBox::down-button { subcontrol-origin:border; width:20px; }
+            QSpinBox::up-button, QSpinBox::down-button, QDoubleSpinBox::up-button, QDoubleSpinBox::down-button { padding:0; margin:0; }
+            QCheckBox { color:#111; spacing:6px; }
+            QCheckBox::indicator { width:16px; height:16px; border-radius:3px; border:1px solid #c0c4ca; background:#ffffff; }
+            QCheckBox::indicator:checked { background:#4a90e2; border:1px solid #3578c8; }
+            QDockWidget::title { background:#f9fafc; padding:4px 8px; border:1px solid #dfe3e8; border-radius:4px; }
+            QToolBar { spacing:8px; border:none; background:#f3f4f6; padding:4px 8px; }
+            QPushButton#runStartBtn, QPushButton#runStopBtn {
+                font-weight:600; padding:6px 12px; border-radius:8px; min-width:72px;
+                border:1px solid #c7ced7; color:#111827; background:#ffffff;
+            }
+            QPushButton#runStartBtn:checked { background:#16a34a; border:1px solid #15803d; color:#ffffff; }
+            QPushButton#runStopBtn:checked { background:#dc2626; border:1px solid #b91c1c; color:#ffffff; }
+        """
+        dock_style = """
+            QWidget { background: #FAFBFD; color:#111; }
+            QGroupBox { background: #FAFBFD; color:#111; border:1px solid #D5D5D8; border-radius:6px; margin-top:8px; }
+            QGroupBox::title { subcontrol-origin: margin; left:10px; padding:2px 8px 2px 8px; background:#FAFBFD; border-radius:4px; }
+            QLabel { color:#111; }
+        """
+
+        self.setStyleSheet(app_style)
+        for dock in (
+            self.dock_color,
+            self.dock_scatter,
+            self.dock_hist,
+            self.dock_edge,
+            self.dock_gray,
+            self.dock_binary,
+            self.dock_ternary,
+            self.dock_saliency,
+            self.dock_focus,
+            self.dock_squint,
+            self.dock_vectorscope,
+        ):
+            w = dock.widget()
+            if isinstance(w, QWidget):
+                w.setStyleSheet(dock_style)
+
     def _sync_mode_dependent_rows(self):
         is_interval = self._selected_mode() == C.UPDATE_MODE_INTERVAL
-        for row in (self._row_interval_controls, self._row_interval_settings):
+        for row in (self._row_interval_settings,):
             if row is not None:
                 row.setVisible(is_interval)
         for row in (
-            self._row_diff_controls,
-            self._row_stable_controls,
             self._row_diff_settings,
             self._row_stable_settings,
         ):
@@ -1034,9 +1165,25 @@ class MainWindow(QMainWindow):
         if self._row_squint_blur_settings is not None:
             self._row_squint_blur_settings.setVisible(show_blur)
 
-    def apply_scatter_shape(self, *_):
-        shape = safe_choice(self.combo_scatter_shape.currentData(), C.SCATTER_SHAPES, C.DEFAULT_SCATTER_SHAPE)
+    def apply_sample_points_settings(self, *_):
+        self.worker.set_sample_points(int(self.spin_points.value()))
+        self.save_settings()
+
+    def apply_scatter_settings(self, *_):
+        shape = safe_choice(
+            self.combo_scatter_shape.currentData(), C.SCATTER_SHAPES, C.DEFAULT_SCATTER_SHAPE
+        )
         self.scatter.set_shape(shape)
+        self.scatter.set_point_alpha(float(self.spin_scatter_alpha.value()))
+        self.save_settings()
+
+    def apply_analysis_resolution_settings(self, *_):
+        self.worker.set_max_dim(int(self.spin_analysis_max_dim.value()))
+        self.save_settings()
+
+    def apply_wheel_settings(self, *_):
+        self.wheel.set_mode(self._selected_wheel_mode())
+        self.worker.set_wheel_sat_threshold(self._selected_wheel_sat_threshold())
         self.save_settings()
 
     def _selected_binary_preset(self) -> str:
@@ -1094,14 +1241,38 @@ class MainWindow(QMainWindow):
         self._sync_squint_mode_rows()
         self.save_settings()
 
+    def _update_vectorscope_warning_label(self):
+        ratio = float(self.vectorscope_view.high_saturation_ratio())
+        threshold = int(self.spin_vectorscope_warn_threshold.value())
+        if ratio <= 0.001:
+            self.lbl_vectorscope_warning.setText("高彩度警告: なし")
+            self.lbl_vectorscope_warning.setStyleSheet("color:#8b97a8;")
+        elif ratio < 5.0:
+            self.lbl_vectorscope_warning.setText(
+                f"高彩度警告: しきい値({threshold}%)超え {ratio:.1f}%"
+            )
+            self.lbl_vectorscope_warning.setStyleSheet("color:#b89c52;")
+        else:
+            self.lbl_vectorscope_warning.setText(
+                f"高彩度警告: しきい値({threshold}%)超え {ratio:.1f}%"
+            )
+            self.lbl_vectorscope_warning.setStyleSheet("color:#d06b5d;")
+
     def apply_vectorscope_settings(self, *_):
-        self.vectorscope_view.set_show_skin_tone_line(bool(self.chk_vectorscope_skin_line.isChecked()))
+        self.vectorscope_view.set_show_skin_tone_line(
+            bool(self.chk_vectorscope_skin_line.isChecked())
+        )
+        self.vectorscope_view.set_warn_threshold(int(self.spin_vectorscope_warn_threshold.value()))
+        self._update_vectorscope_warning_label()
         self.save_settings()
 
     def _update_preview_snapshot(self):
         if not self.chk_preview_window.isChecked():
             return
-        if self._selected_capture_source() == C.CAPTURE_SOURCE_WINDOW and self.worker.target_hwnd is None:
+        if (
+            self._selected_capture_source() == C.CAPTURE_SOURCE_WINDOW
+            and self.worker.target_hwnd is None
+        ):
             self.on_status("ターゲットウィンドウを選択してください")
             return
         bgr, _cap, err = self.worker.capture_once()
@@ -1127,7 +1298,6 @@ class MainWindow(QMainWindow):
         if self.chk_preview_window.isChecked():
             set_checked_blocked(self.chk_preview_window, False)
         self.on_status("プレビュー非表示")
-        self._roi_selector = None
 
     def apply_mode_settings(self):
         mode = self._selected_mode()
@@ -1140,14 +1310,49 @@ class MainWindow(QMainWindow):
     def load_settings(self):
         cfg = load_config()
         self.spin_interval.setValue(float(cfg.get(C.CFG_INTERVAL, C.DEFAULT_INTERVAL_SEC)))
-        self.spin_points.setValue(int(cfg.get(C.CFG_SAMPLE_POINTS, C.DEFAULT_SAMPLE_POINTS)))
+        sample_points = clamp_int(
+            cfg.get(C.CFG_SAMPLE_POINTS, C.DEFAULT_SAMPLE_POINTS),
+            C.ANALYZER_MIN_SAMPLE_POINTS,
+            C.ANALYZER_MAX_SAMPLE_POINTS,
+        )
+        set_value_blocked(self.spin_points, sample_points)
+        self.worker.set_sample_points(sample_points)
+        analysis_max_dim = clamp_int(
+            cfg.get(C.CFG_ANALYZER_MAX_DIM, C.ANALYZER_MAX_DIM),
+            C.ANALYZER_MAX_DIM_MIN,
+            C.ANALYZER_MAX_DIM_MAX,
+        )
+        set_value_blocked(self.spin_analysis_max_dim, analysis_max_dim)
+        self.worker.set_max_dim(analysis_max_dim)
         scatter_shape = str(cfg.get(C.CFG_SCATTER_SHAPE, C.DEFAULT_SCATTER_SHAPE))
         set_combobox_data_blocked(
             self.combo_scatter_shape,
             safe_choice(scatter_shape, C.SCATTER_SHAPES, C.DEFAULT_SCATTER_SHAPE),
             default_data=C.DEFAULT_SCATTER_SHAPE,
         )
-        self.scatter.set_shape(safe_choice(scatter_shape, C.SCATTER_SHAPES, C.DEFAULT_SCATTER_SHAPE))
+        self.scatter.set_shape(
+            safe_choice(scatter_shape, C.SCATTER_SHAPES, C.DEFAULT_SCATTER_SHAPE)
+        )
+        scatter_alpha = float(cfg.get(C.CFG_SCATTER_POINT_ALPHA, C.DEFAULT_SCATTER_POINT_ALPHA))
+        scatter_alpha = clamp_float(
+            scatter_alpha, C.SCATTER_POINT_ALPHA_MIN, C.SCATTER_POINT_ALPHA_MAX
+        )
+        set_value_blocked(self.spin_scatter_alpha, scatter_alpha)
+        self.scatter.set_point_alpha(scatter_alpha)
+        wheel_mode = str(cfg.get(C.CFG_WHEEL_MODE, C.DEFAULT_WHEEL_MODE))
+        set_combobox_data_blocked(
+            self.combo_wheel_mode,
+            safe_choice(wheel_mode, C.WHEEL_MODES, C.DEFAULT_WHEEL_MODE),
+            default_data=C.DEFAULT_WHEEL_MODE,
+        )
+        wheel_sat_threshold = clamp_int(
+            cfg.get(C.CFG_WHEEL_SAT_THRESHOLD, C.DEFAULT_WHEEL_SAT_THRESHOLD),
+            C.WHEEL_SAT_THRESHOLD_MIN,
+            C.WHEEL_SAT_THRESHOLD_MAX,
+        )
+        set_value_blocked(self.spin_wheel_sat_threshold, wheel_sat_threshold)
+        self.wheel.set_mode(self._selected_wheel_mode())
+        self.worker.set_wheel_sat_threshold(wheel_sat_threshold)
         self.worker.set_graph_every(C.DEFAULT_GRAPH_EVERY)
         source = cfg.get(C.CFG_CAPTURE_SOURCE, C.DEFAULT_CAPTURE_SOURCE)
         set_combobox_data_blocked(
@@ -1180,7 +1385,11 @@ class MainWindow(QMainWindow):
         )
         self.spin_diff.setValue(float(cfg.get(C.CFG_DIFF_THRESHOLD, C.DEFAULT_DIFF_THRESHOLD)))
         self.spin_stable.setValue(int(cfg.get(C.CFG_STABLE_FRAMES, C.DEFAULT_STABLE_FRAMES)))
-        edge_sens = clamp_int(cfg.get(C.CFG_EDGE_SENSITIVITY, C.DEFAULT_EDGE_SENSITIVITY), C.EDGE_SENSITIVITY_MIN, C.EDGE_SENSITIVITY_MAX)
+        edge_sens = clamp_int(
+            cfg.get(C.CFG_EDGE_SENSITIVITY, C.DEFAULT_EDGE_SENSITIVITY),
+            C.EDGE_SENSITIVITY_MIN,
+            C.EDGE_SENSITIVITY_MAX,
+        )
         set_value_blocked(self.spin_edge_sensitivity, edge_sens)
         self.edge_view.set_sensitivity(edge_sens)
 
@@ -1223,7 +1432,9 @@ class MainWindow(QMainWindow):
         )
 
         focus_thick = float(cfg.get(C.CFG_FOCUS_PEAK_THICKNESS, C.DEFAULT_FOCUS_PEAK_THICKNESS))
-        focus_thick = max(C.FOCUS_PEAK_THICKNESS_MIN, min(C.FOCUS_PEAK_THICKNESS_MAX, focus_thick))
+        focus_thick = clamp_float(
+            focus_thick, C.FOCUS_PEAK_THICKNESS_MIN, C.FOCUS_PEAK_THICKNESS_MAX
+        )
         set_value_blocked(self.spin_focus_peak_thickness, focus_thick)
         self.focus_peaking_view.set_sensitivity(focus_sens)
         self.focus_peaking_view.set_color(self._selected_focus_peak_color())
@@ -1242,16 +1453,26 @@ class MainWindow(QMainWindow):
         )
         set_value_blocked(self.spin_squint_scale, squint_scale)
         squint_blur = float(cfg.get(C.CFG_SQUINT_BLUR_SIGMA, C.DEFAULT_SQUINT_BLUR_SIGMA))
-        squint_blur = max(C.SQUINT_BLUR_SIGMA_MIN, min(C.SQUINT_BLUR_SIGMA_MAX, squint_blur))
+        squint_blur = clamp_float(squint_blur, C.SQUINT_BLUR_SIGMA_MIN, C.SQUINT_BLUR_SIGMA_MAX)
         set_value_blocked(self.spin_squint_blur, squint_blur)
         self.squint_view.set_mode(self._selected_squint_mode())
         self.squint_view.set_scale_percent(squint_scale)
         self.squint_view.set_blur_sigma(squint_blur)
         self._sync_squint_mode_rows()
 
-        show_skin_line = bool(cfg.get(C.CFG_VECTORSCOPE_SHOW_SKIN_LINE, C.DEFAULT_VECTORSCOPE_SHOW_SKIN_LINE))
+        show_skin_line = bool(
+            cfg.get(C.CFG_VECTORSCOPE_SHOW_SKIN_LINE, C.DEFAULT_VECTORSCOPE_SHOW_SKIN_LINE)
+        )
         set_checked_blocked(self.chk_vectorscope_skin_line, show_skin_line)
+        warn_threshold = clamp_int(
+            cfg.get(C.CFG_VECTORSCOPE_WARN_THRESHOLD, C.DEFAULT_VECTORSCOPE_WARN_THRESHOLD),
+            C.VECTORSCOPE_WARN_THRESHOLD_MIN,
+            C.VECTORSCOPE_WARN_THRESHOLD_MAX,
+        )
+        set_value_blocked(self.spin_vectorscope_warn_threshold, warn_threshold)
         self.vectorscope_view.set_show_skin_tone_line(show_skin_line)
+        self.vectorscope_view.set_warn_threshold(warn_threshold)
+        self._update_vectorscope_warning_label()
 
         self.apply_mode_settings()
         self.apply_layout_from_config(cfg)
@@ -1260,29 +1481,41 @@ class MainWindow(QMainWindow):
     def save_settings(self, silent: bool = True):
         base = load_config()
         cfg = dict(base)
-        cfg.update({
-            C.CFG_INTERVAL: float(self.spin_interval.value()),
-            C.CFG_SAMPLE_POINTS: int(self.spin_points.value()),
-            C.CFG_CAPTURE_SOURCE: self._selected_capture_source(),
-            C.CFG_SCATTER_SHAPE: safe_choice(self.combo_scatter_shape.currentData(), C.SCATTER_SHAPES, C.DEFAULT_SCATTER_SHAPE),
-            C.CFG_GRAPH_EVERY: C.DEFAULT_GRAPH_EVERY,
-            C.CFG_PREVIEW_WINDOW: bool(self.chk_preview_window.isChecked()),
-            C.CFG_MODE: self._selected_mode(),
-            C.CFG_DIFF_THRESHOLD: float(self.spin_diff.value()),
-            C.CFG_STABLE_FRAMES: int(self.spin_stable.value()),
-            C.CFG_EDGE_SENSITIVITY: int(self.spin_edge_sensitivity.value()),
-            C.CFG_BINARY_PRESET: self._selected_binary_preset(),
-            C.CFG_TERNARY_PRESET: self._selected_ternary_preset(),
-            C.CFG_SALIENCY_OVERLAY_ALPHA: int(self.spin_saliency_alpha.value()),
-            C.CFG_COMPOSITION_GUIDE: self._selected_composition_guide(),
-            C.CFG_FOCUS_PEAK_SENSITIVITY: int(self.spin_focus_peak_sensitivity.value()),
-            C.CFG_FOCUS_PEAK_COLOR: self._selected_focus_peak_color(),
-            C.CFG_FOCUS_PEAK_THICKNESS: float(self.spin_focus_peak_thickness.value()),
-            C.CFG_SQUINT_MODE: self._selected_squint_mode(),
-            C.CFG_SQUINT_SCALE_PERCENT: int(self.spin_squint_scale.value()),
-            C.CFG_SQUINT_BLUR_SIGMA: float(self.spin_squint_blur.value()),
-            C.CFG_VECTORSCOPE_SHOW_SKIN_LINE: bool(self.chk_vectorscope_skin_line.isChecked()),
-        })
+        cfg.pop("ui_theme", None)
+        cfg.update(
+            {
+                C.CFG_INTERVAL: float(self.spin_interval.value()),
+                C.CFG_SAMPLE_POINTS: int(self.spin_points.value()),
+                C.CFG_ANALYZER_MAX_DIM: int(self.spin_analysis_max_dim.value()),
+                C.CFG_CAPTURE_SOURCE: self._selected_capture_source(),
+                C.CFG_SCATTER_SHAPE: safe_choice(
+                    self.combo_scatter_shape.currentData(),
+                    C.SCATTER_SHAPES,
+                    C.DEFAULT_SCATTER_SHAPE,
+                ),
+                C.CFG_SCATTER_POINT_ALPHA: float(self.spin_scatter_alpha.value()),
+                C.CFG_WHEEL_MODE: self._selected_wheel_mode(),
+                C.CFG_WHEEL_SAT_THRESHOLD: self._selected_wheel_sat_threshold(),
+                C.CFG_GRAPH_EVERY: C.DEFAULT_GRAPH_EVERY,
+                C.CFG_PREVIEW_WINDOW: bool(self.chk_preview_window.isChecked()),
+                C.CFG_MODE: self._selected_mode(),
+                C.CFG_DIFF_THRESHOLD: float(self.spin_diff.value()),
+                C.CFG_STABLE_FRAMES: int(self.spin_stable.value()),
+                C.CFG_EDGE_SENSITIVITY: int(self.spin_edge_sensitivity.value()),
+                C.CFG_BINARY_PRESET: self._selected_binary_preset(),
+                C.CFG_TERNARY_PRESET: self._selected_ternary_preset(),
+                C.CFG_SALIENCY_OVERLAY_ALPHA: int(self.spin_saliency_alpha.value()),
+                C.CFG_COMPOSITION_GUIDE: self._selected_composition_guide(),
+                C.CFG_FOCUS_PEAK_SENSITIVITY: int(self.spin_focus_peak_sensitivity.value()),
+                C.CFG_FOCUS_PEAK_COLOR: self._selected_focus_peak_color(),
+                C.CFG_FOCUS_PEAK_THICKNESS: float(self.spin_focus_peak_thickness.value()),
+                C.CFG_SQUINT_MODE: self._selected_squint_mode(),
+                C.CFG_SQUINT_SCALE_PERCENT: int(self.spin_squint_scale.value()),
+                C.CFG_SQUINT_BLUR_SIGMA: float(self.spin_squint_blur.value()),
+                C.CFG_VECTORSCOPE_SHOW_SKIN_LINE: bool(self.chk_vectorscope_skin_line.isChecked()),
+                C.CFG_VECTORSCOPE_WARN_THRESHOLD: int(self.spin_vectorscope_warn_threshold.value()),
+            }
+        )
         save_config(cfg)
         if not silent:
             self.on_status("設定を保存しました")
@@ -1384,7 +1617,9 @@ class MainWindow(QMainWindow):
         self.apply_layout_preset(name)
 
     def save_layout_preset(self):
-        name = self.edit_preset_name.text().strip() or self.combo_layout_presets.currentText().strip()
+        name = (
+            self.edit_preset_name.text().strip() or self.combo_layout_presets.currentText().strip()
+        )
         if not name:
             QMessageBox.information(self, "情報", "プリセット名を入力してください。")
             return
@@ -1462,7 +1697,20 @@ class MainWindow(QMainWindow):
 
             nav = QListWidget()
             nav.setFixedWidth(170)
-            nav.addItems(["キャプチャ", "更新", "散布図", "画像処理", "サリエンシー", "フォーカスピーキング", "スクイント表示", "ベクトルスコープ", "レイアウト"])
+            nav.addItems(
+                [
+                    "キャプチャ",
+                    "更新",
+                    "カラーサークル",
+                    "散布図",
+                    "ベクトルスコープ",
+                    "画像処理",
+                    "フォーカスピーキング",
+                    "スクイント表示",
+                    "サリエンシー",
+                    "レイアウト",
+                ]
+            )
 
             pages = QStackedWidget()
 
@@ -1470,13 +1718,19 @@ class MainWindow(QMainWindow):
             lc = QVBoxLayout(page_capture)
             lc.setContentsMargins(8, 8, 8, 8)
             lc.setSpacing(10)
-            self._row_capture_source_settings = _make_labeled_row("取得元", self.combo_capture_source)
-            lc.addWidget(self._row_capture_source_settings)
+            lc.addWidget(_make_labeled_row("取得元", self.combo_capture_source))
             self._row_target_settings = _make_labeled_row("ターゲット", self.combo_win)
             lc.addWidget(self._row_target_settings)
             lc.addWidget(self.btn_refresh)
             lc.addWidget(self.btn_pick_roi_win)
             lc.addWidget(self.btn_pick_roi_screen)
+            lc.addWidget(_make_labeled_row("解析解像度（長辺）", self.spin_analysis_max_dim))
+            hint_analysis = QLabel(
+                "ヒストグラム/散布図などの解析解像度です。高いほど精度が上がり、負荷も増えます。"
+            )
+            hint_analysis.setWordWrap(True)
+            hint_analysis.setStyleSheet("color:#6b7280;")
+            lc.addWidget(hint_analysis)
             lc.addWidget(self.chk_preview_window)
             lc.addStretch(1)
             pages.addWidget(page_capture)
@@ -1504,8 +1758,27 @@ class MainWindow(QMainWindow):
             ls.addWidget(hint)
             ls.addWidget(_make_labeled_row("表示形状", self.combo_scatter_shape))
             ls.addWidget(_make_labeled_row("散布点数", self.spin_points))
+            ls.addWidget(_make_labeled_row("点の透明度", self.spin_scatter_alpha))
             ls.addStretch(1)
             pages.addWidget(page_scatter)
+
+            page_wheel = QWidget()
+            lw = QVBoxLayout(page_wheel)
+            lw.setContentsMargins(8, 8, 8, 8)
+            lw.setSpacing(10)
+            hint_wheel = QLabel("カラーサークルの色相分類方式を設定します")
+            hint_wheel.setStyleSheet("color:#6b7280;")
+            lw.addWidget(hint_wheel)
+            lw.addWidget(_make_labeled_row("表示方式", self.combo_wheel_mode))
+            lw.addWidget(_make_labeled_row("彩度しきい値", self.spin_wheel_sat_threshold))
+            hint_wheel_sat = QLabel(
+                "この値未満の彩度はカラーサークル集計から除外します。0で最大限拾います。"
+            )
+            hint_wheel_sat.setWordWrap(True)
+            hint_wheel_sat.setStyleSheet("color:#6b7280;")
+            lw.addWidget(hint_wheel_sat)
+            lw.addStretch(1)
+            pages.addWidget(page_wheel)
 
             page_image = QWidget()
             li = QVBoxLayout(page_image)
@@ -1525,7 +1798,9 @@ class MainWindow(QMainWindow):
             lsal.addWidget(QLabel("サリエンシーマップ（スペクトル残差）を調整します"))
             lsal.addWidget(_make_labeled_row("重ね具合", self.spin_saliency_alpha))
             lsal.addWidget(_make_labeled_row("構図ガイド", self.combo_composition_guide))
-            hint_guide = QLabel("補足: 三分割は交点に注目、中央クロスは中心確認、対角線は視線の流れ確認に使えます。")
+            hint_guide = QLabel(
+                "補足: 三分割は交点に注目、中央クロスは中心確認、対角線は視線の流れ確認に使えます。"
+            )
             hint_guide.setWordWrap(True)
             hint_guide.setStyleSheet("color:#6b7280;")
             lsal.addWidget(hint_guide)
@@ -1561,7 +1836,9 @@ class MainWindow(QMainWindow):
             lsq.addWidget(self._row_squint_scale_settings)
             self._row_squint_blur_settings = _make_labeled_row("ぼかし", self.spin_squint_blur)
             lsq.addWidget(self._row_squint_blur_settings)
-            hint_squint = QLabel("補足: モードに応じて縮小率/ぼかしの設定項目を自動で表示切替します。")
+            hint_squint = QLabel(
+                "補足: モードに応じて縮小率/ぼかしの設定項目を自動で表示切替します。"
+            )
             hint_squint.setWordWrap(True)
             hint_squint.setStyleSheet("color:#6b7280;")
             lsq.addWidget(hint_squint)
@@ -1574,10 +1851,21 @@ class MainWindow(QMainWindow):
             lvec.setSpacing(10)
             lvec.addWidget(QLabel("YUVベクトルスコープ表示を調整します"))
             lvec.addWidget(self.chk_vectorscope_skin_line)
-            hint_vec = QLabel("補足: スキントーンラインは、肌色が乗りやすい角度の目安線です。")
+            lvec.addWidget(
+                _make_labeled_row("高彩度しきい値", self.spin_vectorscope_warn_threshold)
+            )
+            hint_vec = QLabel(
+                "補足: R/Y/G/C/B/M の方位はカラーサークルと同じ角度に合わせています。"
+            )
             hint_vec.setWordWrap(True)
             hint_vec.setStyleSheet("color:#6b7280;")
             lvec.addWidget(hint_vec)
+            hint_sat = QLabel(
+                "補足: 高彩度しきい値は絶対基準ではなく、用途に合わせて調整する目安値です。"
+            )
+            hint_sat.setWordWrap(True)
+            hint_sat.setStyleSheet("color:#6b7280;")
+            lvec.addWidget(hint_sat)
             lvec.addStretch(1)
             pages.addWidget(page_vectorscope)
 
@@ -1597,8 +1885,29 @@ class MainWindow(QMainWindow):
             ll.addStretch(1)
             pages.addWidget(page_layout)
 
-            nav.currentRowChanged.connect(pages.setCurrentIndex)
-            nav.setCurrentRow(SETTINGS_PAGE_CAPTURE)
+            self._settings_nav_to_page = [
+                SETTINGS_PAGE_CAPTURE,
+                SETTINGS_PAGE_UPDATE,
+                SETTINGS_PAGE_WHEEL,
+                SETTINGS_PAGE_SCATTER,
+                SETTINGS_PAGE_VECTORSCOPE,
+                SETTINGS_PAGE_IMAGE,
+                SETTINGS_PAGE_FOCUS,
+                SETTINGS_PAGE_SQUINT,
+                SETTINGS_PAGE_SALIENCY,
+                SETTINGS_PAGE_LAYOUT,
+            ]
+            self._settings_page_to_nav = {p: i for i, p in enumerate(self._settings_nav_to_page)}
+
+            def _on_nav_row_changed(row: int):
+                if not hasattr(self, "_settings_nav_to_page"):
+                    return
+                if row < 0 or row >= len(self._settings_nav_to_page):
+                    return
+                pages.setCurrentIndex(int(self._settings_nav_to_page[row]))
+
+            nav.currentRowChanged.connect(_on_nav_row_changed)
+            nav.setCurrentRow(0)
             self._settings_nav = nav
 
             right = QWidget()
@@ -1619,7 +1928,12 @@ class MainWindow(QMainWindow):
 
         if hasattr(self, "_settings_nav"):
             page = max(0, min(SETTINGS_PAGE_LAYOUT, int(page_index)))
-            self._settings_nav.setCurrentRow(page)
+            nav_row = (
+                self._settings_page_to_nav.get(page, 0)
+                if hasattr(self, "_settings_page_to_nav")
+                else 0
+            )
+            self._settings_nav.setCurrentRow(int(nav_row))
 
         self._sync_capture_source_ui()
         self._sync_mode_dependent_rows()
@@ -1632,36 +1946,63 @@ class MainWindow(QMainWindow):
         if hasattr(self, "_settings_window"):
             self._settings_window.hide()
 
+    def _on_roi_selector_destroyed(self, selector):
+        self._roi_selectors = [s for s in self._roi_selectors if s is not selector]
+        if self._roi_selector is selector:
+            self._roi_selector = self._roi_selectors[0] if self._roi_selectors else None
+
+    def _close_roi_selectors(self):
+        selectors = list(self._roi_selectors)
+        if self._roi_selector is not None and self._roi_selector not in selectors:
+            selectors.append(self._roi_selector)
+        self._roi_selectors = []
+        self._roi_selector = None
+        for sel in selectors:
+            try:
+                sel.close()
+            except Exception:
+                pass
+
+    def _open_multi_screen_roi_selectors(self, help_text: str, on_selected):
+        self._close_roi_selectors()
+        screens = [s for s in QGuiApplication.screens() if s is not None]
+        if not screens:
+            ps = QGuiApplication.primaryScreen()
+            if ps is not None:
+                screens = [ps]
+        selectors = []
+        for screen in screens:
+            sel = RoiSelector(bounds=screen.geometry(), help_text=help_text, as_window=True)
+            sel.roiSelected.connect(on_selected)
+            sel.destroyed.connect(lambda _=None, s=sel: self._on_roi_selector_destroyed(s))
+            sel.createWinId()
+            handle = sel.windowHandle()
+            if handle is not None:
+                handle.setScreen(screen)
+            selectors.append(sel)
+        self._roi_selectors = selectors
+        self._roi_selector = selectors[0] if selectors else None
+        for sel in selectors:
+            sel.show()
+            sel.raise_()
+            sel.activateWindow()
+
     def pick_roi_on_screen(self):
         if self._selected_capture_source() != C.CAPTURE_SOURCE_SCREEN:
             idx = self.combo_capture_source.findData(C.CAPTURE_SOURCE_SCREEN)
             if idx >= 0:
                 self.combo_capture_source.setCurrentIndex(idx)
-        target_screen = QGuiApplication.screenAt(QCursor.pos())
-        if target_screen is None:
-            target_screen = QGuiApplication.primaryScreen()
-        bounds = target_screen.geometry() if target_screen is not None else None
         help_text = "画面上で領域をドラッグ選択（Escでキャンセル）"
-        sel = RoiSelector(bounds=bounds, help_text=help_text, as_window=True)
-        if target_screen is not None:
-            sel.createWinId()
-            handle = sel.windowHandle()
-            if handle is not None:
-                handle.setScreen(target_screen)
-        sel.roiSelected.connect(self.on_roi_screen_selected)
-        self._roi_selector = sel
-        sel.show()
-        sel.raise_()
-        sel.activateWindow()
+        self._open_multi_screen_roi_selectors(help_text, self.on_roi_screen_selected)
         self.on_status("画面領域選択中…")
 
     def on_roi_screen_selected(self, r: QRect):
+        self._close_roi_selectors()
         # 画面領域モードに切り替え（ウィンドウターゲットは解除）
         self.worker.set_target_window(None)
         self.worker.set_roi_on_screen(r)
         self.worker.set_roi_in_window(None)
         set_current_index_blocked(self.combo_win, 0)
-        self._roi_selector = None
         self.on_status(f"画面領域: x={r.left()} y={r.top()} w={r.width()} h={r.height()}")
         self._update_preview_snapshot()
 
@@ -1671,38 +2012,47 @@ class MainWindow(QMainWindow):
             if idx >= 0:
                 self.combo_capture_source.setCurrentIndex(idx)
         if not HAS_WIN32:
-            QMessageBox.information(self, "情報", "この環境ではウィンドウ選択は使えません。\n画面の領域選択を使ってください。")
+            QMessageBox.information(
+                self,
+                "情報",
+                "この環境ではウィンドウ選択は使えません。\n画面の領域選択を使ってください。",
+            )
             return
         hwnd = self.combo_win.currentData()
         if hwnd is None:
             QMessageBox.information(self, "情報", "まずターゲットウィンドウを選んでください。")
             return
-        bounds = self.worker._get_window_rect(int(hwnd))
-        if bounds is None:
+        bounds_native = self.worker._get_window_rect(int(hwnd))
+        if bounds_native is None:
             QMessageBox.warning(self, "警告", "ウィンドウ矩形の取得に失敗しました。")
             return
-
-        help_text = "ターゲットウィンドウ内で領域をドラッグ選択（Escでキャンセル）"
-        sel = RoiSelector(bounds=bounds, help_text=help_text)
-        sel.roiSelected.connect(lambda r: self.on_roi_window_selected(hwnd, bounds, r))
-        self._roi_selector = sel
-        sel.show()
-        sel.raise_()
-        sel.activateWindow()
+        help_text = "ターゲットウィンドウ付近で領域をドラッグ選択（ウィンドウ外は自動で切り詰め）"
+        self._open_multi_screen_roi_selectors(
+            help_text,
+            lambda r, h=int(hwnd), wr=QRect(bounds_native): self.on_roi_window_selected(h, wr, r),
+        )
         self.on_status("ウィンドウ内領域選択中…")
 
-    def on_roi_window_selected(self, hwnd: int, wrect: QRect, roi_abs: QRect):
-        rel = QRect(roi_abs.left() - wrect.left(), roi_abs.top() - wrect.top(), roi_abs.width(), roi_abs.height())
+    def on_roi_window_selected(self, hwnd: int, wrect: QRect, roi_abs_logical: QRect):
+        self._close_roi_selectors()
+        roi_abs_native = self.worker._logical_rect_to_native(roi_abs_logical)
+        hit = roi_abs_native.intersected(wrect)
+        if hit.width() < 10 or hit.height() < 10:
+            self.on_status(
+                "選択領域がターゲットウィンドウに重なっていません。もう一度選択してください。"
+            )
+            return
+
+        rel = QRect(hit.left() - wrect.left(), hit.top() - wrect.top(), hit.width(), hit.height())
         self.worker.set_target_window(hwnd)
         self.worker.set_roi_on_screen(None)
         self.worker.set_roi_in_window(rel)
-        self._roi_selector = None
-        self.on_status(f"ウィンドウ領域: rel_x={rel.left()} rel_y={rel.top()} w={rel.width()} h={rel.height()}")
+        self.on_status(
+            f"ウィンドウ領域: rel_x={rel.left()} rel_y={rel.top()} w={rel.width()} h={rel.height()}"
+        )
         self._update_preview_snapshot()
 
     def on_result(self, res: dict):
-        x, y, w, h = res["cap"]
-
         if self.preview_window.isVisible():
             self.preview_window.update_preview(res["bgr_preview"])
 
@@ -1715,7 +2065,11 @@ class MainWindow(QMainWindow):
                     _, bars = top_hue_bars(res["hist"])
                 self._last_top_bars = bars
                 self.top_colors_bar.setPixmap(
-                    render_top_color_bar(bars or [], width=self.top_colors_bar.width(), height=self.top_colors_bar.height())
+                    render_top_color_bar(
+                        bars or [],
+                        width=self.top_colors_bar.width(),
+                        height=self.top_colors_bar.height(),
+                    )
                 )
                 self.lbl_warmcool.setText(
                     f"暖色: {res['warm_ratio']*100:.1f}%   寒色: {res['cool_ratio']*100:.1f}%   その他: {res.get('other_ratio',0)*100:.1f}%"
@@ -1744,6 +2098,7 @@ class MainWindow(QMainWindow):
                 self.squint_view.update_squint(res["bgr_preview"])
             if self.dock_vectorscope.isVisible():
                 self.vectorscope_view.update_scope(res["bgr_preview"])
+                self._update_vectorscope_warning_label()
 
         # 計測情報は非表示にする要求に合わせて更新しない
 

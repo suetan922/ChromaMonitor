@@ -5,15 +5,15 @@ DEFAULT_ROI_SIZE = (640, 360)
 
 # Analyzer constraints
 ANALYZER_MAX_DIM = 400
+ANALYZER_MAX_DIM_MIN = 120
+ANALYZER_MAX_DIM_MAX = 2000
+ANALYZER_MAX_DIM_STEP = 20
 ANALYZER_MIN_INTERVAL_SEC = 0.05
 ANALYZER_MIN_SAMPLE_POINTS = 500
+ANALYZER_MAX_SAMPLE_POINTS = 200000
 ANALYZER_MIN_GRAPH_EVERY = 1
 ANALYZER_MIN_DIFF_THRESHOLD = 0.5
 ANALYZER_MIN_STABLE_FRAMES = 1
-
-# Masks for hue histogram (ignore near-gray/dark)
-SAT_MASK_THRESHOLD = 15
-VAL_MASK_THRESHOLD = 20
 
 # Capture sources
 CAPTURE_SOURCE_WINDOW = "window"
@@ -24,6 +24,11 @@ CAPTURE_SOURCES = (CAPTURE_SOURCE_WINDOW, CAPTURE_SOURCE_SCREEN)
 SCATTER_SHAPE_SQUARE = "square"
 SCATTER_SHAPE_TRIANGLE = "triangle"
 SCATTER_SHAPES = (SCATTER_SHAPE_SQUARE, SCATTER_SHAPE_TRIANGLE)
+
+# Color wheel display modes
+WHEEL_MODE_HSV180 = "hsv180"
+WHEEL_MODE_MUNSELL40 = "munsell40"
+WHEEL_MODES = (WHEEL_MODE_HSV180, WHEEL_MODE_MUNSELL40)
 
 # Update modes
 UPDATE_MODE_INTERVAL = "interval"
@@ -72,9 +77,102 @@ SQUINT_MODES = (
 
 # Vectorscope
 VECTORSCOPE_SIZE = 256
+VECTORSCOPE_CHROMA_FULL_SCALE = 181.0
 VECTORSCOPE_SKIN_LINE_ANGLE_DEG = 123.0
-VECTORSCOPE_SKIN_LINE_INNER_RATIO = 0.04
-VECTORSCOPE_SKIN_LINE_OUTER_RATIO = 0.92
+VECTORSCOPE_SCOPE_RADIUS_RATIO = 0.46
+VECTORSCOPE_WARN_THRESHOLD_MIN = 40
+VECTORSCOPE_WARN_THRESHOLD_MAX = 100
+VECTORSCOPE_WARN_COLOR_BGR = (32, 64, 250)
+
+# Color wheel orientation
+# YUV vectorscope基準に合わせる。0度(赤)はおおむね左上方向。
+COLOR_WHEEL_HUE_OFFSET_DEG = 106.0
+
+# Munsell-like 40 hue labels and palette (2.5 steps)
+MUNSELL_HUE_LABELS = (
+    "2.5R",
+    "5R",
+    "7.5R",
+    "10R",
+    "2.5YR",
+    "5YR",
+    "7.5YR",
+    "10YR",
+    "2.5Y",
+    "5Y",
+    "7.5Y",
+    "10Y",
+    "2.5GY",
+    "5GY",
+    "7.5GY",
+    "10GY",
+    "2.5G",
+    "5G",
+    "7.5G",
+    "10G",
+    "2.5BG",
+    "5BG",
+    "7.5BG",
+    "10BG",
+    "2.5B",
+    "5B",
+    "7.5B",
+    "10B",
+    "2.5PB",
+    "5PB",
+    "7.5PB",
+    "10PB",
+    "2.5P",
+    "5P",
+    "7.5P",
+    "10P",
+    "2.5RP",
+    "5RP",
+    "7.5RP",
+    "10RP",
+)
+MUNSELL_COLORS_RGB = (
+    (218, 43, 97),
+    (227, 32, 55),
+    (228, 31, 32),
+    (233, 108, 28),
+    (237, 148, 20),
+    (242, 172, 0),
+    (246, 194, 0),
+    (247, 200, 0),
+    (241, 211, 2),
+    (240, 220, 0),
+    (241, 224, 0),
+    (222, 217, 1),
+    (200, 214, 35),
+    (167, 198, 56),
+    (112, 180, 62),
+    (43, 169, 58),
+    (0, 157, 81),
+    (0, 161, 103),
+    (0, 161, 125),
+    (0, 156, 142),
+    (0, 152, 156),
+    (0, 148, 163),
+    (2, 137, 159),
+    (2, 135, 165),
+    (0, 122, 163),
+    (0, 110, 174),
+    (1, 94, 169),
+    (0, 76, 157),
+    (7, 62, 149),
+    (35, 39, 137),
+    (54, 39, 138),
+    (72, 39, 130),
+    (64, 40, 131),
+    (81, 40, 132),
+    (116, 39, 137),
+    (151, 27, 134),
+    (173, 37, 136),
+    (195, 38, 133),
+    (202, 38, 133),
+    (222, 35, 105),
+)
 
 # Composition guides
 COMPOSITION_GUIDE_NONE = "none"
@@ -94,6 +192,9 @@ DEFAULT_SAMPLE_POINTS = 10000
 DEFAULT_GRAPH_EVERY = 1
 DEFAULT_CAPTURE_SOURCE = CAPTURE_SOURCE_WINDOW
 DEFAULT_SCATTER_SHAPE = SCATTER_SHAPE_SQUARE
+DEFAULT_SCATTER_POINT_ALPHA = 0.63
+DEFAULT_WHEEL_MODE = WHEEL_MODE_HSV180
+DEFAULT_WHEEL_SAT_THRESHOLD = 1
 DEFAULT_EDGE_SENSITIVITY = 50
 DEFAULT_BINARY_PRESET = BINARY_PRESET_AUTO
 DEFAULT_TERNARY_PRESET = TERNARY_PRESET_STANDARD
@@ -106,23 +207,8 @@ DEFAULT_SQUINT_MODE = SQUINT_MODE_SCALE_BLUR
 DEFAULT_SQUINT_SCALE_PERCENT = 18
 DEFAULT_SQUINT_BLUR_SIGMA = 1.8
 DEFAULT_VECTORSCOPE_SHOW_SKIN_LINE = True
+DEFAULT_VECTORSCOPE_WARN_THRESHOLD = 90
 DEFAULT_PREVIEW_WINDOW = False
-
-# Color bins (label, ranges, rgb) — より細かく12分割程度
-HUE_BINS = [
-    ("R", [(0, 8), (172, 180)], (255, 40, 40)),
-    ("RO", [(8, 22)], (255, 90, 40)),
-    ("O", [(22, 30)], (255, 140, 50)),
-    ("OY", [(30, 40)], (255, 190, 60)),
-    ("Y", [(40, 50)], (245, 215, 70)),
-    ("YG", [(50, 70)], (180, 220, 60)),
-    ("G", [(70, 95)], (60, 185, 80)),
-    ("GB", [(95, 115)], (40, 180, 150)),
-    ("C", [(115, 130)], (60, 200, 210)),
-    ("B", [(130, 150)], (70, 130, 255)),
-    ("PB", [(150, 165)], (130, 90, 255)),
-    ("P", [(165, 172)], (200, 80, 220)),
-]
 
 # UI colors for histograms
 H_COLOR = QColor(220, 90, 90)
@@ -139,6 +225,11 @@ WINDOW_LIST_MAX_ITEMS = 500
 VIEW_MIN_SIZE = 48
 
 # Shared UI ranges
+WHEEL_SAT_THRESHOLD_MIN = 0
+WHEEL_SAT_THRESHOLD_MAX = 255
+SCATTER_POINT_ALPHA_MIN = 0.0
+SCATTER_POINT_ALPHA_MAX = 1.0
+SCATTER_POINT_ALPHA_STEP = 0.01
 EDGE_SENSITIVITY_MIN = 1
 EDGE_SENSITIVITY_MAX = 100
 SALIENCY_ALPHA_MIN = 0
@@ -162,7 +253,11 @@ TOP_COLOR_BAR_HEIGHT = 24
 # Config keys
 CFG_INTERVAL = "interval"
 CFG_SAMPLE_POINTS = "sample_points"
+CFG_ANALYZER_MAX_DIM = "analyzer_max_dim"
 CFG_SCATTER_SHAPE = "scatter_shape"
+CFG_SCATTER_POINT_ALPHA = "scatter_point_alpha"
+CFG_WHEEL_MODE = "wheel_mode"
+CFG_WHEEL_SAT_THRESHOLD = "wheel_sat_threshold"
 CFG_GRAPH_EVERY = "graph_every"
 CFG_CAPTURE_SOURCE = "capture_source"
 CFG_EDGE_SENSITIVITY = "edge_sensitivity"
@@ -177,6 +272,7 @@ CFG_SQUINT_MODE = "squint_mode"
 CFG_SQUINT_SCALE_PERCENT = "squint_scale_percent"
 CFG_SQUINT_BLUR_SIGMA = "squint_blur_sigma"
 CFG_VECTORSCOPE_SHOW_SKIN_LINE = "vectorscope_show_skin_line"
+CFG_VECTORSCOPE_WARN_THRESHOLD = "vectorscope_warn_threshold"
 CFG_PREVIEW_WINDOW = "preview_window"
 CFG_MODE = "mode"
 CFG_DIFF_THRESHOLD = "diff_threshold"
