@@ -103,7 +103,7 @@ def show_settings_window(main_window, page_index: int = 0):
         main_window._row_diff_settings = _make_labeled_row("差分閾値", main_window.spin_diff)
         lu.addWidget(main_window._row_diff_settings)
         main_window._hint_diff_settings = _make_hint_label(
-            "補足: 値を下げるほど小さな変化にも反応し、上げるほど大きな変化のみで更新します。",
+            "値を下げるほど小さな変化にも反応し、上げるほど大きな変化のみで更新します。",
             word_wrap=True,
         )
         lu.addWidget(main_window._hint_diff_settings)
@@ -112,7 +112,7 @@ def show_settings_window(main_window, page_index: int = 0):
         )
         lu.addWidget(main_window._row_stable_settings)
         main_window._hint_stable_settings = _make_hint_label(
-            "補足: 変化検知後、このフレーム数だけ安定した状態が続くと更新します。",
+            "変化検知後、このフレーム数だけ安定した状態が続くと更新します。",
             word_wrap=True,
         )
         lu.addWidget(main_window._hint_stable_settings)
