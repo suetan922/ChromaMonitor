@@ -1,9 +1,7 @@
-# Windows window enumeration（pywin32 が無い場合は ctypes で代替）
-import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Optional
 
 import cv2
 import mss
@@ -11,241 +9,18 @@ import numpy as np
 from PySide6.QtCore import QObject, QPoint, QRect, Signal
 from PySide6.QtGui import QGuiApplication
 
+from .analysis.frame_analysis import (
+    _compute_top_colors,
+    _compute_warm_cool_ratios,
+    _compute_wheel_histogram,
+    _sample_sv_and_rgb,
+    analyze_bgr_frame,
+)
+from .capture.win32_windows import HAS_WIN32, ctypes_win_api, win32gui
 from .util import constants as C
 from .util.functions import clamp_int, resize_by_long_edge
 
-HAS_WIN32 = sys.platform.startswith("win")
-
-_ctypes_win = None
-if HAS_WIN32:
-    try:
-        import win32gui  # type: ignore
-    except Exception:
-        win32gui = None
-        try:
-            import ctypes
-            from ctypes import wintypes
-
-            user32 = ctypes.windll.user32
-            _ctypes_win = {
-                "EnumWindows": user32.EnumWindows,
-                "IsWindowVisible": user32.IsWindowVisible,
-                "GetWindowTextW": user32.GetWindowTextW,
-                "GetWindowTextLengthW": user32.GetWindowTextLengthW,
-                "GetWindowRect": user32.GetWindowRect,
-                "IsIconic": user32.IsIconic,
-            }
-            # argtypes を設定して不正呼び出しを防ぐ
-            _ctypes_win["EnumWindows"].argtypes = [
-                ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM),
-                wintypes.LPARAM,
-            ]
-            _ctypes_win["IsWindowVisible"].argtypes = [wintypes.HWND]
-            _ctypes_win["GetWindowTextW"].argtypes = [wintypes.HWND, wintypes.LPWSTR, ctypes.c_int]
-            _ctypes_win["GetWindowTextLengthW"].argtypes = [wintypes.HWND]
-            _ctypes_win["GetWindowRect"].argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.RECT)]
-            _ctypes_win["IsIconic"].argtypes = [wintypes.HWND]
-        except Exception:
-            HAS_WIN32 = False
-
-
-def list_windows():
-    """Return list of (hwnd, title) for visible top-level windows."""
-    if not HAS_WIN32:
-        return []
-    out = []
-    if win32gui:
-
-        def enum_proc(hwnd, _):
-            if not win32gui.IsWindowVisible(hwnd):
-                return
-            title = win32gui.GetWindowText(hwnd)
-            if not title or not title.strip():
-                return
-            out.append((hwnd, title))
-
-        win32gui.EnumWindows(enum_proc, None)
-    elif _ctypes_win:
-        import ctypes
-        from ctypes import wintypes
-
-        EnumWindows = _ctypes_win["EnumWindows"]
-        IsWindowVisible = _ctypes_win["IsWindowVisible"]
-        GetWindowTextLengthW = _ctypes_win["GetWindowTextLengthW"]
-        GetWindowTextW = _ctypes_win["GetWindowTextW"]
-
-        @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
-        def enum_proc(hwnd, lparam):
-            if not IsWindowVisible(hwnd):
-                return True
-            length = GetWindowTextLengthW(hwnd)
-            if length == 0:
-                return True
-            buf = ctypes.create_unicode_buffer(length + 1)
-            GetWindowTextW(hwnd, buf, length + 1)
-            title = buf.value
-            if title and title.strip():
-                out.append((hwnd, title))
-            return True
-
-        EnumWindows(enum_proc, 0)
-
-    out.sort(key=lambda x: x[1].lower())
-    return out
-
-
-def _compute_wheel_histogram(h_wheel: np.ndarray) -> np.ndarray:
-    if h_wheel.size == 0:
-        return np.zeros(180, dtype=np.int64)
-
-    hist_raw = np.bincount(h_wheel.reshape(-1), minlength=180)
-    kernel = np.array([1, 2, 3, 2, 1], dtype=np.float32)
-    kernel = kernel / kernel.sum()
-    hist_pad = np.concatenate([hist_raw[-2:], hist_raw, hist_raw[:2]]).astype(np.float32)
-    hist_smooth = np.convolve(hist_pad, kernel, mode="valid")
-    return hist_smooth.astype(np.int64)
-
-
-def _compute_warm_cool_ratios(h_wheel: np.ndarray) -> tuple[float, float, float]:
-    if h_wheel.size == 0:
-        return 0.0, 0.0, 0.0
-
-    warm = np.logical_or(h_wheel < 30, h_wheel >= 150)
-    cool = np.logical_and(h_wheel >= 75, h_wheel < 135)
-    warm_count = float(warm.sum())
-    cool_count = float(cool.sum())
-    total_color = float(h_wheel.size)
-    other_count = max(0.0, total_color - warm_count - cool_count)
-    return warm_count / total_color, cool_count / total_color, other_count / total_color
-
-
-def _compute_top_colors(bgr: np.ndarray, h_wheel: np.ndarray, wheel_mask: np.ndarray) -> list[tuple[float, tuple[int, int, int]]]:
-    top_colors: list[tuple[float, tuple[int, int, int]]] = []
-    if not wheel_mask.any():
-        return top_colors
-
-    rgb_full = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    rgb_masked = rgb_full[wheel_mask]
-    seg_size = 10  # 2度/ビン *10 = 20度
-    seg_idx = (h_wheel // seg_size).astype(np.int32)
-    seg_counts = np.bincount(seg_idx, minlength=18)[:18]
-    order = np.argsort(seg_counts)[::-1]
-    top5_idx = [i for i in order if seg_counts[i] > 0][:C.TOP_COLORS_COUNT]
-    top_sum = float(seg_counts[top5_idx].sum()) if top5_idx else 0.0
-    for seg in top5_idx:
-        cnt = int(seg_counts[seg])
-        if cnt <= 0:
-            continue
-        ratio = cnt / top_sum if top_sum > 0 else 0.0  # 上位5で正規化し合計100%に
-        mask_seg = seg_idx == seg
-        sel = rgb_masked[mask_seg]
-        if sel.size == 0:
-            hue_center = int((seg * seg_size + seg_size / 2) * 2)
-            hsv_val = np.uint8([[[hue_center, 255, 255]]])
-            rgb_val = cv2.cvtColor(hsv_val, cv2.COLOR_HSV2RGB)[0, 0]
-        else:
-            rgb_val = np.mean(sel, axis=0).astype(np.uint8)
-        top_colors.append((ratio, (int(rgb_val[0]), int(rgb_val[1]), int(rgb_val[2]))))
-    return top_colors
-
-
-def _sample_sv_and_rgb(s: np.ndarray, v: np.ndarray, bgr: np.ndarray, sample_points: int) -> tuple[np.ndarray, np.ndarray]:
-    flat_s = s.reshape(-1)
-    flat_v = v.reshape(-1)
-    n = flat_s.size
-    points = max(1, int(sample_points))
-    k = min(points, n)
-    if k < n:
-        idx = np.random.randint(0, n, size=k, dtype=np.int32)
-    else:
-        idx = np.arange(n, dtype=np.int32)
-    sv = np.column_stack([flat_s[idx], flat_v[idx]])
-    rgb_flat = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB).reshape(-1, 3)
-    rgb = rgb_flat[idx]
-    return sv, rgb
-
-
-def _analyze_bgr_frame(
-    bgr: np.ndarray,
-    sample_points: int,
-    wheel_sat_threshold: int,
-    progress_cb: Optional[Callable[[int, str], None]] = None,
-    cancel_cb: Optional[Callable[[], bool]] = None,
-) -> Optional[dict]:
-    """Analyze one BGR frame and return the same payload shape as live capture."""
-
-    def _emit_progress(percent: int, text: str):
-        if progress_cb is not None:
-            progress_cb(int(percent), text)
-
-    def _is_canceled() -> bool:
-        if cancel_cb is None:
-            return False
-        try:
-            return bool(cancel_cb())
-        except Exception:
-            return False
-
-    if bgr is None or bgr.size == 0:
-        raise ValueError("empty frame")
-
-    _emit_progress(15, "HSVへ変換中…")
-    if _is_canceled():
-        return None
-    hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-    h, s, v = cv2.split(hsv)
-
-    # H/S/Vヒストグラム側は色相未定義(S=0)のみ除外
-    hue_valid_mask = s > 0
-    # カラーサークル側は設定可能な彩度しきい値で集計
-    sat_th = clamp_int(wheel_sat_threshold, C.WHEEL_SAT_THRESHOLD_MIN, C.WHEEL_SAT_THRESHOLD_MAX)
-    wheel_mask = s >= sat_th
-
-    _emit_progress(30, "色相ヒストグラム集計中…")
-    if _is_canceled():
-        return None
-    h_masked = h[hue_valid_mask]
-    h_wheel = h[wheel_mask]
-    hist = _compute_wheel_histogram(h_wheel)
-    warm_ratio, cool_ratio, other_ratio = _compute_warm_cool_ratios(h_wheel)
-
-    h_std = float(np.std(h))
-    s_std = float(np.std(s))
-    v_std = float(np.std(v))
-
-    _emit_progress(45, "散布図サンプル生成中…")
-    if _is_canceled():
-        return None
-    sv, rgb = _sample_sv_and_rgb(s, v, bgr, sample_points)
-
-    _emit_progress(65, "トップ色を計算中…")
-    if _is_canceled():
-        return None
-    top_colors = _compute_top_colors(bgr, h_wheel, wheel_mask)
-
-    h_img, w_img = bgr.shape[:2]
-    _emit_progress(85, "結果を反映中…")
-    if _is_canceled():
-        return None
-    return {
-        "bgr_preview": bgr,
-        "hist": hist,
-        "sv": sv,
-        "rgb": rgb,
-        "h_plane": h_masked,
-        "s_plane": s,
-        "v_plane": v,
-        "top_colors": top_colors,
-        "h_std": h_std,
-        "s_std": s_std,
-        "v_std": v_std,
-        "warm_ratio": warm_ratio,
-        "cool_ratio": cool_ratio,
-        "other_ratio": other_ratio,
-        "dt_ms": 0.0,  # caller fills actual timing
-        "cap": (0, 0, int(w_img), int(h_img)),
-        "graph_update": True,
-    }
+_ctypes_win = ctypes_win_api
 
 
 class ImageFileAnalyzeWorker(QObject):
@@ -262,6 +37,7 @@ class ImageFileAnalyzeWorker(QObject):
         self._cancel = threading.Event()
 
     def request_cancel(self):
+        # キャンセルは排他不要のイベントフラグで通知する。
         self._cancel.set()
 
     def _is_canceled(self) -> bool:
@@ -272,6 +48,7 @@ class ImageFileAnalyzeWorker(QObject):
 
     def run(self):
         try:
+            # OpenCVの日本語パス対応のため、imdecode経路で読み込む。
             self._emit_progress(1, "画像を読み込み中…")
             if self._is_canceled():
                 self.canceled.emit()
@@ -293,7 +70,7 @@ class ImageFileAnalyzeWorker(QObject):
                 return
 
             t0 = time.perf_counter()
-            res = _analyze_bgr_frame(
+            res = analyze_bgr_frame(
                 bgr=bgr,
                 sample_points=self.sample_points,
                 wheel_sat_threshold=self.wheel_sat_threshold,
@@ -324,6 +101,11 @@ class AnalyzerConfig:
     mode: str = C.DEFAULT_MODE
     diff_threshold: float = C.DEFAULT_DIFF_THRESHOLD
     stable_frames: int = C.DEFAULT_STABLE_FRAMES
+    view_color: bool = True
+    view_scatter: bool = True
+    view_hsv_hist: bool = True
+    view_image: bool = True
+    want_preview: bool = False
 
 
 class AnalyzerWorker(QObject):
@@ -335,6 +117,8 @@ class AnalyzerWorker(QObject):
         self.cfg = AnalyzerConfig()
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
+        # UIスレッドが処理しきれないとキューが肥大化するため、未処理フレームは1件までに制限
+        self._result_inflight = threading.Event()
 
         self.target_hwnd: Optional[int] = None
         self.roi_rel: Optional[QRect] = None
@@ -348,18 +132,37 @@ class AnalyzerWorker(QObject):
         self._stable_frames: int = 0
         self._was_stable: bool = False
         self._cooldown_until: float = 0.0
+        self._force_emit_once: bool = False
+
+    def _reset_change_state(self, emit_once: bool = False):
+        # changeモードの履歴を初期化する。
+        self._prev_h = None
+        self._prev_s = None
+        self._prev_v = None
+        self._stable_frames = 0
+        self._was_stable = False
+        self._cooldown_until = 0.0
+        if emit_once:
+            self._force_emit_once = True
 
     def start(self):
+        # 既に稼働中なら二重起動しない。
         if self._thread and self._thread.is_alive():
             return
         self._stop.clear()
+        self._result_inflight.clear()
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         self.status.emit("計測開始")
 
     def stop(self):
+        # 停止要求は次ループで反映される。
         self._stop.set()
+        self._result_inflight.clear()
         self.status.emit("停止")
+
+    def mark_result_consumed(self):
+        self._result_inflight.clear()
 
     def set_interval(self, sec: float):
         self.cfg.interval_sec = max(C.ANALYZER_MIN_INTERVAL_SEC, float(sec))
@@ -370,6 +173,11 @@ class AnalyzerWorker(QObject):
         )
 
     def set_max_dim(self, n: int):
+        n = int(n)
+        if n <= 0:
+            # 0 はオリジナル解像度（縮小なし）として扱う
+            self.cfg.max_dim = 0
+            return
         self.cfg.max_dim = clamp_int(n, C.ANALYZER_MAX_DIM_MIN, C.ANALYZER_MAX_DIM_MAX)
 
     def set_wheel_sat_threshold(self, n: int):
@@ -383,12 +191,7 @@ class AnalyzerWorker(QObject):
     def set_mode(self, mode: str):
         self.cfg.mode = mode if mode in C.UPDATE_MODES else C.DEFAULT_MODE
         # モード切替時は差分検知用の状態をリセット
-        self._prev_h = None
-        self._prev_s = None
-        self._prev_v = None
-        self._stable_frames = 0
-        self._was_stable = False
-        self._cooldown_until = 0.0
+        self._reset_change_state()
 
     def set_diff_threshold(self, th: float):
         self.cfg.diff_threshold = max(C.ANALYZER_MIN_DIFF_THRESHOLD, float(th))
@@ -396,18 +199,42 @@ class AnalyzerWorker(QObject):
     def set_stable_frames(self, n: int):
         self.cfg.stable_frames = max(C.ANALYZER_MIN_STABLE_FRAMES, int(n))
 
+    def set_view_flags(
+        self,
+        color: Optional[bool] = None,
+        scatter: Optional[bool] = None,
+        hsv_hist: Optional[bool] = None,
+        image: Optional[bool] = None,
+        preview: Optional[bool] = None,
+    ):
+        if color is not None:
+            self.cfg.view_color = bool(color)
+        if scatter is not None:
+            self.cfg.view_scatter = bool(scatter)
+        if hsv_hist is not None:
+            self.cfg.view_hsv_hist = bool(hsv_hist)
+        if image is not None:
+            self.cfg.view_image = bool(image)
+        if preview is not None:
+            self.cfg.want_preview = bool(preview)
+
     def set_target_window(self, hwnd: Optional[int]):
+        # 取得対象切替時は差分履歴を捨てて誤判定を避ける。
         self.target_hwnd = hwnd
+        self._reset_change_state(emit_once=True)
 
     def set_roi_in_window(self, roi_rel: Optional[QRect]):
         self.roi_rel = roi_rel
+        self._reset_change_state(emit_once=True)
 
     def set_roi_on_screen(self, roi_abs: Optional[QRect]):
         if roi_abs is None:
             self.roi_abs = None
+            self._reset_change_state(emit_once=True)
             return
         # Qtの論理座標からmssが扱う物理座標へ変換して保持する
         self.roi_abs = self._logical_rect_to_native(roi_abs)
+        self._reset_change_state(emit_once=True)
 
     def _get_window_rect(self, hwnd: int) -> Optional[QRect]:
         if not HAS_WIN32:
@@ -448,6 +275,7 @@ class AnalyzerWorker(QObject):
             return False
 
     def _build_screen_monitor_map(self):
+        # Qt画面情報（論理座標）と mss 画面情報（物理座標）を近似マッチングする。
         qt_screens = QGuiApplication.screens()
         if not qt_screens:
             return {}
@@ -532,6 +360,7 @@ class AnalyzerWorker(QObject):
         return mapping
 
     def _logical_point_to_native(self, x: float, y: float, mapping) -> tuple[float, float]:
+        # 入力点がどの screen に属するかを判定して物理座標へ変換する。
         screen = QGuiApplication.screenAt(QPoint(int(round(x)), int(round(y))))
         if screen is None:
             screens = QGuiApplication.screens()
@@ -550,6 +379,7 @@ class AnalyzerWorker(QObject):
         return nx, ny
 
     def _logical_rect_to_native(self, rect: QRect) -> QRect:
+        # 論理矩形の四隅を物理座標へ写像して新しい矩形を作る。
         mapping = self._build_screen_monitor_map()
         if not mapping:
             return QRect(rect)
@@ -567,6 +397,7 @@ class AnalyzerWorker(QObject):
         return QRect(left, top, width, height)
 
     def _compute_capture_rect(self) -> Optional[QRect]:
+        # window モードでは roi_rel を window 座標系として解決する。
         if self.target_hwnd is not None:
             wrect = self._get_window_rect(self.target_hwnd)
             if wrect is None:
@@ -653,8 +484,8 @@ class AnalyzerWorker(QObject):
                 ok = user32.PrintWindow(hwnd, mem_dc, PW_RENDERFULLCONTENT)
                 if not ok:
                     ok = user32.PrintWindow(hwnd, mem_dc, 0)
-                if not ok:
-                    return None
+                    if not ok:
+                        return None
 
                 size = width * height * 4
                 buf = (ctypes.c_ubyte * size).from_address(bits.value)
@@ -708,6 +539,40 @@ class AnalyzerWorker(QObject):
         )
         return crop, cap
 
+    def _capture_screen_region(
+        self, sct, cap: Optional[QRect]
+    ) -> tuple[Optional[np.ndarray], Optional[QRect], Optional[str]]:
+        vmon = sct.monitors[0]
+        if cap is None:
+            # 初回は画面中央に既定ROIを自動生成する。
+            cw, ch = C.DEFAULT_ROI_SIZE
+            cx = vmon["left"] + vmon["width"] // 2
+            cy = vmon["top"] + vmon["height"] // 2
+            cap = QRect(cx - cw // 2, cy - ch // 2, cw, ch)
+            self.roi_abs = cap
+
+        left = max(cap.left(), vmon["left"])
+        top = max(cap.top(), vmon["top"])
+        right = min(cap.left() + cap.width(), vmon["left"] + vmon["width"])
+        bottom = min(cap.top() + cap.height(), vmon["top"] + vmon["height"])
+        width = right - left
+        height = bottom - top
+        if width <= 1 or height <= 1:
+            return None, None, "領域が画面外です（範囲を選び直してください）"
+
+        mon = {
+            "left": int(left),
+            "top": int(top),
+            "width": int(width),
+            "height": int(height),
+        }
+        try:
+            img = np.array(sct.grab(mon))
+        except mss.exception.ScreenShotError:
+            return None, None, "画面キャプチャに失敗しました（権限/表示/Wayland設定を確認）"
+        bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        return bgr, QRect(int(left), int(top), int(width), int(height)), None
+
     def capture_once(self) -> tuple[Optional[np.ndarray], Optional[QRect], Optional[str]]:
         """Capture one frame for preview without starting worker loop."""
         try:
@@ -723,41 +588,13 @@ class AnalyzerWorker(QObject):
                     return None, None, "選択ウィンドウのキャプチャに失敗しました"
                 return bgr, cap, None
 
-            cap = self._compute_capture_rect()
             with mss.mss() as sct:
-                vmon = sct.monitors[0]
-                if cap is None:
-                    cw, ch = C.DEFAULT_ROI_SIZE
-                    cx = vmon["left"] + vmon["width"] // 2
-                    cy = vmon["top"] + vmon["height"] // 2
-                    cap = QRect(cx - cw // 2, cy - ch // 2, cw, ch)
-                    self.roi_abs = cap
-
-                left = max(cap.left(), vmon["left"])
-                top = max(cap.top(), vmon["top"])
-                right = min(cap.left() + cap.width(), vmon["left"] + vmon["width"])
-                bottom = min(cap.top() + cap.height(), vmon["top"] + vmon["height"])
-                width = right - left
-                height = bottom - top
-                if width <= 1 or height <= 1:
-                    return None, None, "領域が画面外です（範囲を選び直してください）"
-
-                mon = {
-                    "left": int(left),
-                    "top": int(top),
-                    "width": int(width),
-                    "height": int(height),
-                }
-                try:
-                    img = np.array(sct.grab(mon))
-                except mss.exception.ScreenShotError:
-                    return None, None, "画面キャプチャに失敗しました（権限/表示/Wayland設定を確認）"
-                bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-                return bgr, QRect(int(left), int(top), int(width), int(height)), None
+                return self._capture_screen_region(sct, self._compute_capture_rect())
         except Exception:
             return None, None, "プレビュー取得に失敗しました"
 
     def _run(self):
+        # mss は with 内で使い回し、毎フレーム初期化コストを避ける。
         with mss.mss() as sct:
             while not self._stop.is_set():
                 t0 = time.perf_counter()
@@ -779,91 +616,60 @@ class AnalyzerWorker(QObject):
                         time.sleep(0.3)
                         continue
                 else:
-                    cap = self._compute_capture_rect()
-                    vmon = sct.monitors[0]
-                    if cap is None:
-                        cw, ch = C.DEFAULT_ROI_SIZE
-                        cx = vmon["left"] + vmon["width"] // 2
-                        cy = vmon["top"] + vmon["height"] // 2
-                        cap = QRect(cx - cw // 2, cy - ch // 2, cw, ch)
-                        self.roi_abs = cap
-
-                    left = max(cap.left(), vmon["left"])
-                    top = max(cap.top(), vmon["top"])
-                    right = min(cap.left() + cap.width(), vmon["left"] + vmon["width"])
-                    bottom = min(cap.top() + cap.height(), vmon["top"] + vmon["height"])
-                    width = right - left
-                    height = bottom - top
-                    if width <= 1 or height <= 1:
-                        self.status.emit("領域が画面外です（範囲を選び直してください）")
-                        time.sleep(0.3)
+                    bgr, cap, err = self._capture_screen_region(sct, self._compute_capture_rect())
+                    if bgr is None or cap is None:
+                        if err:
+                            self.status.emit(err)
+                            time.sleep(0.3 if err.startswith("領域が画面外") else 0.5)
+                        else:
+                            time.sleep(0.5)
                         continue
-
-                    mon = {
-                        "left": int(left),
-                        "top": int(top),
-                        "width": int(width),
-                        "height": int(height),
-                    }
-                    try:
-                        img = np.array(sct.grab(mon))
-                    except mss.exception.ScreenShotError:
-                        self.status.emit(
-                            "画面キャプチャに失敗しました（権限/表示/Wayland設定を確認）"
-                        )
-                        time.sleep(0.5)
-                        continue
-                    bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
 
                 if bgr is None or cap is None:
                     time.sleep(0.2)
                     continue
 
-                bgr_small = resize_by_long_edge(bgr, self.cfg.max_dim)
-
-                hsv = cv2.cvtColor(bgr_small, cv2.COLOR_BGR2HSV)
-                h, s, v = cv2.split(hsv)
-                # H/S/Vヒストグラム側は従来どおり色相未定義(S=0)のみ除外
-                hue_valid_mask = s > 0
-                # カラーサークル側は設定可能な彩度しきい値で集計
-                sat_th = clamp_int(
-                    self.cfg.wheel_sat_threshold,
-                    C.WHEEL_SAT_THRESHOLD_MIN,
-                    C.WHEEL_SAT_THRESHOLD_MAX,
-                )
-                wheel_mask = s >= sat_th
-
-                h_std = float(np.std(h))
-                s_std = float(np.std(s))
-                v_std = float(np.std(v))
-
-                h_masked = h[hue_valid_mask]
-                h_wheel = h[wheel_mask]
-                hist = _compute_wheel_histogram(h_wheel)
-                warm_ratio, cool_ratio, other_ratio = _compute_warm_cool_ratios(h_wheel)
-                sv, rgb = _sample_sv_and_rgb(s, v, bgr_small, self.cfg.sample_points)
-
-                dt_ms = (time.perf_counter() - t0) * 1000.0
-                self._frame += 1
-                graph_update = self._frame % self.cfg.graph_every == 0
+                need_color = bool(self.cfg.view_color)
+                need_scatter = bool(self.cfg.view_scatter)
+                need_hsv_hist = bool(self.cfg.view_hsv_hist)
+                need_graph_data = need_color or need_scatter or need_hsv_hist
+                need_image = bool(self.cfg.view_image)
+                need_preview = bool(self.cfg.want_preview)
+                need_bgr_emit = need_image or need_preview
 
                 emit_now = True
+                graph_update = False
                 if self.cfg.mode == C.UPDATE_MODE_CHANGE:
+                    # 差分判定は軽量化のため専用縮小サイズで行う。
+                    detect_bgr = resize_by_long_edge(bgr, C.ANALYZER_CHANGE_DETECT_DIM)
+                    detect_hsv = cv2.cvtColor(detect_bgr, cv2.COLOR_BGR2HSV)
+                    dh, ds, dv = cv2.split(detect_hsv)
+
                     if time.perf_counter() < self._cooldown_until:
                         emit_now = False
-                    if self._prev_h is None:
+                    if (
+                        self._prev_h is None
+                        or self._prev_s is None
+                        or self._prev_v is None
+                        or self._prev_h.shape != dh.shape
+                        or self._prev_s.shape != ds.shape
+                        or self._prev_v.shape != dv.shape
+                    ):
                         emit_now = False
+                        self._stable_frames = 0
+                        self._was_stable = False
                     else:
-                        hue_diff = np.abs(h.astype(np.int16) - self._prev_h.astype(np.int16))
+                        # Hue は円環距離（180で折り返し）で差分を算出する。
+                        hue_diff = np.abs(dh.astype(np.int16) - self._prev_h.astype(np.int16))
                         hue_diff = np.minimum(hue_diff, 180 - hue_diff)
                         metric = (
                             float(np.mean(hue_diff))
                             + float(
-                                np.mean(np.abs(s.astype(np.int16) - self._prev_s.astype(np.int16)))
+                                np.mean(np.abs(ds.astype(np.int16) - self._prev_s.astype(np.int16)))
                             )
                             * 0.5
                             + float(
-                                np.mean(np.abs(v.astype(np.int16) - self._prev_v.astype(np.int16)))
+                                np.mean(np.abs(dv.astype(np.int16) - self._prev_v.astype(np.int16)))
                             )
                             * 0.5
                         )
@@ -877,43 +683,106 @@ class AnalyzerWorker(QObject):
                         )
                         if emit_now:
                             self._was_stable = True
-                    self._prev_h = h
-                    self._prev_s = s
-                    self._prev_v = v
+                    self._prev_h = dh
+                    self._prev_s = ds
+                    self._prev_v = dv
+                    if self._force_emit_once:
+                        emit_now = True
+                        self._force_emit_once = False
 
-                # changeモードで発火したときは全ビューを同じタイミングで更新
-                if self.cfg.mode == C.UPDATE_MODE_CHANGE and emit_now:
-                    graph_update = True
+                    # changeモードで発火したときは全ビューを同じタイミングで更新
+                    if emit_now:
+                        graph_update = True
+                else:
+                    # intervalモードでは graph_every 間隔でグラフ更新する。
+                    self._frame += 1
+                    graph_update = self._frame % self.cfg.graph_every == 0
+
+                dt_ms = (time.perf_counter() - t0) * 1000.0
+                hist = None
+                sv = None
+                rgb = None
+                h_masked = None
+                s_plane = None
+                v_plane = None
+                top_colors = None
+                warm_ratio = 0.0
+                cool_ratio = 0.0
+                other_ratio = 0.0
+                h_std = 0.0
+                s_std = 0.0
+                v_std = 0.0
+
+                if emit_now and graph_update and need_graph_data:
+                    # 設定された解析上限（max_dim）で縮小してから重い集計を行う。
+                    bgr_small = resize_by_long_edge(bgr, self.cfg.max_dim)
+                    hsv = cv2.cvtColor(bgr_small, cv2.COLOR_BGR2HSV)
+                    h, s, v = cv2.split(hsv)
+
+                    if need_color or need_hsv_hist:
+                        h_std = float(np.std(h))
+                        s_std = float(np.std(s))
+                        v_std = float(np.std(v))
+
+                    if need_hsv_hist:
+                        # H/S/Vヒストグラム側は従来どおり色相未定義(S=0)のみ除外
+                        h_masked = h[s > 0]
+                        # S/Vヒストグラムは全画素表示
+                        s_plane = s
+                        v_plane = v
+
+                    if need_color:
+                        sat_th = clamp_int(
+                            self.cfg.wheel_sat_threshold,
+                            C.WHEEL_SAT_THRESHOLD_MIN,
+                            C.WHEEL_SAT_THRESHOLD_MAX,
+                        )
+                        wheel_mask = s >= sat_th
+                        h_wheel = h[wheel_mask]
+                        hist = _compute_wheel_histogram(h_wheel)
+                        warm_ratio, cool_ratio, other_ratio = _compute_warm_cool_ratios(h_wheel)
+                        top_colors = _compute_top_colors(bgr_small, h_wheel, wheel_mask)
+
+                    if need_scatter:
+                        sv, rgb = _sample_sv_and_rgb(h, s, v, bgr_small, self.cfg.sample_points)
 
                 if emit_now:
-                    top_colors = _compute_top_colors(bgr_small, h_wheel, wheel_mask)
+                    should_emit_payload = need_bgr_emit or (graph_update and need_graph_data)
+                    if should_emit_payload and not self._result_inflight.is_set():
+                        # UI側が未消費の間は次結果を積まず、キュー膨張を防ぐ。
+                        self._result_inflight.set()
+                        self.resultReady.emit(
+                            {
+                                "bgr_preview": bgr if need_bgr_emit else None,
+                                "hist": hist if graph_update else None,
+                                "sv": sv if graph_update else None,
+                                "rgb": rgb if graph_update else None,
+                                "h_plane": h_masked if graph_update else None,
+                                "s_plane": s_plane if graph_update else None,
+                                "v_plane": v_plane if graph_update else None,
+                                "top_colors": top_colors if graph_update else None,
+                                "h_std": h_std,
+                                "s_std": s_std,
+                                "v_std": v_std,
+                                "warm_ratio": warm_ratio,
+                                "cool_ratio": cool_ratio,
+                                "other_ratio": other_ratio,
+                                "dt_ms": dt_ms,
+                                "cap": (cap.left(), cap.top(), cap.width(), cap.height()),
+                                "graph_update": graph_update,
+                            }
+                        )
+                        if self.cfg.mode == C.UPDATE_MODE_CHANGE:
+                            # 連続発火を抑える短いクールダウン
+                            self._cooldown_until = (
+                                time.perf_counter() + C.ANALYZER_CHANGE_COOLDOWN_SEC
+                            )
 
-                    self.resultReady.emit(
-                        {
-                            "bgr_preview": bgr,
-                            "hist": hist if graph_update else None,
-                            "sv": sv if graph_update else None,
-                            "rgb": rgb if graph_update else None,
-                            "h_plane": h_masked if graph_update else None,
-                            # S/Vヒストグラムは全画素を表示し、低彩度(0付近)も確認できるようにする
-                            "s_plane": s if graph_update else None,
-                            "v_plane": v if graph_update else None,
-                            "top_colors": top_colors if graph_update else None,
-                            "h_std": h_std,
-                            "s_std": s_std,
-                            "v_std": v_std,
-                            "warm_ratio": warm_ratio,
-                            "cool_ratio": cool_ratio,
-                            "other_ratio": other_ratio,
-                            "dt_ms": dt_ms,
-                            "cap": (cap.left(), cap.top(), cap.width(), cap.height()),
-                            "graph_update": graph_update,
-                        }
-                    )
-                    if self.cfg.mode == C.UPDATE_MODE_CHANGE:
-                        # 連続発火を抑えるクールダウンを interval_sec に設定
-                        self._cooldown_until = time.perf_counter() + self.cfg.interval_sec
-
-                remain = self.cfg.interval_sec - (time.perf_counter() - t0)
+                loop_interval = (
+                    self.cfg.interval_sec
+                    if self.cfg.mode == C.UPDATE_MODE_INTERVAL
+                    else C.ANALYZER_CHANGE_POLL_SEC
+                )
+                remain = loop_interval - (time.perf_counter() - t0)
                 if remain > 0:
                     time.sleep(remain)

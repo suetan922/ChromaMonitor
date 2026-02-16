@@ -17,6 +17,7 @@ _MAX_RENDER_AREA = _MAX_RENDER_EDGE * _MAX_RENDER_EDGE
 
 @contextmanager
 def blocked_signals(obj: QObject) -> Iterator[None]:
+    # 一時的にシグナルを止め、UI相互更新の無限ループを防ぐ。
     blocker = QSignalBlocker(obj)
     try:
         yield
@@ -53,6 +54,7 @@ def screen_union_geometry(available: bool = False) -> QRect:
 
 
 def safe_choice(value: T, allowed: Sequence[T], default: T) -> T:
+    # 候補外の値を受けても既定値で安全に継続する。
     return value if value in allowed else default
 
 
@@ -72,6 +74,7 @@ def set_value_blocked(widget: QObject, value: Any) -> None:
 
 
 def set_combobox_data_blocked(combo: QComboBox, data: Any, default_data: Any = None) -> int:
+    # data -> default_data -> index0 の順でフォールバックする。
     index = combo.findData(data)
     if index < 0 and default_data is not None:
         index = combo.findData(default_data)
@@ -85,6 +88,7 @@ def set_combobox_data_blocked(combo: QComboBox, data: Any, default_data: Any = N
 def resize_by_long_edge(
     img: np.ndarray, max_dim: int, interpolation: int = cv2.INTER_AREA
 ) -> np.ndarray:
+    # 長辺のみを基準に縮小し、縦横比は維持する。
     if img is None:
         return img
     h, w = img.shape[:2]
@@ -98,6 +102,7 @@ def resize_by_long_edge(
 
 
 def clamp_render_size(width: int, height: int) -> Tuple[int, int]:
+    # 極端に大きい描画要求でメモリが跳ねないよう上限を掛ける。
     w = max(1, int(width))
     h = max(1, int(height))
     w = min(w, _MAX_RENDER_EDGE)
@@ -111,6 +116,7 @@ def clamp_render_size(width: int, height: int) -> Tuple[int, int]:
 
 
 def rgb_to_qpixmap(rgb: np.ndarray, max_w: int, max_h: int) -> QPixmap:
+    # NumPy RGB 配列を QPixmap に変換し、表示領域へフィットさせる。
     rgb = np.ascontiguousarray(rgb)
     h, w = rgb.shape[:2]
     qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888)
@@ -120,6 +126,7 @@ def rgb_to_qpixmap(rgb: np.ndarray, max_w: int, max_h: int) -> QPixmap:
 
 
 def gray_to_qpixmap(gray: np.ndarray, max_w: int, max_h: int) -> QPixmap:
+    # グレースケール配列の軽量変換経路。
     gray = np.ascontiguousarray(gray)
     h, w = gray.shape[:2]
     qimg = QImage(gray.data, w, h, w, QImage.Format_Grayscale8)
@@ -167,6 +174,7 @@ def render_top_color_bar(
 ) -> QPixmap:
     """
     bars: [(ratio, (r,g,b))] or [(name, ratio, (r,g,b))]
+    # 比率バーを横方向へ敷き詰めて表示する。
     """
     safe_w, safe_h = clamp_render_size(width, max(12, height))
     pm = QPixmap(safe_w, safe_h)
