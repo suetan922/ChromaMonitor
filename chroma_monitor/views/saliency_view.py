@@ -1,4 +1,4 @@
-"""Saliency map view."""
+"""ビュー描画に関する処理。"""
 
 from typing import Optional
 
@@ -23,7 +23,7 @@ def _apply_composition_guides(bgr: np.ndarray, guide: str) -> np.ndarray:
     if h < 2 or w < 2:
         return out
 
-    # 以前より細めにして、サリエンシー本体の視認性を優先
+    # 線幅を細めにして、サリエンシー本体の視認性を優先する。
     base_thick = max(1, int(round(min(w, h) / 520.0)))
 
     lines = []
@@ -89,6 +89,7 @@ def _apply_composition_guides(bgr: np.ndarray, guide: str) -> np.ndarray:
 
 
 class SaliencyView(BaseImageLabelView):
+
     def __init__(self):
         super().__init__("サリエンシーなし")
         self._last_saliency: Optional[np.ndarray] = None

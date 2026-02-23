@@ -1,4 +1,4 @@
-"""View widgets split by function."""
+"""ビュー描画に関する処理。"""
 
 from .color_scatter import ColorWheelWidget, ScatterRasterWidget
 from .edge_view import EdgeView

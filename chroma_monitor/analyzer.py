@@ -1,3 +1,5 @@
+"""ライブ解析ワーカー。"""
+
 import threading
 import time
 from dataclasses import dataclass
@@ -10,9 +12,9 @@ from PySide6.QtCore import QObject, QPoint, QRect, Signal
 from PySide6.QtGui import QGuiApplication
 
 from .analysis.frame_analysis import (
+    _compute_hsv_histograms,
     _compute_top_colors,
-    _compute_warm_cool_ratios,
-    _compute_wheel_histogram,
+    _compute_wheel_stats,
     _sample_sv_and_rgb,
     analyze_bgr_frame,
 )
@@ -36,6 +38,7 @@ _EMPTY_GRAPH_DATA = {
 
 
 class ImageFileAnalyzeWorker(QObject):
+
     progress = Signal(int, str)
     finished = Signal(dict)
     failed = Signal(str)
@@ -60,7 +63,6 @@ class ImageFileAnalyzeWorker(QObject):
 
     @staticmethod
     def _decode_to_bgr_preserve_depth(buf: np.ndarray) -> Optional[np.ndarray]:
-        """Decode image bytes while preserving source depth/channels as much as possible."""
         img = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
         if img is None or img.size == 0:
             return None
@@ -150,6 +152,7 @@ class ImageFileAnalyzeWorker(QObject):
 
 @dataclass
 class AnalyzerConfig:
+
     interval_sec: float = C.DEFAULT_INTERVAL_SEC
     sample_points: int = C.DEFAULT_SAMPLE_POINTS
     max_dim: int = C.ANALYZER_MAX_DIM
@@ -166,6 +169,7 @@ class AnalyzerConfig:
 
 
 class AnalyzerWorker(QObject):
+
     resultReady = Signal(dict)
     status = Signal(str)
 
@@ -525,7 +529,6 @@ class AnalyzerWorker(QObject):
         return self.roi_abs
 
     def _capture_window_bgr(self, hwnd: int) -> Optional[np.ndarray]:
-        """Capture selected window content with PrintWindow (ignores overlap in many apps)."""
         if not HAS_WIN32:
             return None
         try:
@@ -685,7 +688,6 @@ class AnalyzerWorker(QObject):
         return bgr, QRect(int(left), int(top), int(width), int(height)), None
 
     def capture_once(self) -> tuple[Optional[np.ndarray], Optional[QRect], Optional[str]]:
-        """Capture one frame for preview without starting worker loop."""
         try:
             if self.target_hwnd is not None and HAS_WIN32:
                 if self._is_window_minimized(self.target_hwnd):
@@ -726,7 +728,10 @@ class AnalyzerWorker(QObject):
         # 差分判定は軽量化のため専用縮小サイズで行う。
         detect_bgr = resize_by_long_edge(bgr, C.ANALYZER_CHANGE_DETECT_DIM)
         detect_hsv = cv2.cvtColor(detect_bgr, cv2.COLOR_BGR2HSV)
-        dh, ds, dv = cv2.split(detect_hsv)
+        # split はチャネルごとに配列コピーするため、ビュー参照で取り出す。
+        dh = detect_hsv[:, :, 0]
+        ds = detect_hsv[:, :, 1]
+        dv = detect_hsv[:, :, 2]
 
         emit_now = now >= self._cooldown_until
         if (
@@ -769,18 +774,16 @@ class AnalyzerWorker(QObject):
         # 設定された解析上限（max_dim）で縮小してから重い集計を行う。
         bgr_small = resize_by_long_edge(bgr, self.cfg.max_dim)
         hsv = cv2.cvtColor(bgr_small, cv2.COLOR_BGR2HSV)
-        h, s, v = cv2.split(hsv)
+        # split はチャネルごとに配列コピーするため、ビュー参照で取り出す。
+        h = hsv[:, :, 0]
+        s = hsv[:, :, 1]
+        v = hsv[:, :, 2]
 
         h_hist = None
         s_hist = None
         v_hist = None
         if need_hsv_hist:
-            # H/S/Vヒストグラム側は従来どおり色相未定義(S=0)のみ除外
-            hue_valid = s > 0
-            h_hist = np.bincount(h[hue_valid].reshape(-1), minlength=180)[:180].astype(np.int64)
-            # S/Vヒストグラムは全画素表示
-            s_hist = np.bincount(s.reshape(-1), minlength=256)[:256].astype(np.int64)
-            v_hist = np.bincount(v.reshape(-1), minlength=256)[:256].astype(np.int64)
+            h_hist, s_hist, v_hist = _compute_hsv_histograms(h, s, v)
 
         hist = None
         top_colors = None
@@ -795,8 +798,7 @@ class AnalyzerWorker(QObject):
             )
             wheel_mask = s >= sat_th
             h_wheel = h[wheel_mask]
-            hist = _compute_wheel_histogram(h_wheel)
-            warm_ratio, cool_ratio, other_ratio = _compute_warm_cool_ratios(h_wheel)
+            hist, warm_ratio, cool_ratio, other_ratio = _compute_wheel_stats(h_wheel)
             top_colors = _compute_top_colors(bgr_small, h_wheel, wheel_mask)
 
         sv = None

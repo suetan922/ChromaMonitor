@@ -1,4 +1,4 @@
-"""Vectorscope image view."""
+"""ビュー描画に関する処理。"""
 
 import math
 
@@ -12,6 +12,7 @@ from .image_math import normalize_map
 
 
 class VectorScopeView(BaseImageLabelView):
+
     def __init__(self):
         super().__init__(
             "ベクトルスコープなし",
@@ -186,7 +187,9 @@ class VectorScopeView(BaseImageLabelView):
         hist = np.zeros((size, size), dtype=np.float32)
         if np.any(valid):
             flat_idx = ys[valid] * size + xs[valid]
-            hist = np.bincount(flat_idx, minlength=size * size).astype(np.float32).reshape(size, size)
+            hist = (
+                np.bincount(flat_idx, minlength=size * size).astype(np.float32).reshape(size, size)
+            )
         # 密度マップは対数正規化して暗部の情報を潰しにくくする。
         hist = cv2.GaussianBlur(hist, (0, 0), 1.0)
         density = normalize_map(np.log1p(hist))
@@ -207,7 +210,9 @@ class VectorScopeView(BaseImageLabelView):
         over = valid & (sat >= thr)
         if np.any(over):
             over_idx = ys[over] * size + xs[over]
-            over_hist = np.bincount(over_idx, minlength=size * size).astype(np.float32).reshape(size, size)
+            over_hist = (
+                np.bincount(over_idx, minlength=size * size).astype(np.float32).reshape(size, size)
+            )
             over_hist = cv2.GaussianBlur(over_hist, (0, 0), 1.0)
             over_density = normalize_map(np.log1p(over_hist))
             over_alpha = np.clip(over_density[:, :, None] * 0.55, 0.0, 0.55)

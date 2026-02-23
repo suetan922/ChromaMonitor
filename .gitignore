@@ -20,3 +20,6 @@ dist/
 # Editor / OS
 .vscode/
 .DS_Store
+
+# Local runtime config
+config/settings.json

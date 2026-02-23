@@ -1,4 +1,4 @@
-"""Squint image view."""
+"""ビュー描画に関する処理。"""
 
 import cv2
 import numpy as np
@@ -15,6 +15,7 @@ from .base_image_view import BaseImageLabelView
 
 
 class SquintView(BaseImageLabelView):
+
     def __init__(self):
         super().__init__("スクイントなし")
         self._mode = C.DEFAULT_SQUINT_MODE

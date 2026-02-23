@@ -1,4 +1,4 @@
-"""HSV channel histogram widget."""
+"""ビュー描画に関する処理。"""
 
 import math
 
@@ -8,6 +8,7 @@ from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QStackedLayout, QWidget
 
 from ..util import constants as C
+from ..util.functions import safe_choice
 
 
 def _fit_hist_size(hist: np.ndarray, size: int) -> np.ndarray:
@@ -33,6 +34,7 @@ def _draw_plot_guides(painter: QPainter, plot: QRect) -> None:
 
 
 class ChannelHistogram(QWidget):
+
     def __init__(self, title: str, bins: int, max_value: int, color: QColor, bucket: int = 4):
         super().__init__()
         # ドックの縦積み時に上側でリサイズが詰まらないよう、最小高さは持たせない。
@@ -164,7 +166,6 @@ class ChannelHistogram(QWidget):
 
 
 class RgbOverlayHistogram(QWidget):
-    # RGBヒストグラム重ね表示（0..255の3chを同一軸で描画）。
 
     def __init__(self):
         super().__init__()
@@ -265,13 +266,11 @@ class RgbOverlayHistogram(QWidget):
 
 
 class RgbHistogramWidget(QWidget):
-    MODE_SIDE_BY_SIDE = "side_by_side"
-    MODE_OVERLAY = "overlay"
 
     def __init__(self):
         super().__init__()
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self._display_mode = self.MODE_SIDE_BY_SIDE
+        self._display_mode = C.DEFAULT_RGB_HIST_MODE
         self._hist_r = ChannelHistogram("赤", 256, 255, QColor(C.R_COLOR), bucket=2)
         self._hist_g = ChannelHistogram("緑", 256, 255, QColor(C.G_COLOR), bucket=2)
         self._hist_b = ChannelHistogram("青", 256, 255, QColor(C.B_COLOR), bucket=2)
@@ -290,14 +289,12 @@ class RgbHistogramWidget(QWidget):
         root.addWidget(side_widget)
         root.addWidget(self._overlay)
         self._stack = root
-        self.set_display_mode(self.MODE_SIDE_BY_SIDE)
+        self.set_display_mode(C.DEFAULT_RGB_HIST_MODE)
 
     def set_display_mode(self, mode: str):
-        normalized = str(mode or "").strip().lower()
-        if normalized not in (self.MODE_SIDE_BY_SIDE, self.MODE_OVERLAY):
-            normalized = self.MODE_SIDE_BY_SIDE
+        normalized = safe_choice(mode, C.RGB_HIST_MODES, C.DEFAULT_RGB_HIST_MODE)
         self._display_mode = normalized
-        self._stack.setCurrentIndex(1 if normalized == self.MODE_OVERLAY else 0)
+        self._stack.setCurrentIndex(1 if normalized == C.RGB_HIST_MODE_OVERLAY else 0)
 
     def update_from_bgr(self, bgr: np.ndarray):
         if bgr is None or bgr.size == 0 or bgr.ndim < 3 or bgr.shape[2] < 3:

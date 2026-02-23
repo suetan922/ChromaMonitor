@@ -1,4 +1,4 @@
-"""ROI selection overlay widget."""
+"""ビュー描画に関する処理。"""
 
 from typing import Optional
 
@@ -12,6 +12,7 @@ _MIN_SELECTION_SIZE = 10
 
 
 class RoiSelector(QWidget):
+
     roiSelected = Signal(QRect)  # screen coords
     selectionCanceled = Signal()
 

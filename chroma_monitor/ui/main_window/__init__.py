@@ -1,2 +1,2 @@
-"""MainWindow helper modules grouped by responsibility."""
+"""モジュールの補助処理。"""
 

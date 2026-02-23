@@ -1,4 +1,5 @@
 from PySide6.QtCore import QEvent, QRect, Qt, QTimer
+from PySide6.QtNetwork import QNetworkAccessManager
 from PySide6.QtWidgets import (
     QAbstractSpinBox,
     QCheckBox,
@@ -16,26 +17,8 @@ from PySide6.QtWidgets import (
 
 from .analyzer import AnalyzerWorker
 from .capture.win32_windows import HAS_WIN32
-from .ui.view_docks import setup_view_docks
-from .ui.layout_presets import (
-    apply_default_view_layout as apply_default_view_layout_ops,
-)
-from .ui.layout_presets import apply_layout_from_config as apply_layout_from_config_ops
-from .ui.layout_presets import apply_layout_preset as apply_layout_preset_ops
-from .ui.layout_presets import (
-    delete_selected_layout_preset as delete_selected_layout_preset_ops,
-)
-from .ui.layout_presets import (
-    load_selected_layout_preset as load_selected_layout_preset_ops,
-)
-from .ui.layout_presets import (
-    refresh_layout_preset_views as refresh_layout_preset_views_ops,
-)
-from .ui.layout_presets import (
-    save_current_layout_to_config as save_current_layout_to_config_ops,
-)
-from .ui.layout_presets import save_layout_preset as save_layout_preset_ops
-from .ui.layout_presets import schedule_layout_autosave as schedule_layout_autosave_ops
+from .ui import layout_presets as mw_layout_presets
+from .ui.main_window import help_actions as mw_help
 from .ui.main_window import result_handlers as mw_results
 from .ui.main_window import roi_handlers as mw_roi
 from .ui.main_window import runtime_actions as mw_runtime
@@ -43,6 +26,7 @@ from .ui.main_window import settings_logic as mw_settings
 from .ui.main_window import window_layout as mw_windowing
 from .ui.settings_dialog import hide_settings_window as hide_settings_dialog_window
 from .ui.settings_dialog import show_settings_window as show_settings_dialog_window
+from .ui.view_docks import setup_view_docks
 from .util import constants as C
 from .views import PreviewWindow
 
@@ -79,7 +63,6 @@ class SelectAllLineEdit(QLineEdit):
 
 
 class SelectAllSpinBox(QSpinBox):
-    """フォーカス時に値部分を全選択する QSpinBox。"""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -138,9 +121,43 @@ def _add_checkable_action(menu, text: str, checked: bool, toggled_cb):
     return action
 
 
+_WINDOW_DOCK_MENU_ITEMS = (
+    ("act_color", "色相環", True, "dock_color"),
+    ("act_hist", "H/S/V ヒストグラム", True, "dock_hist"),
+    ("act_rgb_hist", "R/G/B ヒストグラム", False, "dock_rgb_hist"),
+    ("act_scatter", "S-V 散布図", True, "dock_scatter"),
+    ("act_vectorscope", "ベクトルスコープ", True, "dock_vectorscope"),
+    ("act_edge", "エッジ検出", True, "dock_edge"),
+    ("act_binary", "2値化", True, "dock_binary"),
+    ("act_ternary", "3値化", True, "dock_ternary"),
+    ("act_gray", "グレースケール", True, "dock_gray"),
+    ("act_focus", "フォーカスピーキング", True, "dock_focus"),
+    ("act_squint", "スクイント表示", True, "dock_squint"),
+    ("act_saliency", "サリエンシーマップ", True, "dock_saliency"),
+)
+
+
 class MainWindow(QMainWindow):
+
     def __init__(self):
         super().__init__()
+        self._init_window_runtime_state()
+        self._init_analyzer_workers()
+
+        self._build_control_widgets()
+        self._connect_control_signals()
+
+        self._build_menu_bar()
+        self._build_toolbar()
+        self._setup_preview_and_docks()
+
+        # --- Styling (theme) ---
+        self._apply_ui_style()
+
+        # --- Init ---
+        self._initialize_runtime_defaults()
+
+    def _init_window_runtime_state(self) -> None:
         self.setWindowTitle("ChromaMonitor")
         self.resize(1120, 700)
         self._did_initial_screen_fit = False
@@ -169,11 +186,15 @@ class MainWindow(QMainWindow):
         self._settings_save_pending = False
         self._settings_load_in_progress = False
         self._startup_finished = False
-
+        self._release_page_url = C.RELEASES_PAGE_URL
+        self._update_check_started = False
+        self._update_reply = None
+        self._update_network = QNetworkAccessManager(self)
+        self._update_network.finished.connect(self._on_release_check_finished)
         # ROI選択オーバーレイ（マルチモニタ対応）管理。
-        self._roi_selector = None
         self._roi_selectors = []
 
+    def _init_analyzer_workers(self) -> None:
         # キャプチャ解析ワーカー（ライブ）と画像解析ワーカー（単発）を分離して保持。
         self.worker = AnalyzerWorker()
         self.worker.resultReady.connect(self.on_result)
@@ -182,6 +203,7 @@ class MainWindow(QMainWindow):
         self._image_worker = None
         self._image_progress = None
 
+    def _build_control_widgets(self) -> None:
         # --- Controls: キャプチャ/解析設定 ---
         self.btn_refresh = QPushButton("ウィンドウ一覧更新")
         self.combo_win = QComboBox()
@@ -362,6 +384,10 @@ class MainWindow(QMainWindow):
         self.lbl_status = QLabel("準備完了")
         self.lbl_status.setStyleSheet("color:#BBBBBB;")
 
+    def _apply_mode_settings_ignoring_args(self, *_args) -> None:
+        self.apply_mode_settings()
+
+    def _connect_control_signals(self) -> None:
         self.btn_refresh.clicked.connect(self.refresh_windows)
         self.combo_win.currentIndexChanged.connect(self.on_window_changed)
         if self.combo_win.lineEdit() is not None:
@@ -371,10 +397,6 @@ class MainWindow(QMainWindow):
         self.combo_capture_source.currentIndexChanged.connect(self.apply_capture_source)
         self.spin_interval.valueChanged.connect(lambda v: self.worker.set_interval(float(v)))
         self.spin_points.valueChanged.connect(self.apply_sample_points_settings)
-        # currentIndexChanged/valueChanged の引数に依存せず同じ処理を呼ぶ。
-        def _apply_mode_settings_ignoring_args(*_args):
-            self.apply_mode_settings()
-
         self.combo_analysis_resolution_mode.currentIndexChanged.connect(
             self.apply_analysis_resolution_settings
         )
@@ -384,9 +406,9 @@ class MainWindow(QMainWindow):
         self.combo_wheel_mode.currentIndexChanged.connect(self.apply_wheel_settings)
         self.combo_rgb_hist_mode.currentIndexChanged.connect(self.apply_rgb_hist_settings)
         self.spin_wheel_sat_threshold.valueChanged.connect(self.apply_wheel_settings)
-        self.combo_mode.currentIndexChanged.connect(_apply_mode_settings_ignoring_args)
-        self.spin_diff.valueChanged.connect(_apply_mode_settings_ignoring_args)
-        self.spin_stable.valueChanged.connect(_apply_mode_settings_ignoring_args)
+        self.combo_mode.currentIndexChanged.connect(self._apply_mode_settings_ignoring_args)
+        self.spin_diff.valueChanged.connect(self._apply_mode_settings_ignoring_args)
+        self.spin_stable.valueChanged.connect(self._apply_mode_settings_ignoring_args)
         self.spin_edge_sensitivity.valueChanged.connect(self.apply_edge_settings)
         self.combo_binary_preset.currentIndexChanged.connect(self.apply_binary_settings)
         self.combo_ternary_preset.currentIndexChanged.connect(self.apply_ternary_settings)
@@ -407,6 +429,7 @@ class MainWindow(QMainWindow):
         self.btn_load_preset.clicked.connect(self.load_selected_layout_preset)
         self.btn_delete_preset.clicked.connect(self.delete_selected_layout_preset)
 
+    def _build_menu_bar(self) -> None:
         # --- Menu bar (ウィンドウ / 設定 / レイアウト) ---
         mb = self.menuBar() if hasattr(self, "menuBar") else QMenuBar(self)
         win_menu = mb.addMenu("ウィンドウ")
@@ -420,18 +443,8 @@ class MainWindow(QMainWindow):
             )
             setattr(self, attr_name, action)
 
-        _bind_dock_action("act_color", "色相環", True, "dock_color")
-        _bind_dock_action("act_hist", "H/S/V ヒストグラム", True, "dock_hist")
-        _bind_dock_action("act_rgb_hist", "R/G/B ヒストグラム", False, "dock_rgb_hist")
-        _bind_dock_action("act_scatter", "S-V 散布図", True, "dock_scatter")
-        _bind_dock_action("act_vectorscope", "ベクトルスコープ", True, "dock_vectorscope")
-        _bind_dock_action("act_edge", "エッジ検出", True, "dock_edge")
-        _bind_dock_action("act_binary", "2値化", True, "dock_binary")
-        _bind_dock_action("act_ternary", "3値化", True, "dock_ternary")
-        _bind_dock_action("act_gray", "グレースケール", True, "dock_gray")
-        _bind_dock_action("act_focus", "フォーカスピーキング", True, "dock_focus")
-        _bind_dock_action("act_squint", "スクイント表示", True, "dock_squint")
-        _bind_dock_action("act_saliency", "サリエンシーマップ", True, "dock_saliency")
+        for spec in _WINDOW_DOCK_MENU_ITEMS:
+            _bind_dock_action(*spec)
 
         menu = mb.addMenu("設定")
         self.act_always_on_top = _add_checkable_action(
@@ -451,7 +464,9 @@ class MainWindow(QMainWindow):
         self.act_open_layout_settings.triggered.connect(
             lambda: self.show_settings_window(C.SETTINGS_PAGE_LAYOUT)
         )
+        self._setup_help_menu(mb)
 
+    def _build_toolbar(self) -> None:
         # --- Toolbar for Start/Stop ---
         tb = self.addToolBar("コントロール")
         tb.setObjectName("controlToolbar")
@@ -471,10 +486,13 @@ class MainWindow(QMainWindow):
         tb.addWidget(self.btn_load_image_bar)
         self.btn_stop_bar.setChecked(True)
 
+    def _setup_preview_and_docks(self) -> None:
         self.preview_window = PreviewWindow()
         self.preview_window.closed.connect(self.on_preview_closed)
         # 解析ビュー用ドック群を構築。
         setup_view_docks(self)
+        if hasattr(self, "tabifiedDockWidgetActivated"):
+            self.tabifiedDockWidgetActivated.connect(self._sync_tabbed_dock_title_bars)
         self.top_colors_bar.installEventFilter(self)
         self.chk_scatter_hue_filter.toggled.connect(self.apply_scatter_settings)
         self.slider_scatter_hue_center.valueChanged.connect(self.apply_scatter_settings)
@@ -487,10 +505,7 @@ class MainWindow(QMainWindow):
             d.installEventFilter(self)
         self._sync_worker_view_flags()
 
-        # --- Styling (theme) ---
-        self._apply_ui_style()
-
-        # --- Init ---
+    def _initialize_runtime_defaults(self) -> None:
         self.worker.set_interval(self.spin_interval.value())
         self.worker.set_sample_points(self.spin_points.value())
         self.apply_analysis_resolution_settings(save=False)
@@ -511,14 +526,31 @@ class MainWindow(QMainWindow):
             self.refresh_windows()
         for dock in self._dock_map.values():
             self._on_dock_top_level_changed(dock, dock.isFloating())
+        self._sync_tabbed_dock_title_bars()
         self._fit_window_to_desktop()
         self.sync_window_menu_checks()
         self.update_placeholder()
         self._schedule_dock_rebalance()
         self._layout_autosave_enabled = True
         self._schedule_layout_autosave()
+        self._start_release_check_once()
         # 起動直後のレイアウト収束後に、画面外へのはみ出しを最終補正する。
         QTimer.singleShot(260, self._fit_window_to_desktop)
+
+    def _setup_help_menu(self, menu_bar: QMenuBar) -> None:
+        mw_help.setup_help_menu(self, menu_bar)
+
+    def _start_release_check_once(self) -> None:
+        mw_help.start_release_check_once(self)
+
+    def _check_latest_release(self) -> None:
+        mw_help.check_latest_release(self)
+
+    def _on_release_check_finished(self, reply) -> None:
+        mw_help.on_release_check_finished(self, reply)
+
+    def _open_release_page(self) -> None:
+        mw_help.open_release_page(self)
 
     def _request_save_settings(self):
         if self._settings_load_in_progress:
@@ -550,6 +582,10 @@ class MainWindow(QMainWindow):
     def eventFilter(self, obj, event):
         if obj is getattr(self, "top_colors_bar", None) and event.type() == QEvent.Resize:
             self._refresh_top_color_bar()
+            return super().eventFilter(obj, event)
+        if mw_windowing.is_dock_tab_bar(self, obj):
+            if mw_windowing.handle_dock_tab_bar_event(self, obj, event):
+                return True
             return super().eventFilter(obj, event)
         if obj in getattr(self, "_dock_map", {}).values():
             if event.type() in (QEvent.Move, QEvent.Show, QEvent.Resize):
@@ -592,6 +628,9 @@ class MainWindow(QMainWindow):
 
     def _sync_all_floating_dock_dockability(self):
         mw_windowing.sync_all_floating_dock_dockability(self)
+
+    def _sync_tabbed_dock_title_bars(self, *_):
+        mw_windowing.sync_tabbed_dock_title_bars(self)
 
     def apply_always_on_top(self, checked: bool, save: bool = True):
         mw_windowing.apply_always_on_top(self, checked, save=save)
@@ -738,31 +777,31 @@ class MainWindow(QMainWindow):
         mw_windowing.sync_window_menu_checks(self)
 
     def _apply_default_view_layout(self):
-        apply_default_view_layout_ops(self)
+        mw_layout_presets.apply_default_view_layout(self)
 
     def save_current_layout_to_config(self, silent: bool = False):
-        save_current_layout_to_config_ops(self, silent=silent)
+        mw_layout_presets.save_current_layout_to_config(self, silent=silent)
 
     def _schedule_layout_autosave(self):
-        schedule_layout_autosave_ops(self)
+        mw_layout_presets.schedule_layout_autosave(self)
 
     def apply_layout_from_config(self, cfg: dict):
-        apply_layout_from_config_ops(self, cfg)
+        mw_layout_presets.apply_layout_from_config(self, cfg)
 
     def refresh_layout_preset_views(self):
-        refresh_layout_preset_views_ops(self)
+        mw_layout_presets.refresh_layout_preset_views(self)
 
     def apply_layout_preset(self, name: str):
-        apply_layout_preset_ops(self, name)
+        mw_layout_presets.apply_layout_preset(self, name)
 
     def load_selected_layout_preset(self):
-        load_selected_layout_preset_ops(self)
+        mw_layout_presets.load_selected_layout_preset(self)
 
     def save_layout_preset(self):
-        save_layout_preset_ops(self)
+        mw_layout_presets.save_layout_preset(self)
 
     def delete_selected_layout_preset(self):
-        delete_selected_layout_preset_ops(self)
+        mw_layout_presets.delete_selected_layout_preset(self)
 
     def toggle_dock(self, dock: QDockWidget, visible: bool):
         mw_windowing.toggle_dock(self, dock, visible)

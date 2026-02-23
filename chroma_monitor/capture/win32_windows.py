@@ -46,7 +46,6 @@ else:
 
 
 def list_windows():
-    """Return list of (hwnd, title) for visible top-level windows."""
     if not HAS_WIN32:
         return []
 

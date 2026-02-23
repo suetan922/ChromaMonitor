@@ -1,27 +1,36 @@
+"""UI/解析まわりで再利用する小さな共通関数群。"""
+
 import math
 from contextlib import contextmanager
-from typing import Any, Iterator, List, Optional, Sequence, Tuple, TypeVar
+from typing import Any, Iterator, Sequence, Tuple, TypeVar
 
 import cv2
 import numpy as np
 from PySide6.QtCore import QObject, QRect, QSignalBlocker, Qt
-from PySide6.QtGui import QColor, QGuiApplication, QImage, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import QComboBox
-
-from . import constants as C
+from PySide6.QtGui import QGuiApplication, QImage, QPixmap
 
 T = TypeVar("T")
+#: 描画変換時に許可する最大ピクセル辺長。
 _MAX_RENDER_EDGE = 2048
+#: 描画変換時に許可する最大ピクセル面積。
 _MAX_RENDER_AREA = _MAX_RENDER_EDGE * _MAX_RENDER_EDGE
+#: スクリーン情報取得に失敗した場合のフォールバック矩形。
 _FALLBACK_SCREEN_RECT = QRect(0, 0, 1920, 1080)
-_TOP_BAR_MIN_HEIGHT = 12
-_TOP_BAR_TEXT_MIN_WIDTH = 240
-_TOP_BAR_TEXT_MIN_SEGMENT_PX = 42
 
 
 @contextmanager
 def blocked_signals(obj: QObject) -> Iterator[None]:
-    # 一時的にシグナルを止め、UI相互更新の無限ループを防ぐ。
+    """`obj` の Qt シグナルを一時的にブロックする。
+
+    設定反映時の相互更新でシグナルが再入するのを防ぎたいときに使う。
+    `with` を抜けた時点で必ず元の状態へ戻る。
+
+    Args:
+        obj: シグナルを一時停止する対象オブジェクト。
+
+    Yields:
+        None: ブロック中のコンテキスト。
+    """
     blocker = QSignalBlocker(obj)
     try:
         yield
@@ -30,15 +39,61 @@ def blocked_signals(obj: QObject) -> Iterator[None]:
 
 
 def clamp_int(value: int, low: int, high: int) -> int:
+    """整数値を `[low, high]` の範囲に収める。
+
+    Args:
+        value: 対象値。
+        low: 下限値。
+        high: 上限値。
+
+    Returns:
+        範囲内へ丸めた整数値。
+    """
     return max(low, min(high, int(value)))
 
 
 def clamp_float(value: float, low: float, high: float) -> float:
+    """浮動小数点値を `[low, high]` の範囲に収める。
+
+    Args:
+        value: 対象値。
+        low: 下限値。
+        high: 上限値。
+
+    Returns:
+        範囲内へ丸めた浮動小数点値。
+    """
     return max(float(low), min(float(high), float(value)))
 
 
+def safe_int(value: Any, default: int) -> int:
+    """`value` を整数へ変換し、失敗時は `default` を返す。
+
+    Args:
+        value: 整数化したい入力値。
+        default: 変換失敗時の代替値。
+
+    Returns:
+        変換結果、または代替値。
+    """
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
 def screen_union_geometry(available: bool = False) -> QRect:
-    """Return the union rect of all screens with a safe fallback."""
+    """全スクリーンを覆う矩形を返す。
+
+    複数ディスプレイ環境では各画面矩形の和集合を返す。
+    画面情報が取れない場合はプライマリ画面、最後に固定フォールバックを使う。
+
+    Args:
+        available: `True` の場合はタスクバー等を除いた `availableGeometry` を使う。
+
+    Returns:
+        利用可能なスクリーン領域を表す矩形。
+    """
     screens = QGuiApplication.screens()
     if screens:
         first = screens[0].availableGeometry() if available else screens[0].geometry()
@@ -58,41 +113,56 @@ def screen_union_geometry(available: bool = False) -> QRect:
 
 
 def safe_choice(value: T, allowed: Sequence[T], default: T) -> T:
-    # 候補外の値を受けても既定値で安全に継続する。
+    """`value` が候補にあるときのみ採用し、なければ `default` を返す。
+
+    Args:
+        value: 判定対象値。
+        allowed: 許可する候補値の列。
+        default: 候補外だった場合の代替値。
+
+    Returns:
+        `value` または `default`。
+    """
     return value if value in allowed else default
 
 
 def set_current_index_blocked(widget: QObject, index: int) -> None:
+    """シグナルを止めた状態で `setCurrentIndex` を呼ぶ。
+
+    Args:
+        widget: `setCurrentIndex(int)` を持つ Qt ウィジェット。
+        index: 設定するインデックス。
+    """
     with blocked_signals(widget):
         widget.setCurrentIndex(int(index))
 
 
 def set_checked_blocked(widget: QObject, checked: bool) -> None:
+    """シグナルを止めた状態で `setChecked` を呼ぶ。
+
+    Args:
+        widget: `setChecked(bool)` を持つ Qt ウィジェット。
+        checked: 設定するチェック状態。
+    """
     with blocked_signals(widget):
         widget.setChecked(bool(checked))
-
-
-def set_value_blocked(widget: QObject, value: Any) -> None:
-    with blocked_signals(widget):
-        widget.setValue(value)
-
-
-def set_combobox_data_blocked(combo: QComboBox, data: Any, default_data: Any = None) -> int:
-    # data -> default_data -> index0 の順でフォールバックする。
-    index = combo.findData(data)
-    if index < 0 and default_data is not None:
-        index = combo.findData(default_data)
-    if index < 0 and combo.count() > 0:
-        index = 0
-    if index >= 0:
-        set_current_index_blocked(combo, index)
-    return index
 
 
 def resize_by_long_edge(
     img: np.ndarray, max_dim: int, interpolation: int = cv2.INTER_AREA
 ) -> np.ndarray:
-    # 長辺のみを基準に縮小し、縦横比は維持する。
+    """画像を長辺基準で縮小する。
+
+    既に `max_dim` 以下なら元画像をそのまま返す。縦横比は維持する。
+
+    Args:
+        img: 入力画像 (`H x W x C` または `H x W`)。
+        max_dim: 長辺の上限ピクセル。`0` 以下は縮小しない。
+        interpolation: `cv2.resize` の補間方式。
+
+    Returns:
+        縮小後画像、または元画像。
+    """
     if img is None:
         return img
     h, w = img.shape[:2]
@@ -105,8 +175,18 @@ def resize_by_long_edge(
     return cv2.resize(img, (new_w, new_h), interpolation=interpolation)
 
 
-def clamp_render_size(width: int, height: int) -> Tuple[int, int]:
-    # 極端に大きい描画要求でメモリが跳ねないよう上限を掛ける。
+def _clamp_render_size(width: int, height: int) -> Tuple[int, int]:
+    """描画用サイズを安全上限に収める。
+
+    辺長上限と面積上限の両方を適用し、過大な `QPixmap` 生成を抑える。
+
+    Args:
+        width: 要求幅。
+        height: 要求高。
+
+    Returns:
+        上限適用後の `(width, height)`。
+    """
     w = max(1, int(width))
     h = max(1, int(height))
     w = min(w, _MAX_RENDER_EDGE)
@@ -120,106 +200,48 @@ def clamp_render_size(width: int, height: int) -> Tuple[int, int]:
 
 
 def _scaled_qpixmap_from_qimage(qimg: QImage, max_w: int, max_h: int) -> QPixmap:
+    """`QImage` を描画上限つきで `QPixmap` に変換して縮小する。
+
+    Args:
+        qimg: 元画像。
+        max_w: 表示先の最大幅。
+        max_h: 表示先の最大高さ。
+
+    Returns:
+        `Qt.KeepAspectRatio` で縮小した `QPixmap`。
+    """
     pm = QPixmap.fromImage(qimg)
-    max_w, max_h = clamp_render_size(max_w, max_h)
+    max_w, max_h = _clamp_render_size(max_w, max_h)
     return pm.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
 
 
 def rgb_to_qpixmap(rgb: np.ndarray, max_w: int, max_h: int) -> QPixmap:
-    # NumPy RGB 配列を QPixmap に変換し、表示領域へフィットさせる。
+    """NumPy の RGB 配列を `QPixmap` に変換する。
+
+    Args:
+        rgb: `uint8` の RGB 配列 (`H x W x 3`)。
+        max_w: 表示先の最大幅。
+        max_h: 表示先の最大高さ。
+
+    Returns:
+        表示上限内に収まる `QPixmap`。
+    """
     rgb = np.ascontiguousarray(rgb)
     h, w = rgb.shape[:2]
     qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888)
     return _scaled_qpixmap_from_qimage(qimg, max_w=max_w, max_h=max_h)
 
 
-def gray_to_qpixmap(gray: np.ndarray, max_w: int, max_h: int) -> QPixmap:
-    # グレースケール配列の軽量変換経路。
-    gray = np.ascontiguousarray(gray)
-    h, w = gray.shape[:2]
-    qimg = QImage(gray.data, w, h, w, QImage.Format_Grayscale8)
-    return _scaled_qpixmap_from_qimage(qimg, max_w=max_w, max_h=max_h)
-
-
 def bgr_to_qpixmap(bgr: np.ndarray, max_w: int = 560, max_h: int = 420) -> QPixmap:
+    """NumPy の BGR 配列を `QPixmap` に変換する。
+
+    Args:
+        bgr: `uint8` の BGR 配列 (`H x W x 3`)。
+        max_w: 表示先の最大幅。
+        max_h: 表示先の最大高さ。
+
+    Returns:
+        表示上限内に収まる `QPixmap`。
+    """
     rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
     return rgb_to_qpixmap(rgb, max_w=max_w, max_h=max_h)
-
-
-def top_hue_bars(
-    hist: Optional[np.ndarray],
-) -> Tuple[str, List[Tuple[str, float, Tuple[int, int, int]]]]:
-    """
-    実際に使われている色相の上位色をそのまま出す。
-    Hueビン（0-179）のうち出現が多い順に C.TOP_COLORS_COUNT 個取り、各ビンの色をそのHueで塗る。
-    """
-    if hist is None:
-        return C.TOP_COLORS_TITLE, []
-    hist = np.asarray(hist, dtype=np.int64).reshape(-1)
-    if hist.size != 180:
-        fixed = np.zeros(180, dtype=np.int64)
-        n = min(180, hist.size)
-        if n > 0:
-            fixed[:n] = hist[:n]
-        hist = fixed
-    total = float(hist.sum())
-    if total <= 0:
-        return C.TOP_COLORS_TITLE, []
-
-    top_idx = np.argsort(hist)[::-1]
-    bars: List[Tuple[str, float, Tuple[int, int, int]]] = []
-    for idx in top_idx[: C.TOP_COLORS_COUNT]:
-        count = hist[idx]
-        if count <= 0:
-            continue
-        ratio = count / total
-        # Hue idx (0-179) -> actual hue deg = idx*2
-        hsv = np.uint8([[[idx * 2, 255, 255]]])
-        rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)[0, 0]
-        color = (int(rgb[0]), int(rgb[1]), int(rgb[2]))
-        bars.append((f"H{idx}", ratio, color))
-    return C.TOP_COLORS_TITLE, bars
-
-
-def _top_bar_item_ratio_color(item: Tuple) -> Tuple[float, Tuple[int, int, int]]:
-    if len(item) == 3:
-        _, ratio, color = item
-    else:
-        ratio, color = item
-    return float(ratio), tuple(int(c) for c in color)
-
-
-def render_top_color_bar(
-    bars: List[Tuple], width: int = 300, height: int = C.TOP_COLOR_BAR_HEIGHT
-) -> QPixmap:
-    """
-    bars: [(ratio, (r,g,b))] or [(name, ratio, (r,g,b))]
-    # 比率バーを横方向へ敷き詰めて表示する。
-    """
-    safe_w, safe_h = clamp_render_size(width, max(_TOP_BAR_MIN_HEIGHT, height))
-    pm = QPixmap(safe_w, safe_h)
-    pm.fill(Qt.transparent)
-    painter = QPainter(pm)
-    try:
-        painter.fillRect(QRect(0, 0, pm.width(), pm.height()), QColor(235, 235, 235))
-        show_text = pm.width() >= _TOP_BAR_TEXT_MIN_WIDTH
-        x = 0
-        remaining = pm.width()
-        for item in bars:
-            ratio, color = _top_bar_item_ratio_color(item)
-            w = int(round(pm.width() * ratio))
-            w = max(1, min(w, remaining))
-            painter.fillRect(QRect(x, 0, w, pm.height()), QColor(*color))
-            if show_text and w >= _TOP_BAR_TEXT_MIN_SEGMENT_PX:
-                pct = f"{ratio*100:.1f}%"
-                painter.setPen(QColor(255, 255, 255) if sum(color) < 400 else QColor(40, 40, 40))
-                painter.drawText(QRect(x + 2, 0, w - 4, pm.height()), Qt.AlignCenter, pct)
-            x += w
-            remaining = pm.width() - x
-            if remaining <= 0:
-                break
-        painter.setPen(QPen(QColor(200, 200, 200), 1))
-        painter.drawRect(0, 0, pm.width() - 1, pm.height() - 1)
-    finally:
-        painter.end()
-    return pm

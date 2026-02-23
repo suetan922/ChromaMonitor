@@ -1,1 +1,1 @@
-"""Frame analysis helpers."""
+"""解析処理の補助関数。"""

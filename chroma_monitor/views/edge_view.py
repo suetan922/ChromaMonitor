@@ -1,4 +1,4 @@
-"""Edge image view."""
+"""ビュー描画に関する処理。"""
 
 import cv2
 
@@ -8,6 +8,7 @@ from .base_image_view import BaseImageLabelView
 
 
 class EdgeView(BaseImageLabelView):
+
     def __init__(self):
         super().__init__("エッジ未検出")
         self._sensitivity = C.DEFAULT_EDGE_SENSITIVITY  # 1..100

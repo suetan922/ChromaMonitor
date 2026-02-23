@@ -1,1 +1,1 @@
-"""ChromaMonitor package."""
+"""モジュールの補助処理。"""

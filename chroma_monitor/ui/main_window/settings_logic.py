@@ -1,4 +1,4 @@
-"""Settings/state logic helpers for MainWindow."""
+"""設定の読み書きと反映ロジック。"""
 
 from ...util import constants as C
 from ...util.config import load_config, save_config
@@ -7,28 +7,18 @@ from ...util.functions import (
     clamp_float,
     clamp_int,
     safe_choice,
+    safe_int,
     set_checked_blocked,
-    set_combobox_data_blocked,
-    set_value_blocked,
+)
+
+_LEGACY_REMOVED_CONFIG_KEYS = (
+    "graph_every",
+    "preview_window",
 )
 
 
-def _to_int(value, default: int) -> int:
-    try:
-        return int(value)
-    except Exception:
-        return int(default)
-
-
-def _to_float(value, default: float) -> float:
-    try:
-        return float(value)
-    except Exception:
-        return float(default)
-
-
 def _cfg_int(cfg: dict, key: str, default: int, low: int, high: int) -> int:
-    return clamp_int(_to_int(cfg.get(key, default), default), low, high)
+    return clamp_int(safe_int(cfg.get(key, default), default), low, high)
 
 
 def _cfg_float(
@@ -38,14 +28,35 @@ def _cfg_float(
     low: float | None = None,
     high: float | None = None,
 ) -> float:
-    value = _to_float(cfg.get(key, default), default)
+    try:
+        value = float(cfg.get(key, default))
+    except Exception:
+        value = float(default)
     if low is not None and high is not None:
         return clamp_float(value, low, high)
     return value
 
 
+def _set_value_blocked(widget, value) -> None:
+    with blocked_signals(widget):
+        widget.setValue(value)
+
+
+def _set_combobox_data_blocked(combo, data, default_data=None) -> int:
+    # data -> default_data -> index0 の順でフォールバックする。
+    index = combo.findData(data)
+    if index < 0 and default_data is not None:
+        index = combo.findData(default_data)
+    if index < 0 and combo.count() > 0:
+        index = 0
+    if index >= 0:
+        with blocked_signals(combo):
+            combo.setCurrentIndex(int(index))
+    return index
+
+
 def _apply_combo_choice(combo, raw_value, allowed, default) -> None:
-    set_combobox_data_blocked(
+    _set_combobox_data_blocked(
         combo,
         safe_choice(raw_value, allowed, default),
         default_data=default,
@@ -76,7 +87,6 @@ def _collect_settings_payload(main_window) -> dict:
         C.CFG_WHEEL_MODE: selected_wheel_mode(main_window),
         C.CFG_RGB_HIST_MODE: selected_rgb_hist_mode(main_window),
         C.CFG_WHEEL_SAT_THRESHOLD: selected_wheel_sat_threshold(main_window),
-        C.CFG_GRAPH_EVERY: C.DEFAULT_GRAPH_EVERY,
         C.CFG_ALWAYS_ON_TOP: main_window._is_always_on_top_enabled(),
         C.CFG_MODE: selected_mode(main_window),
         C.CFG_DIFF_THRESHOLD: float(main_window.spin_diff.value()),
@@ -389,7 +399,7 @@ def load_settings(main_window):
     main_window._settings_load_in_progress = True
     try:
         interval = _cfg_float(cfg, C.CFG_INTERVAL, C.DEFAULT_INTERVAL_SEC)
-        set_value_blocked(main_window.spin_interval, interval)
+        _set_value_blocked(main_window.spin_interval, interval)
         main_window.worker.set_interval(main_window.spin_interval.value())
         sample_points = _cfg_int(
             cfg,
@@ -398,7 +408,7 @@ def load_settings(main_window):
             C.ANALYZER_MIN_SAMPLE_POINTS,
             C.ANALYZER_MAX_SAMPLE_POINTS,
         )
-        set_value_blocked(main_window.spin_points, sample_points)
+        _set_value_blocked(main_window.spin_points, sample_points)
         main_window.worker.set_sample_points(sample_points)
         analysis_max_dim = _cfg_int(
             cfg,
@@ -459,7 +469,7 @@ def load_settings(main_window):
             C.SCATTER_HUE_MIN,
             C.SCATTER_HUE_MAX,
         )
-        set_value_blocked(main_window.slider_scatter_hue_center, scatter_hue_center)
+        _set_value_blocked(main_window.slider_scatter_hue_center, scatter_hue_center)
         main_window.scatter.set_shape(scatter_shape)
         main_window.scatter.set_render_mode(scatter_render_mode)
         # フィルター状態は UI 側の現在値から再適用する。
@@ -494,7 +504,7 @@ def load_settings(main_window):
             C.WHEEL_SAT_THRESHOLD_MIN,
             C.WHEEL_SAT_THRESHOLD_MAX,
         )
-        set_value_blocked(main_window.spin_wheel_sat_threshold, wheel_sat_threshold)
+        _set_value_blocked(main_window.spin_wheel_sat_threshold, wheel_sat_threshold)
         main_window.wheel.set_mode(selected_wheel_mode(main_window))
         main_window.worker.set_wheel_sat_threshold(wheel_sat_threshold)
         main_window.worker.set_graph_every(C.DEFAULT_GRAPH_EVERY)
@@ -529,13 +539,15 @@ def load_settings(main_window):
             C.UPDATE_MODES,
             C.DEFAULT_MODE,
         )
-        set_value_blocked(
+        _set_value_blocked(
             main_window.spin_diff,
             _cfg_float(cfg, C.CFG_DIFF_THRESHOLD, C.DEFAULT_DIFF_THRESHOLD),
         )
-        set_value_blocked(
+        _set_value_blocked(
             main_window.spin_stable,
-            _to_int(cfg.get(C.CFG_STABLE_FRAMES, C.DEFAULT_STABLE_FRAMES), C.DEFAULT_STABLE_FRAMES),
+            safe_int(
+                cfg.get(C.CFG_STABLE_FRAMES, C.DEFAULT_STABLE_FRAMES), C.DEFAULT_STABLE_FRAMES
+            ),
         )
         edge_sens = _cfg_int(
             cfg,
@@ -544,7 +556,7 @@ def load_settings(main_window):
             C.EDGE_SENSITIVITY_MIN,
             C.EDGE_SENSITIVITY_MAX,
         )
-        set_value_blocked(main_window.spin_edge_sensitivity, edge_sens)
+        _set_value_blocked(main_window.spin_edge_sensitivity, edge_sens)
         main_window.edge_view.set_sensitivity(edge_sens)
 
         _apply_combo_choice(
@@ -570,7 +582,7 @@ def load_settings(main_window):
             C.SALIENCY_ALPHA_MIN,
             C.SALIENCY_ALPHA_MAX,
         )
-        set_value_blocked(main_window.spin_saliency_alpha, saliency_alpha)
+        _set_value_blocked(main_window.spin_saliency_alpha, saliency_alpha)
         main_window.saliency_view.set_overlay_alpha(saliency_alpha)
 
         focus_sens = _cfg_int(
@@ -580,7 +592,7 @@ def load_settings(main_window):
             C.FOCUS_PEAK_SENSITIVITY_MIN,
             C.FOCUS_PEAK_SENSITIVITY_MAX,
         )
-        set_value_blocked(main_window.spin_focus_peak_sensitivity, focus_sens)
+        _set_value_blocked(main_window.spin_focus_peak_sensitivity, focus_sens)
 
         _apply_combo_choice(
             main_window.combo_focus_peak_color,
@@ -596,7 +608,7 @@ def load_settings(main_window):
             C.FOCUS_PEAK_THICKNESS_MIN,
             C.FOCUS_PEAK_THICKNESS_MAX,
         )
-        set_value_blocked(main_window.spin_focus_peak_thickness, focus_thick)
+        _set_value_blocked(main_window.spin_focus_peak_thickness, focus_thick)
         main_window.focus_peaking_view.set_sensitivity(focus_sens)
         main_window.focus_peaking_view.set_color(selected_focus_peak_color(main_window))
         main_window.focus_peaking_view.set_thickness(focus_thick)
@@ -614,7 +626,7 @@ def load_settings(main_window):
             C.SQUINT_SCALE_PERCENT_MIN,
             C.SQUINT_SCALE_PERCENT_MAX,
         )
-        set_value_blocked(main_window.spin_squint_scale, squint_scale)
+        _set_value_blocked(main_window.spin_squint_scale, squint_scale)
         squint_blur = _cfg_float(
             cfg,
             C.CFG_SQUINT_BLUR_SIGMA,
@@ -622,7 +634,7 @@ def load_settings(main_window):
             C.SQUINT_BLUR_SIGMA_MIN,
             C.SQUINT_BLUR_SIGMA_MAX,
         )
-        set_value_blocked(main_window.spin_squint_blur, squint_blur)
+        _set_value_blocked(main_window.spin_squint_blur, squint_blur)
         main_window.squint_view.set_mode(selected_squint_mode(main_window))
         main_window.squint_view.set_scale_percent(squint_scale)
         main_window.squint_view.set_blur_sigma(squint_blur)
@@ -639,7 +651,7 @@ def load_settings(main_window):
             C.VECTORSCOPE_WARN_THRESHOLD_MIN,
             C.VECTORSCOPE_WARN_THRESHOLD_MAX,
         )
-        set_value_blocked(main_window.spin_vectorscope_warn_threshold, warn_threshold)
+        _set_value_blocked(main_window.spin_vectorscope_warn_threshold, warn_threshold)
         main_window.vectorscope_view.set_show_skin_tone_line(show_skin_line)
         main_window.vectorscope_view.set_warn_threshold(warn_threshold)
         update_vectorscope_warning_label(main_window)
@@ -659,8 +671,9 @@ def save_settings(main_window, silent: bool = True):
     base = load_config()
     cfg = dict(base)
     cfg.pop("ui_theme", None)
-    # 起動時は常に非表示開始のため、プレビュー表示状態は保存対象から外す。
-    cfg.pop(C.CFG_PREVIEW_WINDOW, None)
+    # 廃止済みキーは保存時に除去して設定ファイルをクリーンに保つ。
+    for key in _LEGACY_REMOVED_CONFIG_KEYS:
+        cfg.pop(key, None)
     cfg.update(_collect_settings_payload(main_window))
     # 差分がなければファイル書き込みをスキップする。
     if cfg == base:

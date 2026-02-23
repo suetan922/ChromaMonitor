@@ -1,3 +1,5 @@
+"""ビュー用ドックの構築処理。"""
+
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
     QCheckBox,
@@ -30,14 +32,12 @@ from ..views import (
 
 
 class UniformMinDockWidget(QDockWidget):
-    """Use a common low minimum size for all analysis docks."""
 
     def minimumSizeHint(self):
         return QSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
 
 
 class ZeroMinContainer(QWidget):
-    """Child controls that should not raise parent dock minimum size."""
 
     def minimumSizeHint(self):
         return QSize(0, 0)
@@ -80,10 +80,12 @@ def _configure_view_dock(main_window, dock: QDockWidget) -> None:
 
     dock.visibilityChanged.connect(main_window.update_placeholder)
     dock.visibilityChanged.connect(main_window.sync_window_menu_checks)
+    dock.visibilityChanged.connect(main_window._sync_tabbed_dock_title_bars)
 
     for signal in (dock.topLevelChanged, dock.dockLocationChanged):
         # 配置が変わったときだけ自動保存を予約する。
         signal.connect(lambda *_args, mw=main_window: mw._schedule_layout_autosave())
+        signal.connect(main_window._sync_tabbed_dock_title_bars)
 
 
 def _register_docks(
@@ -125,15 +127,14 @@ def setup_view_docks(main_window) -> None:
     main_window.slider_scatter_hue_center.setSingleStep(1)
     main_window.slider_scatter_hue_center.setPageStep(10)
     main_window.slider_scatter_hue_center.setValue(C.DEFAULT_SCATTER_HUE_CENTER)
-    main_window.slider_scatter_hue_center.setFixedWidth(30)
-    main_window.slider_scatter_hue_center.setMinimumHeight(120)
-    main_window.slider_scatter_hue_center.setMaximumHeight(460)
+    main_window.slider_scatter_hue_center.setFixedWidth(32)
+    main_window.slider_scatter_hue_center.setMinimumHeight(0)
     main_window.slider_scatter_hue_center.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
     main_window.slider_scatter_hue_center.setStyleSheet(
         "QSlider::groove:vertical {"
         "border: 1px solid #c4c9d4;"
         "width: 10px;"
-        "margin: 7px 0;"
+        "margin: 8px 0;"
         "border-radius: 6px;"
         "background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
         "stop:0 #ff0000, stop:0.16 #ff00ff, stop:0.33 #0000ff, stop:0.5 #00ffff,"
@@ -144,7 +145,7 @@ def setup_view_docks(main_window) -> None:
         "border: 1px solid #4e5565;"
         "width: 20px;"
         "height: 14px;"
-        "margin: 0 -6px;"
+        "margin: 0 -5px;"
         "border-radius: 7px;"
         "}"
     )
@@ -181,9 +182,6 @@ def setup_view_docks(main_window) -> None:
     main_window.lbl_warmcool.setMinimumHeight(0)
     main_window.lbl_warmcool.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
 
-    # ドックのネスティングを有効化（3段以上に自由配置できるように）
-    main_window.setDockNestingEnabled(True)
-
     color_widget = QWidget()
     cw_l = QVBoxLayout(color_widget)
     cw_l.setContentsMargins(2, 2, 2, 2)
@@ -206,12 +204,13 @@ def setup_view_docks(main_window) -> None:
     scatter_controls.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Expanding)
     sctrl_l = QVBoxLayout(scatter_controls)
     sctrl_l.setContentsMargins(0, 0, 0, 0)
-    sctrl_l.setSpacing(2)
-    sctrl_l.addStretch(1)
+    sctrl_l.setSpacing(4)
+    # 余白:スライダー:余白 を 2:6:2 にして、縦領域の約6割をスライダーへ配分する。
+    sctrl_l.addStretch(2)
     sctrl_l.addWidget(main_window.chk_scatter_hue_filter, 0, Qt.AlignHCenter)
-    sctrl_l.addWidget(main_window.slider_scatter_hue_center, 1, Qt.AlignHCenter)
+    sctrl_l.addWidget(main_window.slider_scatter_hue_center, 6, Qt.AlignHCenter)
     sctrl_l.addWidget(main_window.lbl_scatter_hue_center, 0, Qt.AlignHCenter)
-    sctrl_l.addStretch(1)
+    sctrl_l.addStretch(2)
     sc_l.addWidget(scatter_controls, 0)
     scatter_dock = _create_dock(main_window, "S-V 散布図", "dock_scatter", scatter_container)
 
@@ -291,10 +290,7 @@ def setup_view_docks(main_window) -> None:
     )
 
     main_window.setDockOptions(
-        QMainWindow.AnimatedDocks
-        | QMainWindow.AllowTabbedDocks
-        | QMainWindow.AllowNestedDocks
-        | QMainWindow.GroupedDragging
+        QMainWindow.AnimatedDocks | QMainWindow.AllowTabbedDocks | QMainWindow.AllowNestedDocks
     )
     for area in (
         Qt.LeftDockWidgetArea,
@@ -354,8 +350,8 @@ def setup_view_docks(main_window) -> None:
     for d in main_window._dock_map.values():
         _configure_view_dock(main_window, d)
 
-    # 初期配置: 左にカラー、右側にビュー群、下にヒストグラム
-    # ユーザーが自由に3段以上へ再配置できるよう、tabifyは行わない
+    # 初期配置: 左にカラー、右側にビュー群、下にヒストグラム。
+    # タブ固定を避け、自由な多段再配置を優先する。
     main_window.addDockWidget(Qt.LeftDockWidgetArea, color_dock)
     main_window.addDockWidget(Qt.RightDockWidgetArea, scatter_dock)
     main_window.splitDockWidget(scatter_dock, edge_dock, Qt.Vertical)
@@ -384,3 +380,4 @@ def setup_view_docks(main_window) -> None:
         [280, 200, 180, 170, 160, 180, 170, 170, 170],
         Qt.Vertical,
     )
+    main_window._sync_tabbed_dock_title_bars()

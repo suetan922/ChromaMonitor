@@ -1,4 +1,4 @@
-"""Shared base class for image label views."""
+"""ビュー描画に関する処理。"""
 
 from typing import Callable, Optional
 
@@ -12,6 +12,7 @@ DEFAULT_IMAGE_VIEW_STYLE = "background:#111; border:1px solid #333; color:#AAA;"
 
 
 class BaseImageLabelView(QLabel):
+
     def __init__(self, empty_text: str, style: str = DEFAULT_IMAGE_VIEW_STYLE):
         super().__init__()
         self.setAlignment(Qt.AlignCenter)

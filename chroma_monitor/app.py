@@ -1,4 +1,4 @@
-"""Application entrypoint helpers for ChromaMonitor."""
+"""アプリ起動処理。"""
 
 import os
 import sys
@@ -28,7 +28,6 @@ def _single_instance_lock_path() -> str:
 
 
 def main() -> None:
-    """Run the desktop application."""
     app = QApplication(sys.argv)
     app.setApplicationName("ChromaMonitor")
     app.setOrganizationName("ChromaMonitor")

@@ -1,1 +1,1 @@
-"""Capture-related helpers."""
+"""モジュールの補助処理。"""

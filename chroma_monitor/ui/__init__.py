@@ -1,1 +1,1 @@
-"""UI composition helpers."""
+"""モジュールの補助処理。"""

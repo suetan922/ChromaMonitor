@@ -1,4 +1,4 @@
-"""Focus peaking image view."""
+"""ビュー描画に関する処理。"""
 
 import cv2
 import numpy as np
@@ -15,6 +15,7 @@ from .base_image_view import BaseImageLabelView
 
 
 class FocusPeakingView(BaseImageLabelView):
+
     def __init__(self):
         super().__init__("フォーカスピーキングなし")
         self._sensitivity = C.DEFAULT_FOCUS_PEAK_SENSITIVITY

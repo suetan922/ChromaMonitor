@@ -1,4 +1,4 @@
-"""Runtime actions (capture/start/stop/preview/image-load) for MainWindow."""
+"""実行時アクションの補助処理。"""
 
 from pathlib import Path
 

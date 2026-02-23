@@ -1,9 +1,100 @@
-"""Result/update handlers extracted from MainWindow for readability."""
+import math
 
 import cv2
 import numpy as np
+from PySide6.QtCore import QRect, Qt
+from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 
-from ...util.functions import render_top_color_bar, top_hue_bars
+from ...util import constants as C
+
+_MAX_RENDER_EDGE = 2048
+_MAX_RENDER_AREA = _MAX_RENDER_EDGE * _MAX_RENDER_EDGE
+_TOP_BAR_MIN_HEIGHT = 12
+_TOP_BAR_TEXT_MIN_WIDTH = 240
+_TOP_BAR_TEXT_MIN_SEGMENT_PX = 42
+
+
+def _clamp_render_size(width: int, height: int) -> tuple[int, int]:
+    # 極端に大きい描画要求でメモリが跳ねないよう上限を掛ける。
+    w = max(1, int(width))
+    h = max(1, int(height))
+    w = min(w, _MAX_RENDER_EDGE)
+    h = min(h, _MAX_RENDER_EDGE)
+    area = w * h
+    if area > _MAX_RENDER_AREA:
+        scale = math.sqrt(_MAX_RENDER_AREA / float(area))
+        w = max(1, int(w * scale))
+        h = max(1, int(h * scale))
+    return w, h
+
+
+def top_hue_bars(
+    hist: np.ndarray | None,
+) -> tuple[str, list[tuple[str, float, tuple[int, int, int]]]]:
+    if hist is None:
+        return C.TOP_COLORS_TITLE, []
+    hist = np.asarray(hist, dtype=np.int64).reshape(-1)
+    if hist.size != 180:
+        fixed = np.zeros(180, dtype=np.int64)
+        n = min(180, hist.size)
+        if n > 0:
+            fixed[:n] = hist[:n]
+        hist = fixed
+    total = float(hist.sum())
+    if total <= 0:
+        return C.TOP_COLORS_TITLE, []
+
+    top_idx = np.argsort(hist)[::-1]
+    bars: list[tuple[str, float, tuple[int, int, int]]] = []
+    for idx in top_idx[: C.TOP_COLORS_COUNT]:
+        count = hist[idx]
+        if count <= 0:
+            continue
+        ratio = float(count) / total
+        hsv = np.uint8([[[idx * 2, 255, 255]]])
+        rgb = cv2.cvtColor(hsv, cv2.COLOR_HSV2RGB)[0, 0]
+        bars.append((f"H{idx}", ratio, (int(rgb[0]), int(rgb[1]), int(rgb[2]))))
+    return C.TOP_COLORS_TITLE, bars
+
+
+def _top_bar_item_ratio_color(item: tuple) -> tuple[float, tuple[int, int, int]]:
+    if len(item) == 3:
+        _, ratio, color = item
+    else:
+        ratio, color = item
+    return float(ratio), tuple(int(c) for c in color)
+
+
+def render_top_color_bar(
+    bars: list[tuple], width: int = 300, height: int = C.TOP_COLOR_BAR_HEIGHT
+) -> QPixmap:
+    safe_w, safe_h = _clamp_render_size(width, max(_TOP_BAR_MIN_HEIGHT, height))
+    pm = QPixmap(safe_w, safe_h)
+    pm.fill(Qt.transparent)
+    painter = QPainter(pm)
+    try:
+        painter.fillRect(QRect(0, 0, pm.width(), pm.height()), QColor(235, 235, 235))
+        show_text = pm.width() >= _TOP_BAR_TEXT_MIN_WIDTH
+        x = 0
+        remaining = pm.width()
+        for item in bars:
+            ratio, color = _top_bar_item_ratio_color(item)
+            w = int(round(pm.width() * ratio))
+            w = max(1, min(w, remaining))
+            painter.fillRect(QRect(x, 0, w, pm.height()), QColor(*color))
+            if show_text and w >= _TOP_BAR_TEXT_MIN_SEGMENT_PX:
+                pct = f"{ratio*100:.1f}%"
+                painter.setPen(QColor(255, 255, 255) if sum(color) < 400 else QColor(40, 40, 40))
+                painter.drawText(QRect(x + 2, 0, w - 4, pm.height()), Qt.AlignCenter, pct)
+            x += w
+            remaining = pm.width() - x
+            if remaining <= 0:
+                break
+        painter.setPen(QPen(QColor(200, 200, 200), 1))
+        painter.drawRect(0, 0, pm.width() - 1, pm.height() - 1)
+    finally:
+        painter.end()
+    return pm
 
 
 def refresh_top_color_bar(main_window) -> None:

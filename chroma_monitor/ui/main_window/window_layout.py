@@ -1,7 +1,17 @@
-"""Window/layout behavior helpers for MainWindow."""
+"""ウィンドウ配置とドッキング挙動の補助処理。"""
 
-from PySide6.QtCore import QRect, Qt
-from PySide6.QtWidgets import QDialog, QDockWidget, QSizePolicy, QWidget
+from PySide6.QtCore import QEvent, QRect, Qt
+from PySide6.QtGui import QCursor, QGuiApplication
+from PySide6.QtWidgets import (
+    QApplication,
+    QDialog,
+    QDockWidget,
+    QMainWindow,
+    QSizePolicy,
+    QTabBar,
+    QToolButton,
+    QWidget,
+)
 
 from ...util.functions import blocked_signals, screen_union_geometry
 
@@ -22,6 +32,12 @@ _TOPLEVEL_MIN_W = 160
 _TOPLEVEL_MIN_H = 120
 _TOPLEVEL_MAX_W_FLOOR = 240
 _TOPLEVEL_MAX_H_FLOOR = 180
+_DOCK_OPTIONS_BASE = QMainWindow.AnimatedDocks | QMainWindow.AllowTabbedDocks
+_DOCK_OPTIONS_NESTED = _DOCK_OPTIONS_BASE | QMainWindow.AllowNestedDocks
+_TAB_DETACH_VERTICAL_DRAG_PX = 22
+_DOCK_DROP_ACTIVATION_MARGIN_RATIO = 0.16
+_DOCK_DROP_ACTIVATION_MARGIN_MIN_PX = 96
+_DOCK_DROP_ACTIVATION_MARGIN_MAX_PX = 360
 
 
 def _clamp_top_left_in_available(
@@ -46,16 +62,360 @@ def update_floating_dock_dockability(main_window, dock: QDockWidget) -> None:
     # レイアウトは Qt 標準ドッキング挙動を優先する。
     if dock.allowedAreas() != Qt.AllDockWidgetAreas:
         dock.setAllowedAreas(Qt.AllDockWidgetAreas)
+    _sync_dock_options_by_floating_state(main_window)
+
+
+def _dock_drop_activation_margin_px(main_window) -> int:
+    frame = main_window.frameGeometry()
+    basis = max(1, min(int(frame.width()), int(frame.height())))
+    scaled = int(round(float(basis) * _DOCK_DROP_ACTIVATION_MARGIN_RATIO))
+    return max(
+        _DOCK_DROP_ACTIVATION_MARGIN_MIN_PX,
+        min(_DOCK_DROP_ACTIVATION_MARGIN_MAX_PX, scaled),
+    )
+
+
+def _floating_dock_intersects_drop_zone(main_window, zone: QRect) -> bool:
+    for dock in getattr(main_window, "_dock_map", {}).values():
+        if dock is None or not dock.isVisible() or not dock.isFloating():
+            continue
+        try:
+            frame = dock.frameGeometry()
+        except Exception:
+            continue
+        if frame.isValid() and frame.intersects(zone):
+            return True
+    return False
+
+
+def _is_dock_drop_active_near_main_window(main_window) -> bool:
+    app = QApplication.instance()
+    if app is None:
+        return False
+    if not (app.mouseButtons() & Qt.LeftButton):
+        return False
+    if not main_window.isVisible():
+        return False
+    margin = _dock_drop_activation_margin_px(main_window)
+    frame = main_window.frameGeometry().adjusted(
+        -margin,
+        -margin,
+        margin,
+        margin,
+    )
+    cursor_pos = QCursor.pos()
+    if frame.contains(cursor_pos):
+        return True
+    return _floating_dock_intersects_drop_zone(main_window, frame)
+
+
+def _dock_title_set(main_window) -> set[str]:
+    return {dock.windowTitle() for dock in getattr(main_window, "_dock_map", {}).values() if dock}
+
+
+def _is_dock_related_tab_bar(main_window, bar: QTabBar) -> bool:
+    titles = _dock_title_set(main_window)
+    if not titles:
+        return False
+    for i in range(bar.count()):
+        if bar.tabText(i) in titles:
+            return True
+    return False
+
+
+def _is_our_tab_close_button(widget) -> bool:
+    return isinstance(widget, QToolButton) and bool(
+        getattr(widget, "_chroma_dock_tab_close_button", False)
+    )
+
+
+def _remove_tab_close_button(bar: QTabBar, idx: int) -> None:
+    btn = bar.tabButton(int(idx), QTabBar.RightSide)
+    if not _is_our_tab_close_button(btn):
+        return
+    bar.setTabButton(int(idx), QTabBar.RightSide, None)
+    btn.deleteLater()
+
+
+def _close_current_dock_tab(main_window, bar: QTabBar) -> None:
+    idx = int(bar.currentIndex())
+    if idx < 0:
+        return
+    dock = _dock_for_tab_text(main_window, bar.tabText(idx))
+    if dock is None:
+        return
+    toggle_dock(main_window, dock, False)
+
+
+def _sync_dock_tab_close_button(main_window, bar: QTabBar) -> None:
+    if not _is_dock_related_tab_bar(main_window, bar) or bar.count() < 2:
+        for i in range(bar.count()):
+            _remove_tab_close_button(bar, i)
+        return
+
+    current = int(bar.currentIndex())
+    if current < 0:
+        for i in range(bar.count()):
+            _remove_tab_close_button(bar, i)
+        return
+
+    for i in range(bar.count()):
+        if i != current:
+            _remove_tab_close_button(bar, i)
+
+    existing = bar.tabButton(current, QTabBar.RightSide)
+    if _is_our_tab_close_button(existing):
+        return
+    if isinstance(existing, QWidget):
+        # Qt標準側が付けているボタンがある場合は上書きしない。
+        return
+
+    btn = QToolButton(bar)
+    btn._chroma_dock_tab_close_button = True
+    btn.setText("×")
+    btn.setToolTip("このタブを閉じる")
+    btn.setAutoRaise(True)
+    btn.setCursor(Qt.PointingHandCursor)
+    btn.setFixedSize(16, 16)
+    btn.setStyleSheet(
+        "QToolButton { border:none; color:#6b7280; padding:0; font-size:13px; font-weight:700; }"
+        "QToolButton:hover { color:#dc2626; }"
+        "QToolButton:pressed { color:#b91c1c; }"
+    )
+    btn.clicked.connect(lambda _=False, mw=main_window, b=bar: _close_current_dock_tab(mw, b))
+    bar.setTabButton(current, QTabBar.RightSide, btn)
+
+
+def _sync_dock_tab_bar_event_filters(main_window) -> None:
+    seen = []
+    for bar in main_window.findChildren(QTabBar):
+        if not _is_dock_related_tab_bar(main_window, bar):
+            _sync_dock_tab_close_button(main_window, bar)
+            continue
+        seen.append(bar)
+        if not getattr(bar, "_chroma_dock_tab_filter_installed", False):
+            bar.installEventFilter(main_window)
+            bar._chroma_dock_tab_filter_installed = True
+        if not getattr(bar, "_chroma_dock_tab_close_sync_connected", False):
+            bar.currentChanged.connect(
+                lambda _idx, mw=main_window, b=bar: _sync_dock_tab_close_button(mw, b)
+            )
+            bar._chroma_dock_tab_close_sync_connected = True
+        _sync_dock_tab_close_button(main_window, bar)
+    main_window._dock_tab_bars = tuple(seen)
+
+
+def is_dock_tab_bar(main_window, obj) -> bool:
+    if not isinstance(obj, QTabBar):
+        return False
+    bars = getattr(main_window, "_dock_tab_bars", ())
+    return obj in bars
+
+
+def _global_pos_from_event(event):
+    if hasattr(event, "globalPosition"):
+        return event.globalPosition().toPoint()
+    if hasattr(event, "globalPos"):
+        return event.globalPos()
+    return None
+
+
+def _event_pos(event):
+    if hasattr(event, "position"):
+        return event.position().toPoint()
+    if hasattr(event, "pos"):
+        return event.pos()
+    return None
+
+
+def _dock_for_tab_text(main_window, text: str) -> QDockWidget | None:
+    if not text:
+        return None
+    candidates = []
+    for dock in getattr(main_window, "_dock_map", {}).values():
+        if dock is None or not dock.isVisible() or dock.isFloating():
+            continue
+        if dock.windowTitle() != text:
+            continue
+        if len(main_window.tabifiedDockWidgets(dock)) <= 0:
+            continue
+        candidates.append(dock)
+    if not candidates:
+        return None
+    return candidates[0]
+
+
+def _float_dock_from_tab_drag(main_window, dock: QDockWidget, global_pos) -> None:
+    if dock is None:
+        return
+    dock.setFloating(True)
+    if global_pos is not None:
+        frame = dock.frameGeometry()
+        x = int(global_pos.x() - min(96, max(24, frame.width() // 2)))
+        y = int(global_pos.y() - 12)
+        dock.move(x, y)
+    dock.raise_()
+    dock.activateWindow()
+    _sync_dock_options_by_floating_state(main_window)
+    _sync_dock_tab_bar_event_filters(main_window)
+    main_window._schedule_layout_autosave()
+
+
+def _hide_dock_title_bar_for_tabbed(dock: QDockWidget) -> None:
+    if getattr(dock, "_tabbed_title_hidden", False):
+        return
+    prev_title = dock.titleBarWidget()
+    dock._tabbed_prev_titlebar_widget = prev_title
+    holder = QWidget(dock)
+    holder.setFixedHeight(0)
+    holder.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+    dock.setTitleBarWidget(holder)
+    dock._tabbed_title_hidden = True
+
+
+def _restore_dock_title_bar(dock: QDockWidget) -> None:
+    if not getattr(dock, "_tabbed_title_hidden", False):
+        return
+    prev_title = getattr(dock, "_tabbed_prev_titlebar_widget", None)
+    dock.setTitleBarWidget(prev_title if isinstance(prev_title, QWidget) else None)
+    dock._tabbed_prev_titlebar_widget = None
+    dock._tabbed_title_hidden = False
+
+
+def _is_tabbed_dock(main_window, dock: QDockWidget) -> bool:
+    if dock is None or not dock.isVisible() or dock.isFloating():
+        return False
+    try:
+        if len(main_window.tabifiedDockWidgets(dock)) > 0:
+            return True
+    except Exception:
+        pass
+    title = str(dock.windowTitle())
+    if not title:
+        return False
+    for bar in main_window.findChildren(QTabBar):
+        if bar.count() < 2:
+            continue
+        if not _is_dock_related_tab_bar(main_window, bar):
+            continue
+        for i in range(bar.count()):
+            if bar.tabText(i) == title:
+                return True
+    return False
+
+
+def handle_dock_tab_bar_event(main_window, bar: QTabBar, event) -> bool:
+    et = event.type()
+    if et == QEvent.MouseButtonPress and getattr(event, "button", lambda: None)() == Qt.LeftButton:
+        pos = _event_pos(event)
+        idx = bar.tabAt(pos) if pos is not None else -1
+        if idx < 0:
+            idx = bar.currentIndex()
+        if idx < 0:
+            main_window._dock_tab_drag_state = None
+            return False
+        main_window._dock_tab_drag_state = {
+            "bar": bar,
+            "index": int(idx),
+            "text": bar.tabText(idx),
+            "start_global": _global_pos_from_event(event),
+            "triggered": False,
+            "detached_dock": None,
+            "drag_offset": (0, 0),
+        }
+        return False
+
+    if et == QEvent.MouseMove:
+        state = getattr(main_window, "_dock_tab_drag_state", None)
+        if not isinstance(state, dict):
+            return False
+        if state.get("bar") is not bar:
+            return False
+        current = _global_pos_from_event(event)
+        if current is None:
+            return False
+        if state.get("triggered"):
+            dock = state.get("detached_dock")
+            if dock is None or not dock.isFloating():
+                return False
+            buttons = getattr(event, "buttons", lambda: Qt.NoButton)()
+            if not (buttons & Qt.LeftButton):
+                return False
+            off_x, off_y = state.get("drag_offset", (0, 0))
+            dock.move(int(current.x() - int(off_x)), int(current.y() - int(off_y)))
+            return True
+        start = state.get("start_global")
+        if start is None:
+            return False
+        dx = int(current.x() - start.x())
+        dy = int(current.y() - start.y())
+        if abs(dy) < _TAB_DETACH_VERTICAL_DRAG_PX or abs(dy) <= abs(dx):
+            return False
+        dock = _dock_for_tab_text(main_window, str(state.get("text", "")))
+        if dock is None:
+            return False
+        state["triggered"] = True
+        state["detached_dock"] = dock
+        _float_dock_from_tab_drag(main_window, dock, current)
+        frame = dock.frameGeometry()
+        state["drag_offset"] = (int(current.x() - frame.x()), int(current.y() - frame.y()))
+        return True
+
+    if et in (QEvent.MouseButtonRelease, QEvent.Leave):
+        state = getattr(main_window, "_dock_tab_drag_state", None)
+        if isinstance(state, dict):
+            dock = state.get("detached_dock")
+            if dock is not None and dock.isFloating():
+                fit_top_level_widget_to_desktop(main_window, dock)
+                _sync_dock_options_by_floating_state(main_window)
+                _sync_dock_tab_bar_event_filters(main_window)
+                main_window._schedule_layout_autosave()
+        main_window._dock_tab_drag_state = None
+    return False
+
+
+def sync_tabbed_dock_title_bars(main_window) -> None:
+    # タブ化中のみ掴み帯を消しつつ、タブ操作用イベント監視を同期する。
+    for dock in getattr(main_window, "_dock_map", {}).values():
+        if dock is None:
+            continue
+        is_tabbed = _is_tabbed_dock(main_window, dock)
+        if is_tabbed:
+            _hide_dock_title_bar_for_tabbed(dock)
+        else:
+            _restore_dock_title_bar(dock)
+    _sync_dock_tab_bar_event_filters(main_window)
+
+
+def _sync_dock_options_by_floating_state(main_window) -> None:
+    # 通常はフローティング中の外部左右上下ドロップを抑制し、中央タブ重ねを優先する。
+    # ただしメイン近傍へドラッグ中はネストを一時許可し、上下左右のドロップ判定を広げる。
+    has_visible_floating = any(
+        dock.isVisible() and dock.isFloating()
+        for dock in getattr(main_window, "_dock_map", {}).values()
+    )
+    allow_nested_while_dragging = _is_dock_drop_active_near_main_window(main_window)
+    desired = (
+        _DOCK_OPTIONS_NESTED
+        if (not has_visible_floating or allow_nested_while_dragging)
+        else _DOCK_OPTIONS_BASE
+    )
+    if main_window.dockOptions() != desired:
+        main_window.setDockOptions(desired)
 
 
 def sync_all_floating_dock_dockability(main_window) -> None:
     for dock in getattr(main_window, "_dock_map", {}).values():
         update_floating_dock_dockability(main_window, dock)
+    _sync_dock_options_by_floating_state(main_window)
+    sync_tabbed_dock_title_bars(main_window)
 
 
 def on_dock_top_level_changed(main_window, dock: QDockWidget, floating: bool):
     # フローティング切替時に制約を同期する。
     update_floating_dock_dockability(main_window, dock)
+    _sync_dock_options_by_floating_state(main_window)
+    sync_tabbed_dock_title_bars(main_window)
     sync_dock_on_top(main_window, dock)
     if floating:
         fit_top_level_widget_to_desktop(main_window, dock)
@@ -66,6 +426,14 @@ def on_dock_top_level_changed(main_window, dock: QDockWidget, floating: bool):
 
 def desktop_available_geometry(main_window) -> QRect:
     # 基本は現在スクリーンを優先し、取得不可時のみ全画面統合へフォールバックする。
+    try:
+        center_screen = QGuiApplication.screenAt(main_window.frameGeometry().center())
+    except Exception:
+        center_screen = None
+    if center_screen is not None:
+        rect = center_screen.availableGeometry()
+        if rect.isValid() and rect.width() > 0 and rect.height() > 0:
+            return rect
     screen = None
     try:
         screen = main_window.screen()
@@ -78,8 +446,39 @@ def desktop_available_geometry(main_window) -> QRect:
     return screen_union_geometry(available=True)
 
 
+def _available_geometry_for_widget(main_window, widget: QWidget | None = None) -> QRect:
+    # 補正対象が実際に乗っているスクリーンを最優先し、混在DPIでの過大サイズ化を防ぐ。
+    screen_candidates = []
+    if widget is not None:
+        try:
+            ws = widget.screen()
+            if ws is not None:
+                screen_candidates.append(ws)
+        except Exception:
+            pass
+        try:
+            center = widget.frameGeometry().center()
+            at_center = QGuiApplication.screenAt(center)
+            if at_center is not None and at_center not in screen_candidates:
+                screen_candidates.append(at_center)
+        except Exception:
+            pass
+    try:
+        ms = main_window.screen()
+        if ms is not None and ms not in screen_candidates:
+            screen_candidates.append(ms)
+    except Exception:
+        pass
+
+    for screen in screen_candidates:
+        rect = screen.availableGeometry()
+        if rect.isValid() and rect.width() > 0 and rect.height() > 0:
+            return rect
+    return screen_union_geometry(available=True)
+
+
 def fit_window_to_desktop(main_window):
-    # 最大化/フルスクリーン時はユーザー操作を優先して何もしない。
+    # 最大化/フルスクリーン中は現在状態を維持する。
     if main_window.isMaximized() or main_window.isFullScreen():
         return
     avail = desktop_available_geometry(main_window)
@@ -291,7 +690,7 @@ def rebalance_dock_layout(main_window) -> None:
 
 def fit_dialog_to_desktop(main_window, dialog: QDialog, center_on_parent: bool = False):
     # 設定ダイアログが画面外に出ないよう位置/サイズを補正する。
-    avail = desktop_available_geometry(main_window)
+    avail = _available_geometry_for_widget(main_window, dialog)
     if avail.width() <= 0 or avail.height() <= 0:
         return
 
@@ -325,7 +724,7 @@ def fit_dialog_to_desktop(main_window, dialog: QDialog, center_on_parent: bool =
 
 def fit_top_level_widget_to_desktop(main_window, widget: QWidget):
     # フローティングドックなどのトップレベルウィジェットを画面内に収める。
-    avail = desktop_available_geometry(main_window)
+    avail = _available_geometry_for_widget(main_window, widget)
     if avail.width() <= 0 or avail.height() <= 0:
         return
     if widget.windowState() & Qt.WindowMinimized:
@@ -336,10 +735,15 @@ def fit_top_level_widget_to_desktop(main_window, widget: QWidget):
     max_h = max(_TOPLEVEL_MAX_H_FLOOR, avail.height() - margin * 2)
 
     frame = widget.frameGeometry()
-    target_w = min(max(_TOPLEVEL_MIN_W, frame.width()), max_w)
-    target_h = min(max(_TOPLEVEL_MIN_H, frame.height()), max_h)
-    if target_w != frame.width() or target_h != frame.height():
-        widget.resize(target_w, target_h)
+    geom = widget.geometry()
+    extra_w = max(0, int(frame.width() - geom.width()))
+    extra_h = max(0, int(frame.height() - geom.height()))
+    max_client_w = max(_TOPLEVEL_MAX_W_FLOOR, max_w - extra_w)
+    max_client_h = max(_TOPLEVEL_MAX_H_FLOOR, max_h - extra_h)
+    target_client_w = min(max(_TOPLEVEL_MIN_W, int(geom.width())), max_client_w)
+    target_client_h = min(max(_TOPLEVEL_MIN_H, int(geom.height())), max_client_h)
+    if target_client_w != int(geom.width()) or target_client_h != int(geom.height()):
+        widget.resize(target_client_w, target_client_h)
         frame = widget.frameGeometry()
 
     target_x, target_y = _clamp_top_left_in_available(
@@ -464,10 +868,14 @@ def apply_ui_style(main_window):
             width:9px;
             height:9px;
         }
-        QCheckBox { color:#111; spacing:6px; }
-        QCheckBox::indicator { width:16px; height:16px; border-radius:3px; border:1px solid #c0c4ca; background:#ffffff; }
-        QCheckBox::indicator:checked { background:#4a90e2; border:1px solid #3578c8; }
-        QDockWidget::title { background:#f9fafc; padding:4px 8px; border:1px solid #dfe3e8; border-radius:4px; }
+        QCheckBox { color:#111; spacing:7px; }
+        QCheckBox::indicator { width:18px; height:18px; }
+        QDockWidget::title {
+            background:#f9fafc;
+            padding:4px 8px;
+            border:1px solid #dfe3e8;
+            border-radius:4px;
+        }
         QToolBar { spacing:8px; border:none; background:#f3f4f6; padding:4px 8px; }
         QPushButton#runStartBtn, QPushButton#runStopBtn {
             font-weight:600; padding:6px 12px; border-radius:8px; min-width:72px;
@@ -549,6 +957,8 @@ def toggle_dock(main_window, dock: QDockWidget, visible: bool):
             dock.raise_()
     else:
         dock.setVisible(False)
+    _sync_dock_options_by_floating_state(main_window)
+    sync_tabbed_dock_title_bars(main_window)
     update_placeholder(main_window)
     schedule_dock_rebalance(main_window)
     main_window._schedule_layout_autosave()

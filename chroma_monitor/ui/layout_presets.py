@@ -1,17 +1,16 @@
+"""レイアウトプリセットの管理処理。"""
+
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMessageBox
 
 from ..util import constants as C
 from ..util.config import load_config, save_config
-from ..util.functions import blocked_signals
+from ..util.functions import blocked_signals, safe_int
 from ..util.layout_state import apply_layout_state, capture_layout_state
 
 
 def _layout_engine_version(cfg: dict) -> int:
-    try:
-        return int(cfg.get(C.CFG_LAYOUT_ENGINE_VERSION, 0))
-    except Exception:
-        return 0
+    return safe_int(cfg.get(C.CFG_LAYOUT_ENGINE_VERSION, 0), 0)
 
 
 def _stamp_layout_engine_version(cfg: dict) -> None:
@@ -41,15 +40,6 @@ def apply_three_dock_layout(
     primary_sizes: tuple[int, int] = (640, 300),
     secondary_sizes: tuple[int, int] = (500, 500),
 ) -> bool:
-    """Apply a generic 3-dock nested split layout.
-
-    first_split:
-        first と second の最初の分割方向。
-    split_parent_is_first:
-        True なら first 側を再分割、False なら second 側を再分割。
-    second_split:
-        上記ターゲット側を third で再分割する方向。
-    """
     dock_map = getattr(main_window, "_dock_map", {})
     first = dock_map.get(first_name)
     second = dock_map.get(second_name)

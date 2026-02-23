@@ -1,3 +1,5 @@
+"""モジュールの補助処理。"""
+
 from PySide6.QtWidgets import (
     QDialog,
     QHBoxLayout,

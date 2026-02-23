@@ -1,4 +1,4 @@
-"""Preview window widget."""
+"""ビュー描画に関する処理。"""
 
 from typing import Optional
 
@@ -10,6 +10,7 @@ from ..util.functions import bgr_to_qpixmap
 
 
 class PreviewWindow(QWidget):
+
     closed = Signal()
 
     def __init__(self):

@@ -1,4 +1,4 @@
-"""Color wheel and SV scatter widgets."""
+"""ビュー描画に関する処理。"""
 
 import math
 from typing import Optional
@@ -10,14 +10,27 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QLabel, QSizePolicy, QWidget
 
 from ..util import constants as C
-from ..util.functions import clamp_int, clamp_render_size, safe_choice
+from ..util.functions import clamp_int, safe_choice
+
+_MAX_SCATTER_RENDER_EDGE = 2048
+_MAX_SCATTER_RENDER_AREA = _MAX_SCATTER_RENDER_EDGE * _MAX_SCATTER_RENDER_EDGE
+
+
+def _clamp_scatter_render_size(width: int, height: int) -> tuple[int, int]:
+    # 極端に大きい描画要求でメモリが跳ねないよう上限を掛ける。
+    w = max(1, int(width))
+    h = max(1, int(height))
+    w = min(w, _MAX_SCATTER_RENDER_EDGE)
+    h = min(h, _MAX_SCATTER_RENDER_EDGE)
+    area = w * h
+    if area > _MAX_SCATTER_RENDER_AREA:
+        scale = math.sqrt(_MAX_SCATTER_RENDER_AREA / float(area))
+        w = max(1, int(w * scale))
+        h = max(1, int(h * scale))
+    return w, h
 
 
 def _build_hue180_to_munsell40_weights() -> np.ndarray:
-    """Build overlap weights to resample HSV180 hue bins into 40 equal 9-degree bins.
-
-    This avoids 4/5-bin bias that happens when simply flooring each 2-degree HSV bin.
-    """
     src_bins = 180
     dst_bins = len(C.MUNSELL_HUE_LABELS)
     src_step = 360.0 / float(src_bins)  # 2 deg
@@ -46,6 +59,7 @@ HUE180_TO_MUNSELL40_WEIGHTS = _build_hue180_to_munsell40_weights()
 
 
 class ColorWheelWidget(QWidget):
+
     def __init__(self):
         super().__init__()
         # 最小幅のみ固定し、最小高はドック共通値で制御する。
@@ -168,6 +182,7 @@ class ColorWheelWidget(QWidget):
 
 
 class ScatterRasterWidget(QLabel):
+
     def __init__(self):
         super().__init__()
         self.setAlignment(Qt.AlignCenter)
@@ -258,7 +273,7 @@ class ScatterRasterWidget(QLabel):
             if self._square_limit
             else max(self.width(), self.height())
         )
-        target_side, _ = clamp_render_size(base_side, base_side)
+        target_side, _ = _clamp_scatter_render_size(base_side, base_side)
         pm = QPixmap.fromImage(qimg).scaled(
             target_side, target_side, Qt.KeepAspectRatio, Qt.SmoothTransformation
         )

@@ -1,5 +1,3 @@
-"""ROI selection handlers extracted from MainWindow."""
-
 from PySide6.QtCore import QRect
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QMessageBox
@@ -13,19 +11,12 @@ from ...views import RoiSelector
 def on_roi_selector_destroyed(main_window, selector):
     # 破棄済みセレクタを管理リストから外す。
     main_window._roi_selectors = [s for s in main_window._roi_selectors if s is not selector]
-    if main_window._roi_selector is selector:
-        main_window._roi_selector = (
-            main_window._roi_selectors[0] if main_window._roi_selectors else None
-        )
 
 
 def close_roi_selectors(main_window):
     # 複数画面分のセレクタをまとめて閉じる。
     selectors = list(main_window._roi_selectors)
-    if main_window._roi_selector is not None and main_window._roi_selector not in selectors:
-        selectors.append(main_window._roi_selector)
     main_window._roi_selectors = []
-    main_window._roi_selector = None
     for s in selectors:
         try:
             s.close()
@@ -73,7 +64,6 @@ def open_multi_screen_roi_selectors(
         sel.destroyed.connect(lambda _=None, s=sel: on_roi_selector_destroyed(main_window, s))
         selectors.append(sel)
     main_window._roi_selectors = selectors
-    main_window._roi_selector = selectors[0] if selectors else None
     for sel in selectors:
         sel.show()
         sel.raise_()

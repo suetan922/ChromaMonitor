@@ -1,4 +1,4 @@
-"""Shared numeric helpers for image views."""
+"""ビュー描画に関する処理。"""
 
 import numpy as np
 

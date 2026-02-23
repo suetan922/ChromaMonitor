@@ -2,8 +2,11 @@ from typing import Any, Dict
 
 from PySide6.QtCore import QByteArray
 
+#: 保存時のキー名: ウィンドウジオメトリ。
 _KEY_GEOMETRY = "geometry"
+#: 保存時のキー名: ドック配置状態。
 _KEY_STATE = "state"
+#: 保存時のキー名: ドック可視フラグ群。
 _KEY_VISIBLE_DOCKS = "visible_docks"
 
 
