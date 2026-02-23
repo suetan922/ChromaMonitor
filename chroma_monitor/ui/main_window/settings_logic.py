@@ -13,34 +13,121 @@ from ...util.functions import (
 )
 
 
+def _to_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _to_float(value, default: float) -> float:
+    try:
+        return float(value)
+    except Exception:
+        return float(default)
+
+
+def _cfg_int(cfg: dict, key: str, default: int, low: int, high: int) -> int:
+    return clamp_int(_to_int(cfg.get(key, default), default), low, high)
+
+
+def _cfg_float(
+    cfg: dict,
+    key: str,
+    default: float,
+    low: float | None = None,
+    high: float | None = None,
+) -> float:
+    value = _to_float(cfg.get(key, default), default)
+    if low is not None and high is not None:
+        return clamp_float(value, low, high)
+    return value
+
+
+def _apply_combo_choice(combo, raw_value, allowed, default) -> None:
+    set_combobox_data_blocked(
+        combo,
+        safe_choice(raw_value, allowed, default),
+        default_data=default,
+    )
+
+
+def _selected_combo_data(combo, allowed, default):
+    return safe_choice(combo.currentData(), allowed, default)
+
+
+def _set_visible_if(widget, visible: bool) -> None:
+    if widget is not None:
+        widget.setVisible(bool(visible))
+
+
+def _collect_settings_payload(main_window) -> dict:
+    # UI状態から保存対象キーを再構築する。
+    return {
+        C.CFG_INTERVAL: float(main_window.spin_interval.value()),
+        C.CFG_SAMPLE_POINTS: int(main_window.spin_points.value()),
+        C.CFG_ANALYZER_MAX_DIM: selected_analysis_max_dim(main_window),
+        C.CFG_ANALYSIS_RESOLUTION_MODE: selected_analysis_resolution_mode(main_window),
+        C.CFG_CAPTURE_SOURCE: main_window._selected_capture_source(),
+        C.CFG_SCATTER_SHAPE: selected_scatter_shape(main_window),
+        C.CFG_SCATTER_RENDER_MODE: selected_scatter_render_mode(main_window),
+        C.CFG_SCATTER_HUE_FILTER_ENABLED: selected_scatter_hue_filter_enabled(main_window),
+        C.CFG_SCATTER_HUE_CENTER: selected_scatter_hue_center(main_window),
+        C.CFG_WHEEL_MODE: selected_wheel_mode(main_window),
+        C.CFG_RGB_HIST_MODE: selected_rgb_hist_mode(main_window),
+        C.CFG_WHEEL_SAT_THRESHOLD: selected_wheel_sat_threshold(main_window),
+        C.CFG_GRAPH_EVERY: C.DEFAULT_GRAPH_EVERY,
+        C.CFG_ALWAYS_ON_TOP: main_window._is_always_on_top_enabled(),
+        C.CFG_MODE: selected_mode(main_window),
+        C.CFG_DIFF_THRESHOLD: float(main_window.spin_diff.value()),
+        C.CFG_STABLE_FRAMES: int(main_window.spin_stable.value()),
+        C.CFG_EDGE_SENSITIVITY: int(main_window.spin_edge_sensitivity.value()),
+        C.CFG_BINARY_PRESET: selected_binary_preset(main_window),
+        C.CFG_TERNARY_PRESET: selected_ternary_preset(main_window),
+        C.CFG_SALIENCY_OVERLAY_ALPHA: int(main_window.spin_saliency_alpha.value()),
+        C.CFG_COMPOSITION_GUIDE: selected_composition_guide(main_window),
+        C.CFG_FOCUS_PEAK_SENSITIVITY: int(main_window.spin_focus_peak_sensitivity.value()),
+        C.CFG_FOCUS_PEAK_COLOR: selected_focus_peak_color(main_window),
+        C.CFG_FOCUS_PEAK_THICKNESS: float(main_window.spin_focus_peak_thickness.value()),
+        C.CFG_SQUINT_MODE: selected_squint_mode(main_window),
+        C.CFG_SQUINT_SCALE_PERCENT: int(main_window.spin_squint_scale.value()),
+        C.CFG_SQUINT_BLUR_SIGMA: float(main_window.spin_squint_blur.value()),
+        C.CFG_VECTORSCOPE_SHOW_SKIN_LINE: bool(main_window.chk_vectorscope_skin_line.isChecked()),
+        C.CFG_VECTORSCOPE_WARN_THRESHOLD: int(main_window.spin_vectorscope_warn_threshold.value()),
+    }
+
+
 def selected_mode(main_window) -> str:
     # 未定義データが入っても安全に既定モードへフォールバックする。
-    mode = main_window.combo_mode.currentData()
-    return safe_choice(mode, C.UPDATE_MODES, C.DEFAULT_MODE)
+    return _selected_combo_data(main_window.combo_mode, C.UPDATE_MODES, C.DEFAULT_MODE)
 
 
 def selected_wheel_mode(main_window) -> str:
-    mode = main_window.combo_wheel_mode.currentData()
-    return safe_choice(mode, C.WHEEL_MODES, C.DEFAULT_WHEEL_MODE)
+    return _selected_combo_data(main_window.combo_wheel_mode, C.WHEEL_MODES, C.DEFAULT_WHEEL_MODE)
+
+
+def selected_rgb_hist_mode(main_window) -> str:
+    return _selected_combo_data(
+        main_window.combo_rgb_hist_mode,
+        C.RGB_HIST_MODES,
+        C.DEFAULT_RGB_HIST_MODE,
+    )
 
 
 def selected_analysis_resolution_mode(main_window) -> str:
-    mode = main_window.combo_analysis_resolution_mode.currentData()
-    return safe_choice(
-        mode,
+    return _selected_combo_data(
+        main_window.combo_analysis_resolution_mode,
         C.ANALYSIS_RESOLUTION_MODES,
         C.DEFAULT_ANALYSIS_RESOLUTION_MODE,
     )
 
 
 def selected_analysis_max_dim(main_window) -> int:
-    # ユーザー入力の自由記述を整数へ正規化し、許容範囲へ丸める。
-    text = main_window.edit_analysis_max_dim.text().strip()
-    try:
-        value = int(text)
-    except Exception:
-        value = C.ANALYZER_MAX_DIM
-    return clamp_int(value, C.ANALYZER_MAX_DIM_MIN, C.ANALYZER_MAX_DIM_MAX)
+    return clamp_int(
+        int(main_window.edit_analysis_max_dim.value()),
+        C.ANALYZER_MAX_DIM_MIN,
+        C.ANALYZER_MAX_DIM_MAX,
+    )
 
 
 def selected_wheel_sat_threshold(main_window) -> int:
@@ -64,33 +151,59 @@ def selected_scatter_hue_center(main_window) -> int:
 
 
 def selected_scatter_shape(main_window) -> str:
-    shape = main_window.combo_scatter_shape.currentData()
-    return safe_choice(shape, C.SCATTER_SHAPES, C.DEFAULT_SCATTER_SHAPE)
+    return _selected_combo_data(
+        main_window.combo_scatter_shape,
+        C.SCATTER_SHAPES,
+        C.DEFAULT_SCATTER_SHAPE,
+    )
+
+
+def selected_scatter_render_mode(main_window) -> str:
+    return _selected_combo_data(
+        main_window.combo_scatter_render_mode,
+        C.SCATTER_RENDER_MODES,
+        C.DEFAULT_SCATTER_RENDER_MODE,
+    )
 
 
 def selected_binary_preset(main_window) -> str:
-    preset = main_window.combo_binary_preset.currentData()
-    return safe_choice(preset, C.BINARY_PRESETS, C.DEFAULT_BINARY_PRESET)
+    return _selected_combo_data(
+        main_window.combo_binary_preset,
+        C.BINARY_PRESETS,
+        C.DEFAULT_BINARY_PRESET,
+    )
 
 
 def selected_ternary_preset(main_window) -> str:
-    preset = main_window.combo_ternary_preset.currentData()
-    return safe_choice(preset, C.TERNARY_PRESETS, C.DEFAULT_TERNARY_PRESET)
+    return _selected_combo_data(
+        main_window.combo_ternary_preset,
+        C.TERNARY_PRESETS,
+        C.DEFAULT_TERNARY_PRESET,
+    )
 
 
 def selected_composition_guide(main_window) -> str:
-    guide = main_window.combo_composition_guide.currentData()
-    return safe_choice(guide, C.COMPOSITION_GUIDES, C.DEFAULT_COMPOSITION_GUIDE)
+    return _selected_combo_data(
+        main_window.combo_composition_guide,
+        C.COMPOSITION_GUIDES,
+        C.DEFAULT_COMPOSITION_GUIDE,
+    )
 
 
 def selected_focus_peak_color(main_window) -> str:
-    color = main_window.combo_focus_peak_color.currentData()
-    return safe_choice(color, C.FOCUS_PEAK_COLORS, C.DEFAULT_FOCUS_PEAK_COLOR)
+    return _selected_combo_data(
+        main_window.combo_focus_peak_color,
+        C.FOCUS_PEAK_COLORS,
+        C.DEFAULT_FOCUS_PEAK_COLOR,
+    )
 
 
 def selected_squint_mode(main_window) -> str:
-    mode = main_window.combo_squint_mode.currentData()
-    return safe_choice(mode, C.SQUINT_MODES, C.DEFAULT_SQUINT_MODE)
+    return _selected_combo_data(
+        main_window.combo_squint_mode,
+        C.SQUINT_MODES,
+        C.DEFAULT_SQUINT_MODE,
+    )
 
 
 def sync_mode_dependent_rows(main_window):
@@ -99,21 +212,17 @@ def sync_mode_dependent_rows(main_window):
     mode = selected_mode(main_window)
     is_interval = mode == C.UPDATE_MODE_INTERVAL
     is_change = mode == C.UPDATE_MODE_CHANGE
-    interval_row = main_window._row_interval_settings
-    if interval_row is not None:
-        interval_row.setVisible(is_interval)
+    _set_visible_if(main_window._row_interval_settings, is_interval)
     for row in (
         main_window._row_diff_settings,
         main_window._row_stable_settings,
     ):
-        if row is not None:
-            row.setVisible(is_change)
+        _set_visible_if(row, is_change)
     for hint in (
         getattr(main_window, "_hint_diff_settings", None),
         getattr(main_window, "_hint_stable_settings", None),
     ):
-        if hint is not None:
-            hint.setVisible(is_change)
+        _set_visible_if(hint, is_change)
 
 
 def sync_squint_mode_rows(main_window):
@@ -121,10 +230,8 @@ def sync_squint_mode_rows(main_window):
     mode = selected_squint_mode(main_window)
     show_scale = mode in (C.SQUINT_MODE_SCALE, C.SQUINT_MODE_SCALE_BLUR)
     show_blur = mode in (C.SQUINT_MODE_BLUR, C.SQUINT_MODE_SCALE_BLUR)
-    if main_window._row_squint_scale_settings is not None:
-        main_window._row_squint_scale_settings.setVisible(show_scale)
-    if main_window._row_squint_blur_settings is not None:
-        main_window._row_squint_blur_settings.setVisible(show_blur)
+    _set_visible_if(main_window._row_squint_scale_settings, show_scale)
+    _set_visible_if(main_window._row_squint_blur_settings, show_blur)
 
 
 def sync_analysis_resolution_rows(main_window):
@@ -132,8 +239,8 @@ def sync_analysis_resolution_rows(main_window):
     custom_mode = (
         selected_analysis_resolution_mode(main_window) == C.ANALYSIS_RESOLUTION_MODE_CUSTOM
     )
-    if main_window._row_analysis_max_dim_settings is not None:
-        main_window._row_analysis_max_dim_settings.setVisible(custom_mode)
+    _set_visible_if(main_window._row_analysis_max_dim_settings, custom_mode)
+    _set_visible_if(getattr(main_window, "_hint_analysis_max_dim_settings", None), custom_mode)
 
 
 def sync_scatter_filter_controls(main_window):
@@ -146,14 +253,15 @@ def sync_scatter_filter_controls(main_window):
 
 
 def apply_sample_points_settings(main_window, *_):
-    # サンプル点数は散布図サンプリング負荷に直結する設定。
+    # サンプル数は散布図サンプリング負荷に直結する設定。
     main_window.worker.set_sample_points(int(main_window.spin_points.value()))
     main_window._request_save_settings()
 
 
 def apply_scatter_settings(main_window, *_):
-    # 散布図の形状と色相フィルター条件をまとめて反映。
+    # 散布図の形状・表示モード・色相フィルター条件をまとめて反映。
     main_window.scatter.set_shape(selected_scatter_shape(main_window))
+    main_window.scatter.set_render_mode(selected_scatter_render_mode(main_window))
     main_window.scatter.set_hue_filter(
         selected_scatter_hue_filter_enabled(main_window),
         selected_scatter_hue_center(main_window),
@@ -171,19 +279,23 @@ def apply_analysis_resolution_settings(main_window, *_args, save: bool = True):
     else:
         main_window.worker.set_max_dim(max_dim)
         # 正規化後の値を入力欄へ戻し、表示と内部値の差異をなくす。
-        current_text = main_window.edit_analysis_max_dim.text().strip()
-        if current_text != str(max_dim):
+        if int(main_window.edit_analysis_max_dim.value()) != int(max_dim):
             with blocked_signals(main_window.edit_analysis_max_dim):
-                main_window.edit_analysis_max_dim.setText(str(max_dim))
+                main_window.edit_analysis_max_dim.setValue(int(max_dim))
     sync_analysis_resolution_rows(main_window)
     if save:
         main_window._request_save_settings()
 
 
 def apply_wheel_settings(main_window, *_):
-    # 色相リング表示方式と彩度しきい値を同時に反映。
+    # 色相環表示方式と彩度しきい値を同時に反映。
     main_window.wheel.set_mode(selected_wheel_mode(main_window))
     main_window.worker.set_wheel_sat_threshold(selected_wheel_sat_threshold(main_window))
+    main_window._request_save_settings()
+
+
+def apply_rgb_hist_settings(main_window, *_):
+    main_window.rgb_hist_view.set_display_mode(selected_rgb_hist_mode(main_window))
     main_window._request_save_settings()
 
 
@@ -276,45 +388,60 @@ def load_settings(main_window):
     cfg = load_config()
     main_window._settings_load_in_progress = True
     try:
-        set_value_blocked(
-            main_window.spin_interval, float(cfg.get(C.CFG_INTERVAL, C.DEFAULT_INTERVAL_SEC))
-        )
+        interval = _cfg_float(cfg, C.CFG_INTERVAL, C.DEFAULT_INTERVAL_SEC)
+        set_value_blocked(main_window.spin_interval, interval)
         main_window.worker.set_interval(main_window.spin_interval.value())
-        sample_points = clamp_int(
-            cfg.get(C.CFG_SAMPLE_POINTS, C.DEFAULT_SAMPLE_POINTS),
+        sample_points = _cfg_int(
+            cfg,
+            C.CFG_SAMPLE_POINTS,
+            C.DEFAULT_SAMPLE_POINTS,
             C.ANALYZER_MIN_SAMPLE_POINTS,
             C.ANALYZER_MAX_SAMPLE_POINTS,
         )
         set_value_blocked(main_window.spin_points, sample_points)
         main_window.worker.set_sample_points(sample_points)
-        analysis_max_dim = clamp_int(
-            cfg.get(C.CFG_ANALYZER_MAX_DIM, C.ANALYZER_MAX_DIM),
+        analysis_max_dim = _cfg_int(
+            cfg,
+            C.CFG_ANALYZER_MAX_DIM,
+            C.ANALYZER_MAX_DIM,
             C.ANALYZER_MAX_DIM_MIN,
             C.ANALYZER_MAX_DIM_MAX,
         )
-        analysis_mode = safe_choice(
+        _apply_combo_choice(
+            main_window.combo_analysis_resolution_mode,
             cfg.get(C.CFG_ANALYSIS_RESOLUTION_MODE, C.DEFAULT_ANALYSIS_RESOLUTION_MODE),
             C.ANALYSIS_RESOLUTION_MODES,
             C.DEFAULT_ANALYSIS_RESOLUTION_MODE,
         )
-        set_combobox_data_blocked(
-            main_window.combo_analysis_resolution_mode,
-            analysis_mode,
-            default_data=C.DEFAULT_ANALYSIS_RESOLUTION_MODE,
-        )
         with blocked_signals(main_window.edit_analysis_max_dim):
-            main_window.edit_analysis_max_dim.setText(str(analysis_max_dim))
+            main_window.edit_analysis_max_dim.setValue(int(analysis_max_dim))
         apply_analysis_resolution_settings(main_window, save=False)
         # 散布図形状は安全な候補値へ正規化してからUIへ反映。
+        scatter_shape_raw = str(cfg.get(C.CFG_SCATTER_SHAPE, C.DEFAULT_SCATTER_SHAPE))
         scatter_shape = safe_choice(
-            str(cfg.get(C.CFG_SCATTER_SHAPE, C.DEFAULT_SCATTER_SHAPE)),
+            scatter_shape_raw,
             C.SCATTER_SHAPES,
             C.DEFAULT_SCATTER_SHAPE,
         )
-        set_combobox_data_blocked(
+        scatter_render_mode_raw = str(
+            cfg.get(C.CFG_SCATTER_RENDER_MODE, C.DEFAULT_SCATTER_RENDER_MODE)
+        )
+        scatter_render_mode = safe_choice(
+            scatter_render_mode_raw,
+            C.SCATTER_RENDER_MODES,
+            C.DEFAULT_SCATTER_RENDER_MODE,
+        )
+        _apply_combo_choice(
             main_window.combo_scatter_shape,
-            scatter_shape,
-            default_data=C.DEFAULT_SCATTER_SHAPE,
+            scatter_shape_raw,
+            C.SCATTER_SHAPES,
+            C.DEFAULT_SCATTER_SHAPE,
+        )
+        _apply_combo_choice(
+            main_window.combo_scatter_render_mode,
+            scatter_render_mode_raw,
+            C.SCATTER_RENDER_MODES,
+            C.DEFAULT_SCATTER_RENDER_MODE,
         )
         set_checked_blocked(
             main_window.chk_scatter_hue_filter,
@@ -325,27 +452,45 @@ def load_settings(main_window):
                 )
             ),
         )
-        scatter_hue_center = clamp_int(
-            cfg.get(C.CFG_SCATTER_HUE_CENTER, C.DEFAULT_SCATTER_HUE_CENTER),
+        scatter_hue_center = _cfg_int(
+            cfg,
+            C.CFG_SCATTER_HUE_CENTER,
+            C.DEFAULT_SCATTER_HUE_CENTER,
             C.SCATTER_HUE_MIN,
             C.SCATTER_HUE_MAX,
         )
         set_value_blocked(main_window.slider_scatter_hue_center, scatter_hue_center)
         main_window.scatter.set_shape(scatter_shape)
+        main_window.scatter.set_render_mode(scatter_render_mode)
         # フィルター状態は UI 側の現在値から再適用する。
         main_window.scatter.set_hue_filter(
             selected_scatter_hue_filter_enabled(main_window),
             selected_scatter_hue_center(main_window),
         )
         sync_scatter_filter_controls(main_window)
-        wheel_mode = str(cfg.get(C.CFG_WHEEL_MODE, C.DEFAULT_WHEEL_MODE))
-        set_combobox_data_blocked(
+        _apply_combo_choice(
             main_window.combo_wheel_mode,
-            safe_choice(wheel_mode, C.WHEEL_MODES, C.DEFAULT_WHEEL_MODE),
-            default_data=C.DEFAULT_WHEEL_MODE,
+            str(cfg.get(C.CFG_WHEEL_MODE, C.DEFAULT_WHEEL_MODE)),
+            C.WHEEL_MODES,
+            C.DEFAULT_WHEEL_MODE,
         )
-        wheel_sat_threshold = clamp_int(
-            cfg.get(C.CFG_WHEEL_SAT_THRESHOLD, C.DEFAULT_WHEEL_SAT_THRESHOLD),
+        rgb_hist_mode_raw = cfg.get(C.CFG_RGB_HIST_MODE, C.DEFAULT_RGB_HIST_MODE)
+        rgb_hist_mode = safe_choice(
+            rgb_hist_mode_raw,
+            C.RGB_HIST_MODES,
+            C.DEFAULT_RGB_HIST_MODE,
+        )
+        _apply_combo_choice(
+            main_window.combo_rgb_hist_mode,
+            rgb_hist_mode_raw,
+            C.RGB_HIST_MODES,
+            C.DEFAULT_RGB_HIST_MODE,
+        )
+        main_window.rgb_hist_view.set_display_mode(rgb_hist_mode)
+        wheel_sat_threshold = _cfg_int(
+            cfg,
+            C.CFG_WHEEL_SAT_THRESHOLD,
+            C.DEFAULT_WHEEL_SAT_THRESHOLD,
             C.WHEEL_SAT_THRESHOLD_MIN,
             C.WHEEL_SAT_THRESHOLD_MAX,
         )
@@ -353,118 +498,130 @@ def load_settings(main_window):
         main_window.wheel.set_mode(selected_wheel_mode(main_window))
         main_window.worker.set_wheel_sat_threshold(wheel_sat_threshold)
         main_window.worker.set_graph_every(C.DEFAULT_GRAPH_EVERY)
-        source = cfg.get(C.CFG_CAPTURE_SOURCE, C.DEFAULT_CAPTURE_SOURCE)
-        set_combobox_data_blocked(
+        _apply_combo_choice(
             main_window.combo_capture_source,
-            safe_choice(source, C.CAPTURE_SOURCES, C.DEFAULT_CAPTURE_SOURCE),
-            default_data=C.DEFAULT_CAPTURE_SOURCE,
+            cfg.get(C.CFG_CAPTURE_SOURCE, C.DEFAULT_CAPTURE_SOURCE),
+            C.CAPTURE_SOURCES,
+            C.DEFAULT_CAPTURE_SOURCE,
         )
         main_window._apply_capture_source(save=False)
-        guide = cfg.get(C.CFG_COMPOSITION_GUIDE, C.DEFAULT_COMPOSITION_GUIDE)
-        set_combobox_data_blocked(
+        _apply_combo_choice(
             main_window.combo_composition_guide,
-            safe_choice(guide, C.COMPOSITION_GUIDES, C.DEFAULT_COMPOSITION_GUIDE),
-            default_data=C.DEFAULT_COMPOSITION_GUIDE,
+            cfg.get(C.CFG_COMPOSITION_GUIDE, C.DEFAULT_COMPOSITION_GUIDE),
+            C.COMPOSITION_GUIDES,
+            C.DEFAULT_COMPOSITION_GUIDE,
         )
         composition_guide = selected_composition_guide(main_window)
         main_window.saliency_view.set_composition_guide(composition_guide)
         main_window.preview_window.set_composition_guide(composition_guide)
 
-        preview_checked = bool(cfg.get(C.CFG_PREVIEW_WINDOW, C.DEFAULT_PREVIEW_WINDOW))
-        set_checked_blocked(main_window.chk_preview_window, preview_checked)
-        if preview_checked:
-            main_window.preview_window.show()
-            main_window._update_preview_snapshot()
-        else:
-            main_window.preview_window.hide()
+        # 領域プレビューは起動時の表示復元対象外にする（常に非表示開始）。
+        set_checked_blocked(main_window.chk_preview_window, False)
+        main_window.preview_window.hide()
 
         always_on_top = bool(cfg.get(C.CFG_ALWAYS_ON_TOP, C.DEFAULT_ALWAYS_ON_TOP))
         set_checked_blocked(main_window.act_always_on_top, always_on_top)
         main_window.apply_always_on_top(always_on_top, save=False)
 
-        mode = cfg.get(C.CFG_MODE, C.DEFAULT_MODE)
-        set_combobox_data_blocked(
+        _apply_combo_choice(
             main_window.combo_mode,
-            safe_choice(mode, C.UPDATE_MODES, C.DEFAULT_MODE),
-            default_data=C.DEFAULT_MODE,
+            cfg.get(C.CFG_MODE, C.DEFAULT_MODE),
+            C.UPDATE_MODES,
+            C.DEFAULT_MODE,
         )
         set_value_blocked(
             main_window.spin_diff,
-            float(cfg.get(C.CFG_DIFF_THRESHOLD, C.DEFAULT_DIFF_THRESHOLD)),
+            _cfg_float(cfg, C.CFG_DIFF_THRESHOLD, C.DEFAULT_DIFF_THRESHOLD),
         )
         set_value_blocked(
             main_window.spin_stable,
-            int(cfg.get(C.CFG_STABLE_FRAMES, C.DEFAULT_STABLE_FRAMES)),
+            _to_int(cfg.get(C.CFG_STABLE_FRAMES, C.DEFAULT_STABLE_FRAMES), C.DEFAULT_STABLE_FRAMES),
         )
-        edge_sens = clamp_int(
-            cfg.get(C.CFG_EDGE_SENSITIVITY, C.DEFAULT_EDGE_SENSITIVITY),
+        edge_sens = _cfg_int(
+            cfg,
+            C.CFG_EDGE_SENSITIVITY,
+            C.DEFAULT_EDGE_SENSITIVITY,
             C.EDGE_SENSITIVITY_MIN,
             C.EDGE_SENSITIVITY_MAX,
         )
         set_value_blocked(main_window.spin_edge_sensitivity, edge_sens)
         main_window.edge_view.set_sensitivity(edge_sens)
 
-        binary_preset = cfg.get(C.CFG_BINARY_PRESET, C.DEFAULT_BINARY_PRESET)
-        set_combobox_data_blocked(
+        _apply_combo_choice(
             main_window.combo_binary_preset,
-            safe_choice(binary_preset, C.BINARY_PRESETS, C.DEFAULT_BINARY_PRESET),
-            default_data=C.DEFAULT_BINARY_PRESET,
+            cfg.get(C.CFG_BINARY_PRESET, C.DEFAULT_BINARY_PRESET),
+            C.BINARY_PRESETS,
+            C.DEFAULT_BINARY_PRESET,
         )
         main_window.binary_view.set_preset(selected_binary_preset(main_window))
 
-        ternary_preset = cfg.get(C.CFG_TERNARY_PRESET, C.DEFAULT_TERNARY_PRESET)
-        set_combobox_data_blocked(
+        _apply_combo_choice(
             main_window.combo_ternary_preset,
-            safe_choice(ternary_preset, C.TERNARY_PRESETS, C.DEFAULT_TERNARY_PRESET),
-            default_data=C.DEFAULT_TERNARY_PRESET,
+            cfg.get(C.CFG_TERNARY_PRESET, C.DEFAULT_TERNARY_PRESET),
+            C.TERNARY_PRESETS,
+            C.DEFAULT_TERNARY_PRESET,
         )
         main_window.ternary_view.set_preset(selected_ternary_preset(main_window))
 
-        saliency_alpha = clamp_int(
-            cfg.get(C.CFG_SALIENCY_OVERLAY_ALPHA, C.DEFAULT_SALIENCY_OVERLAY_ALPHA),
+        saliency_alpha = _cfg_int(
+            cfg,
+            C.CFG_SALIENCY_OVERLAY_ALPHA,
+            C.DEFAULT_SALIENCY_OVERLAY_ALPHA,
             C.SALIENCY_ALPHA_MIN,
             C.SALIENCY_ALPHA_MAX,
         )
         set_value_blocked(main_window.spin_saliency_alpha, saliency_alpha)
         main_window.saliency_view.set_overlay_alpha(saliency_alpha)
 
-        focus_sens = clamp_int(
-            cfg.get(C.CFG_FOCUS_PEAK_SENSITIVITY, C.DEFAULT_FOCUS_PEAK_SENSITIVITY),
+        focus_sens = _cfg_int(
+            cfg,
+            C.CFG_FOCUS_PEAK_SENSITIVITY,
+            C.DEFAULT_FOCUS_PEAK_SENSITIVITY,
             C.FOCUS_PEAK_SENSITIVITY_MIN,
             C.FOCUS_PEAK_SENSITIVITY_MAX,
         )
         set_value_blocked(main_window.spin_focus_peak_sensitivity, focus_sens)
 
-        focus_color = cfg.get(C.CFG_FOCUS_PEAK_COLOR, C.DEFAULT_FOCUS_PEAK_COLOR)
-        set_combobox_data_blocked(
+        _apply_combo_choice(
             main_window.combo_focus_peak_color,
-            safe_choice(focus_color, C.FOCUS_PEAK_COLORS, C.DEFAULT_FOCUS_PEAK_COLOR),
-            default_data=C.DEFAULT_FOCUS_PEAK_COLOR,
+            cfg.get(C.CFG_FOCUS_PEAK_COLOR, C.DEFAULT_FOCUS_PEAK_COLOR),
+            C.FOCUS_PEAK_COLORS,
+            C.DEFAULT_FOCUS_PEAK_COLOR,
         )
 
-        focus_thick = float(cfg.get(C.CFG_FOCUS_PEAK_THICKNESS, C.DEFAULT_FOCUS_PEAK_THICKNESS))
-        focus_thick = clamp_float(
-            focus_thick, C.FOCUS_PEAK_THICKNESS_MIN, C.FOCUS_PEAK_THICKNESS_MAX
+        focus_thick = _cfg_float(
+            cfg,
+            C.CFG_FOCUS_PEAK_THICKNESS,
+            C.DEFAULT_FOCUS_PEAK_THICKNESS,
+            C.FOCUS_PEAK_THICKNESS_MIN,
+            C.FOCUS_PEAK_THICKNESS_MAX,
         )
         set_value_blocked(main_window.spin_focus_peak_thickness, focus_thick)
         main_window.focus_peaking_view.set_sensitivity(focus_sens)
         main_window.focus_peaking_view.set_color(selected_focus_peak_color(main_window))
         main_window.focus_peaking_view.set_thickness(focus_thick)
 
-        squint_mode = cfg.get(C.CFG_SQUINT_MODE, C.DEFAULT_SQUINT_MODE)
-        set_combobox_data_blocked(
+        _apply_combo_choice(
             main_window.combo_squint_mode,
-            safe_choice(squint_mode, C.SQUINT_MODES, C.DEFAULT_SQUINT_MODE),
-            default_data=C.DEFAULT_SQUINT_MODE,
+            cfg.get(C.CFG_SQUINT_MODE, C.DEFAULT_SQUINT_MODE),
+            C.SQUINT_MODES,
+            C.DEFAULT_SQUINT_MODE,
         )
-        squint_scale = clamp_int(
-            cfg.get(C.CFG_SQUINT_SCALE_PERCENT, C.DEFAULT_SQUINT_SCALE_PERCENT),
+        squint_scale = _cfg_int(
+            cfg,
+            C.CFG_SQUINT_SCALE_PERCENT,
+            C.DEFAULT_SQUINT_SCALE_PERCENT,
             C.SQUINT_SCALE_PERCENT_MIN,
             C.SQUINT_SCALE_PERCENT_MAX,
         )
         set_value_blocked(main_window.spin_squint_scale, squint_scale)
-        squint_blur = float(cfg.get(C.CFG_SQUINT_BLUR_SIGMA, C.DEFAULT_SQUINT_BLUR_SIGMA))
-        squint_blur = clamp_float(squint_blur, C.SQUINT_BLUR_SIGMA_MIN, C.SQUINT_BLUR_SIGMA_MAX)
+        squint_blur = _cfg_float(
+            cfg,
+            C.CFG_SQUINT_BLUR_SIGMA,
+            C.DEFAULT_SQUINT_BLUR_SIGMA,
+            C.SQUINT_BLUR_SIGMA_MIN,
+            C.SQUINT_BLUR_SIGMA_MAX,
+        )
         set_value_blocked(main_window.spin_squint_blur, squint_blur)
         main_window.squint_view.set_mode(selected_squint_mode(main_window))
         main_window.squint_view.set_scale_percent(squint_scale)
@@ -475,8 +632,10 @@ def load_settings(main_window):
             cfg.get(C.CFG_VECTORSCOPE_SHOW_SKIN_LINE, C.DEFAULT_VECTORSCOPE_SHOW_SKIN_LINE)
         )
         set_checked_blocked(main_window.chk_vectorscope_skin_line, show_skin_line)
-        warn_threshold = clamp_int(
-            cfg.get(C.CFG_VECTORSCOPE_WARN_THRESHOLD, C.DEFAULT_VECTORSCOPE_WARN_THRESHOLD),
+        warn_threshold = _cfg_int(
+            cfg,
+            C.CFG_VECTORSCOPE_WARN_THRESHOLD,
+            C.DEFAULT_VECTORSCOPE_WARN_THRESHOLD,
             C.VECTORSCOPE_WARN_THRESHOLD_MIN,
             C.VECTORSCOPE_WARN_THRESHOLD_MAX,
         )
@@ -500,44 +659,9 @@ def save_settings(main_window, silent: bool = True):
     base = load_config()
     cfg = dict(base)
     cfg.pop("ui_theme", None)
-    # UI状態から保存対象キーを再構築する。
-    cfg.update(
-        {
-            C.CFG_INTERVAL: float(main_window.spin_interval.value()),
-            C.CFG_SAMPLE_POINTS: int(main_window.spin_points.value()),
-            C.CFG_ANALYZER_MAX_DIM: selected_analysis_max_dim(main_window),
-            C.CFG_ANALYSIS_RESOLUTION_MODE: selected_analysis_resolution_mode(main_window),
-            C.CFG_CAPTURE_SOURCE: main_window._selected_capture_source(),
-            C.CFG_SCATTER_SHAPE: selected_scatter_shape(main_window),
-            C.CFG_SCATTER_HUE_FILTER_ENABLED: selected_scatter_hue_filter_enabled(main_window),
-            C.CFG_SCATTER_HUE_CENTER: selected_scatter_hue_center(main_window),
-            C.CFG_WHEEL_MODE: selected_wheel_mode(main_window),
-            C.CFG_WHEEL_SAT_THRESHOLD: selected_wheel_sat_threshold(main_window),
-            C.CFG_GRAPH_EVERY: C.DEFAULT_GRAPH_EVERY,
-            C.CFG_PREVIEW_WINDOW: bool(main_window.chk_preview_window.isChecked()),
-            C.CFG_ALWAYS_ON_TOP: main_window._is_always_on_top_enabled(),
-            C.CFG_MODE: selected_mode(main_window),
-            C.CFG_DIFF_THRESHOLD: float(main_window.spin_diff.value()),
-            C.CFG_STABLE_FRAMES: int(main_window.spin_stable.value()),
-            C.CFG_EDGE_SENSITIVITY: int(main_window.spin_edge_sensitivity.value()),
-            C.CFG_BINARY_PRESET: selected_binary_preset(main_window),
-            C.CFG_TERNARY_PRESET: selected_ternary_preset(main_window),
-            C.CFG_SALIENCY_OVERLAY_ALPHA: int(main_window.spin_saliency_alpha.value()),
-            C.CFG_COMPOSITION_GUIDE: selected_composition_guide(main_window),
-            C.CFG_FOCUS_PEAK_SENSITIVITY: int(main_window.spin_focus_peak_sensitivity.value()),
-            C.CFG_FOCUS_PEAK_COLOR: selected_focus_peak_color(main_window),
-            C.CFG_FOCUS_PEAK_THICKNESS: float(main_window.spin_focus_peak_thickness.value()),
-            C.CFG_SQUINT_MODE: selected_squint_mode(main_window),
-            C.CFG_SQUINT_SCALE_PERCENT: int(main_window.spin_squint_scale.value()),
-            C.CFG_SQUINT_BLUR_SIGMA: float(main_window.spin_squint_blur.value()),
-            C.CFG_VECTORSCOPE_SHOW_SKIN_LINE: bool(
-                main_window.chk_vectorscope_skin_line.isChecked()
-            ),
-            C.CFG_VECTORSCOPE_WARN_THRESHOLD: int(
-                main_window.spin_vectorscope_warn_threshold.value()
-            ),
-        }
-    )
+    # 起動時は常に非表示開始のため、プレビュー表示状態は保存対象から外す。
+    cfg.pop(C.CFG_PREVIEW_WINDOW, None)
+    cfg.update(_collect_settings_payload(main_window))
     # 差分がなければファイル書き込みをスキップする。
     if cfg == base:
         return

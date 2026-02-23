@@ -30,6 +30,15 @@ def _make_hint_label(text: str, *, word_wrap: bool = False) -> QLabel:
     return hint
 
 
+def _create_settings_page(spacing: int = 10) -> tuple[QWidget, QVBoxLayout]:
+    # 設定ページの余白と行間を統一する。
+    page = QWidget()
+    layout = QVBoxLayout(page)
+    layout.setContentsMargins(8, 8, 8, 8)
+    layout.setSpacing(int(spacing))
+    return page, layout
+
+
 def show_settings_window(main_window, page_index: int = 0):
     # 表示前にレイアウトプリセット一覧を最新化する。
     main_window.refresh_layout_preset_views()
@@ -51,10 +60,11 @@ def show_settings_window(main_window, page_index: int = 0):
             [
                 "キャプチャ",
                 "更新",
-                "色相リング",
+                "色相環",
                 "散布図",
                 "ベクトルスコープ",
                 "エッジ/2値化/3値化",
+                "RGBヒストグラム",
                 "フォーカスピーキング",
                 "スクイント表示",
                 "サリエンシー",
@@ -65,10 +75,7 @@ def show_settings_window(main_window, page_index: int = 0):
         pages = QStackedWidget()
 
         # --- キャプチャ設定ページ ---
-        page_capture = QWidget()
-        lc = QVBoxLayout(page_capture)
-        lc.setContentsMargins(8, 8, 8, 8)
-        lc.setSpacing(10)
+        page_capture, lc = _create_settings_page()
         lc.addWidget(_make_labeled_row("取得元", main_window.combo_capture_source))
         main_window._row_target_settings = _make_labeled_row("ターゲット", main_window.combo_win)
         lc.addWidget(main_window._row_target_settings)
@@ -80,21 +87,17 @@ def show_settings_window(main_window, page_index: int = 0):
             "指定サイズ", main_window.edit_analysis_max_dim
         )
         lc.addWidget(main_window._row_analysis_max_dim_settings)
-        lc.addWidget(
-            _make_hint_label(
-                "指定サイズは、縦横比を保ったまま長辺がこの値になるよう縮小して解析します。",
-                word_wrap=True,
-            )
+        main_window._hint_analysis_max_dim_settings = _make_hint_label(
+            "指定サイズは、縦横比を保ったまま長辺が入力した値になるよう縮小して解析します。",
+            word_wrap=True,
         )
+        lc.addWidget(main_window._hint_analysis_max_dim_settings)
         lc.addWidget(main_window.chk_preview_window)
         lc.addStretch(1)
         pages.addWidget(page_capture)
 
         # --- 更新設定ページ ---
-        page_update = QWidget()
-        lu = QVBoxLayout(page_update)
-        lu.setContentsMargins(8, 8, 8, 8)
-        lu.setSpacing(10)
+        page_update, lu = _create_settings_page()
         lu.addWidget(_make_labeled_row("更新モード", main_window.combo_mode))
         main_window._row_interval_settings = _make_labeled_row(
             "更新間隔", main_window.spin_interval
@@ -120,27 +123,22 @@ def show_settings_window(main_window, page_index: int = 0):
         pages.addWidget(page_update)
 
         # --- 散布図設定ページ ---
-        page_scatter = QWidget()
-        ls = QVBoxLayout(page_scatter)
-        ls.setContentsMargins(8, 8, 8, 8)
-        ls.setSpacing(10)
-        ls.addWidget(_make_hint_label("散布図のサンプル点数を設定します"))
+        page_scatter, ls = _create_settings_page()
+        ls.addWidget(_make_hint_label("散布図のサンプル数を設定します"))
         ls.addWidget(_make_labeled_row("表示形状", main_window.combo_scatter_shape))
-        ls.addWidget(_make_labeled_row("散布点数", main_window.spin_points))
+        ls.addWidget(_make_labeled_row("表示モード", main_window.combo_scatter_render_mode))
+        ls.addWidget(_make_labeled_row("サンプル数", main_window.spin_points))
         ls.addStretch(1)
         pages.addWidget(page_scatter)
 
-        # --- 色相リング設定ページ ---
-        page_wheel = QWidget()
-        lw = QVBoxLayout(page_wheel)
-        lw.setContentsMargins(8, 8, 8, 8)
-        lw.setSpacing(10)
-        lw.addWidget(_make_hint_label("色相リングの色相分類方式を設定します"))
+        # --- 色相環設定ページ ---
+        page_wheel, lw = _create_settings_page()
+        lw.addWidget(_make_hint_label("色相環の色相分類方式を設定します"))
         lw.addWidget(_make_labeled_row("表示方式", main_window.combo_wheel_mode))
         lw.addWidget(_make_labeled_row("彩度しきい値", main_window.spin_wheel_sat_threshold))
         lw.addWidget(
             _make_hint_label(
-                "この値未満の彩度は色相リング集計から除外します。0で最大限拾います。",
+                "この値未満の彩度は色相環集計から除外します。0で最大限拾います。",
                 word_wrap=True,
             )
         )
@@ -148,10 +146,7 @@ def show_settings_window(main_window, page_index: int = 0):
         pages.addWidget(page_wheel)
 
         # --- エッジ/2値/3値ページ ---
-        page_image = QWidget()
-        li = QVBoxLayout(page_image)
-        li.setContentsMargins(8, 8, 8, 8)
-        li.setSpacing(10)
+        page_image, li = _create_settings_page()
         li.addWidget(QLabel("エッジ・2値化・3値化の見え方を調整できます"))
         li.addWidget(_make_labeled_row("エッジ感度", main_window.spin_edge_sensitivity))
         li.addWidget(_make_labeled_row("2値化", main_window.combo_binary_preset))
@@ -160,10 +155,7 @@ def show_settings_window(main_window, page_index: int = 0):
         pages.addWidget(page_image)
 
         # --- サリエンシーページ ---
-        page_saliency = QWidget()
-        lsal = QVBoxLayout(page_saliency)
-        lsal.setContentsMargins(8, 8, 8, 8)
-        lsal.setSpacing(10)
+        page_saliency, lsal = _create_settings_page()
         lsal.addWidget(QLabel("サリエンシーマップ（スペクトル残差）を調整します"))
         lsal.addWidget(_make_labeled_row("重ね具合", main_window.spin_saliency_alpha))
         lsal.addWidget(_make_labeled_row("構図ガイド", main_window.combo_composition_guide))
@@ -171,10 +163,7 @@ def show_settings_window(main_window, page_index: int = 0):
         pages.addWidget(page_saliency)
 
         # --- フォーカスピーキングページ ---
-        page_focus = QWidget()
-        lfocus = QVBoxLayout(page_focus)
-        lfocus.setContentsMargins(8, 8, 8, 8)
-        lfocus.setSpacing(10)
+        page_focus, lfocus = _create_settings_page()
         lfocus.addWidget(QLabel("フォーカスピーキングを調整します"))
         lfocus.addWidget(_make_labeled_row("感度", main_window.spin_focus_peak_sensitivity))
         lfocus.addWidget(_make_labeled_row("色", main_window.combo_focus_peak_color))
@@ -183,10 +172,7 @@ def show_settings_window(main_window, page_index: int = 0):
         pages.addWidget(page_focus)
 
         # --- スクイントページ ---
-        page_squint = QWidget()
-        lsq = QVBoxLayout(page_squint)
-        lsq.setContentsMargins(8, 8, 8, 8)
-        lsq.setSpacing(10)
+        page_squint, lsq = _create_settings_page()
         lsq.addWidget(QLabel("スクイント表示を調整します"))
         lsq.addWidget(_make_labeled_row("モード", main_window.combo_squint_mode))
         main_window._row_squint_scale_settings = _make_labeled_row(
@@ -201,10 +187,7 @@ def show_settings_window(main_window, page_index: int = 0):
         pages.addWidget(page_squint)
 
         # --- ベクトルスコープページ ---
-        page_vectorscope = QWidget()
-        lvec = QVBoxLayout(page_vectorscope)
-        lvec.setContentsMargins(8, 8, 8, 8)
-        lvec.setSpacing(10)
+        page_vectorscope, lvec = _create_settings_page()
         lvec.addWidget(QLabel("YUVベクトルスコープ表示を調整します"))
         lvec.addWidget(main_window.chk_vectorscope_skin_line)
         lvec.addWidget(
@@ -214,10 +197,7 @@ def show_settings_window(main_window, page_index: int = 0):
         pages.addWidget(page_vectorscope)
 
         # --- レイアウトページ ---
-        page_layout = QWidget()
-        ll = QVBoxLayout(page_layout)
-        ll.setContentsMargins(8, 8, 8, 8)
-        ll.setSpacing(10)
+        page_layout, ll = _create_settings_page()
         ll.addWidget(QLabel("現在の表示配置をプリセットとして保存できます"))
         ll.addWidget(_make_labeled_row("プリセット", main_window.combo_layout_presets))
         ll.addWidget(_make_labeled_row("新規名", main_window.edit_preset_name))
@@ -230,6 +210,13 @@ def show_settings_window(main_window, page_index: int = 0):
         ll.addStretch(1)
         pages.addWidget(page_layout)
 
+        # --- RGBヒストグラムページ ---
+        page_rgb_hist, lrgb = _create_settings_page()
+        lrgb.addWidget(QLabel("R/G/Bヒストグラムの表示方式を切り替えます"))
+        lrgb.addWidget(_make_labeled_row("表示方式", main_window.combo_rgb_hist_mode))
+        lrgb.addStretch(1)
+        pages.addWidget(page_rgb_hist)
+
         main_window._settings_nav_to_page = [
             C.SETTINGS_PAGE_CAPTURE,
             C.SETTINGS_PAGE_UPDATE,
@@ -237,6 +224,7 @@ def show_settings_window(main_window, page_index: int = 0):
             C.SETTINGS_PAGE_SCATTER,
             C.SETTINGS_PAGE_VECTORSCOPE,
             C.SETTINGS_PAGE_IMAGE,
+            C.SETTINGS_PAGE_RGB_HIST,
             C.SETTINGS_PAGE_FOCUS,
             C.SETTINGS_PAGE_SQUINT,
             C.SETTINGS_PAGE_SALIENCY,
@@ -276,7 +264,10 @@ def show_settings_window(main_window, page_index: int = 0):
 
     if hasattr(main_window, "_settings_nav"):
         # 外部からページ指定で開けるよう、行番号へ変換して選択する。
-        page = max(0, min(C.SETTINGS_PAGE_LAYOUT, int(page_index)))
+        max_page = C.SETTINGS_PAGE_LAYOUT
+        if hasattr(main_window, "_settings_nav_to_page") and main_window._settings_nav_to_page:
+            max_page = int(max(main_window._settings_nav_to_page))
+        page = max(0, min(max_page, int(page_index)))
         nav_row = (
             main_window._settings_page_to_nav.get(page, 0)
             if hasattr(main_window, "_settings_page_to_nav")

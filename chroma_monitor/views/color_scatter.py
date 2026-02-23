@@ -48,7 +48,9 @@ HUE180_TO_MUNSELL40_WEIGHTS = _build_hue180_to_munsell40_weights()
 class ColorWheelWidget(QWidget):
     def __init__(self):
         super().__init__()
-        self.setMinimumSize(64, 64)
+        # 最小幅のみ固定し、最小高はドック共通値で制御する。
+        self.setMinimumWidth(C.VIEW_MIN_SIZE)
+        self.setMinimumHeight(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._hist = np.zeros(180, dtype=np.float32)
         self._mode = C.DEFAULT_WHEEL_MODE
@@ -169,13 +171,16 @@ class ScatterRasterWidget(QLabel):
     def __init__(self):
         super().__init__()
         self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
+        # 最小幅のみ固定し、最小高はドック共通値で制御する。
+        self.setMinimumWidth(C.VIEW_MIN_SIZE)
+        self.setMinimumHeight(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setStyleSheet("background:#FFFFFF; border:none; color:#222;")
         self._square_limit = True
         self._last_sv: Optional[np.ndarray] = None
         self._last_rgb: Optional[np.ndarray] = None
         self._shape = C.SCATTER_SHAPE_SQUARE
+        self._render_mode = C.DEFAULT_SCATTER_RENDER_MODE
         self._hue_filter_enabled = bool(C.DEFAULT_SCATTER_HUE_FILTER_ENABLED)
         self._hue_center = clamp_int(
             C.DEFAULT_SCATTER_HUE_CENTER, C.SCATTER_HUE_MIN, C.SCATTER_HUE_MAX
@@ -194,6 +199,17 @@ class ScatterRasterWidget(QLabel):
         else:
             self._show_scatter_frame_only()
 
+    def set_render_mode(self, mode: str):
+        self._render_mode = safe_choice(
+            mode,
+            C.SCATTER_RENDER_MODES,
+            C.DEFAULT_SCATTER_RENDER_MODE,
+        )
+        if self._last_sv is not None and self._last_rgb is not None:
+            self.update_scatter(self._last_sv, self._last_rgb)
+        else:
+            self._show_scatter_frame_only()
+
     def set_hue_filter(self, enabled: bool, center: int):
         # フィルター条件変更は直近データを再描画して即時反映する。
         self._hue_filter_enabled = bool(enabled)
@@ -204,7 +220,7 @@ class ScatterRasterWidget(QLabel):
             self._show_scatter_frame_only()
 
     def minimumSizeHint(self):
-        return QSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
+        return QSize(C.VIEW_MIN_SIZE, 0)
 
     def sizeHint(self):
         return QSize(300, 300)
@@ -356,6 +372,40 @@ class ScatterRasterWidget(QLabel):
             out[dst, 3] = 255
         return out.reshape((256, 256, 4))
 
+    def _render_scatter_heatmap(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
+        out = np.zeros((256, 256, 4), dtype=np.uint8)
+        if x.size == 0 or y.size == 0:
+            return out
+
+        density = np.zeros((256 * 256,), dtype=np.float32)
+        for dy in (0, 1):
+            yy = np.clip(y + dy, 0, 255)
+            for dx in (0, 1):
+                xx = np.clip(x + dx, 0, 255)
+                flat = (yy << 8) + xx
+                np.add.at(density, flat.astype(np.int32, copy=False), 1.0)
+
+        density_img = density.reshape((256, 256))
+        if float(density_img.max()) <= 0.0:
+            return out
+
+        # 密度むらを見やすくするため、軽く平滑化して対数圧縮する。
+        smooth = cv2.GaussianBlur(density_img, (0, 0), sigmaX=1.2, sigmaY=1.2)
+        tone = np.log1p(smooth)
+        peak = float(tone.max())
+        if peak <= 0.0:
+            return out
+        norm = np.clip(tone / peak, 0.0, 1.0)
+        gray = np.clip(norm * 255.0, 0.0, 255.0).astype(np.uint8)
+        cmap = getattr(cv2, "COLORMAP_TURBO", cv2.COLORMAP_JET)
+        heat_bgr = cv2.applyColorMap(gray, cmap)
+
+        out[:, :, 0:3] = heat_bgr[:, :, ::-1]
+        alpha = np.clip(np.power(norm, 0.55) * 255.0, 0.0, 255.0).astype(np.uint8)
+        alpha[norm < 0.02] = 0
+        out[:, :, 3] = alpha
+        return out
+
     def update_scatter(self, sv: np.ndarray, rgb: np.ndarray):
         self._last_sv = sv
         self._last_rgb = rgb
@@ -404,10 +454,19 @@ class ScatterRasterWidget(QLabel):
                     return
 
             x, y = self._compute_scatter_xy(sv_used)
-            img = self._render_scatter_dominant(x, y, rgb_u8)
+            render_mode = safe_choice(
+                self._render_mode,
+                C.SCATTER_RENDER_MODES,
+                C.DEFAULT_SCATTER_RENDER_MODE,
+            )
+            if render_mode == C.SCATTER_RENDER_MODE_HEATMAP:
+                img = self._render_scatter_heatmap(x, y)
+            else:
+                img = self._render_scatter_dominant(x, y, rgb_u8)
         except Exception:
             # 描画エラー時は四角モードへフォールバックして継続
             self._shape = C.SCATTER_SHAPE_SQUARE
+            self._render_mode = C.SCATTER_RENDER_MODE_DOMINANT
             try:
                 sv_arr = np.asarray(sv)
                 rgb_arr = np.asarray(rgb)

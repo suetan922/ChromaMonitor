@@ -3,7 +3,7 @@
 from .color_scatter import ColorWheelWidget, ScatterRasterWidget
 from .edge_view import EdgeView
 from .focus_peaking_view import FocusPeakingView
-from .histogram import ChannelHistogram
+from .histogram import ChannelHistogram, RgbHistogramWidget
 from .preview import PreviewWindow
 from .roi_selector import RoiSelector
 from .saliency_view import SaliencyView
@@ -19,6 +19,7 @@ __all__ = [
     "FocusPeakingView",
     "GrayscaleView",
     "PreviewWindow",
+    "RgbHistogramWidget",
     "RoiSelector",
     "SaliencyView",
     "ScatterRasterWidget",

@@ -7,7 +7,7 @@ from PySide6.QtWidgets import QMessageBox
 from ...capture.win32_windows import HAS_WIN32
 from ...util import constants as C
 from ...util.functions import set_current_index_blocked
-from ...widgets import RoiSelector
+from ...views import RoiSelector
 
 
 def on_roi_selector_destroyed(main_window, selector):
@@ -33,8 +33,14 @@ def close_roi_selectors(main_window):
             pass
 
 
-def open_multi_screen_roi_selectors(main_window, help_text: str, on_selected):
+def open_multi_screen_roi_selectors(
+    main_window,
+    help_text: str,
+    on_selected,
+    allowed_bounds: QRect | None = None,
+):
     # マルチモニタ環境では画面ごとに1つずつROIセレクタを開く。
+    # allowed_bounds 指定時はその範囲に重なる部分だけオーバーレイを出す。
     close_roi_selectors(main_window)
     screens = [s for s in QGuiApplication.screens() if s is not None]
     if not screens:
@@ -43,14 +49,28 @@ def open_multi_screen_roi_selectors(main_window, help_text: str, on_selected):
             screens = [ps]
     selectors = []
     for screen in screens:
-        sel = RoiSelector(bounds=screen.geometry(), help_text=help_text, as_window=True)
+        bounds = QRect(screen.geometry())
+        if allowed_bounds is not None:
+            bounds = bounds.intersected(allowed_bounds)
+            if bounds.width() < 10 or bounds.height() < 10:
+                continue
+        sel = RoiSelector(bounds=bounds, help_text=help_text, as_window=True)
         sel.roiSelected.connect(on_selected)
+        # どの画面でキャンセルしても、残りのオーバーレイを必ず閉じる。
+        sel.selectionCanceled.connect(lambda mw=main_window: close_roi_selectors(mw))
         # destroyed シグナルで逆参照を片付ける。
         sel.destroyed.connect(lambda _=None, s=sel: on_roi_selector_destroyed(main_window, s))
         sel.createWinId()
         handle = sel.windowHandle()
         if handle is not None:
             handle.setScreen(screen)
+        selectors.append(sel)
+    if not selectors and allowed_bounds is not None:
+        # 変換誤差で各画面との交差が消えた場合は、指定範囲そのものを1枚で表示する。
+        sel = RoiSelector(bounds=QRect(allowed_bounds), help_text=help_text, as_window=True)
+        sel.roiSelected.connect(on_selected)
+        sel.selectionCanceled.connect(lambda mw=main_window: close_roi_selectors(mw))
+        sel.destroyed.connect(lambda _=None, s=sel: on_roi_selector_destroyed(main_window, s))
         selectors.append(sel)
     main_window._roi_selectors = selectors
     main_window._roi_selector = selectors[0] if selectors else None
@@ -106,13 +126,15 @@ def pick_roi_in_window(main_window):
     if bounds_native is None:
         QMessageBox.warning(main_window, "警告", "ウィンドウ矩形の取得に失敗しました。")
         return
-    help_text = "ターゲットウィンドウ付近で領域をドラッグ選択（ウィンドウ外は自動で切り詰め）"
+    window_bounds_logical = main_window.worker._native_rect_to_logical(bounds_native)
+    help_text = "ターゲットウィンドウ内で領域をドラッグ選択（Escでキャンセル）"
     open_multi_screen_roi_selectors(
         main_window,
         help_text,
         lambda r, h=int(hwnd), wr=QRect(bounds_native): main_window.on_roi_window_selected(
             h, wr, r
         ),
+        allowed_bounds=window_bounds_logical,
     )
     main_window.on_status("ウィンドウ内領域選択中…")
 

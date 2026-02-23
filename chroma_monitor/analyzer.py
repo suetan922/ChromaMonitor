@@ -21,6 +21,18 @@ from .util import constants as C
 from .util.functions import clamp_int, resize_by_long_edge
 
 _ctypes_win = ctypes_win_api
+_EMPTY_GRAPH_DATA = {
+    "hist": None,
+    "sv": None,
+    "rgb": None,
+    "h_hist": None,
+    "s_hist": None,
+    "v_hist": None,
+    "top_colors": None,
+    "warm_ratio": 0.0,
+    "cool_ratio": 0.0,
+    "other_ratio": 0.0,
+}
 
 
 class ImageFileAnalyzeWorker(QObject):
@@ -46,6 +58,36 @@ class ImageFileAnalyzeWorker(QObject):
     def _emit_progress(self, percent: int, text: str):
         self.progress.emit(int(percent), text)
 
+    @staticmethod
+    def _decode_to_bgr_preserve_depth(buf: np.ndarray) -> Optional[np.ndarray]:
+        """Decode image bytes while preserving source depth/channels as much as possible."""
+        img = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
+        if img is None or img.size == 0:
+            return None
+        if img.ndim == 2:
+            return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        if img.ndim != 3:
+            return None
+        channels = int(img.shape[2])
+        if channels == 3:
+            return img
+        if channels == 4:
+            return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
+        if channels == 1:
+            return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        return None
+
+    @staticmethod
+    def _auto_analysis_max_dim(bgr: np.ndarray) -> int:
+        # 画像読み込み時は高解像度を優先しつつ、極端な大画像のみ内部で上限を掛ける。
+        if bgr is None or bgr.size == 0:
+            return 0
+        h, w = bgr.shape[:2]
+        long_edge = max(int(h), int(w))
+        if long_edge <= int(C.IMAGE_FILE_ANALYSIS_AUTO_MAX_DIM):
+            return 0
+        return int(C.IMAGE_FILE_ANALYSIS_AUTO_MAX_DIM)
+
     def run(self):
         try:
             # OpenCVの日本語パス対応のため、imdecode経路で読み込む。
@@ -58,22 +100,37 @@ class ImageFileAnalyzeWorker(QObject):
             if buf.size == 0:
                 self.failed.emit("画像ファイルを読み込めませんでした。")
                 return
-            bgr = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+            bgr = self._decode_to_bgr_preserve_depth(buf)
             if bgr is None or bgr.size == 0:
                 self.failed.emit("画像データのデコードに失敗しました。")
                 return
 
             h_img, w_img = bgr.shape[:2]
-            self._emit_progress(8, f"解析準備中… ({w_img}x{h_img})")
+            if np.issubdtype(bgr.dtype, np.integer):
+                bit_depth = bgr.dtype.itemsize * 8
+                self._emit_progress(8, f"解析準備中… ({w_img}x{h_img}, {bit_depth}bit)")
+            else:
+                self._emit_progress(8, f"解析準備中… ({w_img}x{h_img})")
             if self._is_canceled():
                 self.canceled.emit()
                 return
+
+            auto_max_dim = self._auto_analysis_max_dim(bgr)
+            if auto_max_dim > 0:
+                self._emit_progress(
+                    10,
+                    f"大きい画像のため内部解析を長辺{auto_max_dim}pxに調整します…",
+                )
+                if self._is_canceled():
+                    self.canceled.emit()
+                    return
 
             t0 = time.perf_counter()
             res = analyze_bgr_frame(
                 bgr=bgr,
                 sample_points=self.sample_points,
                 wheel_sat_threshold=self.wheel_sat_threshold,
+                max_dim=auto_max_dim,
                 progress_cb=self._emit_progress,
                 cancel_cb=self._is_canceled,
             )
@@ -378,6 +435,42 @@ class AnalyzerWorker(QObject):
         ny = float(mon["top"]) + (float(y) - float(g.top())) * sy
         return nx, ny
 
+    def _native_point_to_logical(self, x: float, y: float, mapping) -> tuple[float, float]:
+        # 物理座標点を、対応するQt画面の論理座標へ逆変換する。
+        target_screen = None
+        target_mon = None
+        for screen, mon in mapping.items():
+            left = float(mon["left"])
+            top = float(mon["top"])
+            right = left + float(mon["width"])
+            bottom = top + float(mon["height"])
+            if left <= float(x) < right and top <= float(y) < bottom:
+                target_screen = screen
+                target_mon = mon
+                break
+
+        if target_screen is None or target_mon is None:
+            # どのモニタにも含まれないときは中心距離が最短のモニタを使う。
+            best = None
+            best_dist = None
+            for screen, mon in mapping.items():
+                cx = float(mon["left"]) + float(mon["width"]) * 0.5
+                cy = float(mon["top"]) + float(mon["height"]) * 0.5
+                dist = (float(x) - cx) ** 2 + (float(y) - cy) ** 2
+                if best is None or (best_dist is not None and dist < best_dist):
+                    best = (screen, mon)
+                    best_dist = dist
+            if best is None:
+                return float(x), float(y)
+            target_screen, target_mon = best
+
+        g = target_screen.geometry()
+        mw = max(1.0, float(target_mon["width"]))
+        mh = max(1.0, float(target_mon["height"]))
+        lx = float(g.left()) + (float(x) - float(target_mon["left"])) * (float(g.width()) / mw)
+        ly = float(g.top()) + (float(y) - float(target_mon["top"])) * (float(g.height()) / mh)
+        return lx, ly
+
     def _logical_rect_to_native(self, rect: QRect) -> QRect:
         # 論理矩形の四隅を物理座標へ写像して新しい矩形を作る。
         mapping = self._build_screen_monitor_map()
@@ -386,6 +479,24 @@ class AnalyzerWorker(QObject):
 
         x1, y1 = self._logical_point_to_native(float(rect.left()), float(rect.top()), mapping)
         x2, y2 = self._logical_point_to_native(
+            float(rect.left() + rect.width()),
+            float(rect.top() + rect.height()),
+            mapping,
+        )
+        left = int(round(min(x1, x2)))
+        top = int(round(min(y1, y2)))
+        width = max(1, int(round(abs(x2 - x1))))
+        height = max(1, int(round(abs(y2 - y1))))
+        return QRect(left, top, width, height)
+
+    def _native_rect_to_logical(self, rect: QRect) -> QRect:
+        # 物理矩形の四隅を論理座標へ写像する（ROI選択UI境界の表示用途）。
+        mapping = self._build_screen_monitor_map()
+        if not mapping:
+            return QRect(rect)
+
+        x1, y1 = self._native_point_to_logical(float(rect.left()), float(rect.top()), mapping)
+        x2, y2 = self._native_point_to_logical(
             float(rect.left() + rect.width()),
             float(rect.top() + rect.height()),
             mapping,
@@ -593,6 +704,119 @@ class AnalyzerWorker(QObject):
         except Exception:
             return None, None, "プレビュー取得に失敗しました"
 
+    def _compute_change_metric(self, dh: np.ndarray, ds: np.ndarray, dv: np.ndarray) -> float:
+        # 8bit配列同士の差分は cv2.absdiff で計算して一時配列の型変換を減らす。
+        prev_h = self._prev_h
+        prev_s = self._prev_s
+        prev_v = self._prev_v
+        if prev_h is None or prev_s is None or prev_v is None:
+            return 0.0
+
+        hue_diff = cv2.absdiff(dh, prev_h)
+        hue_diff = np.minimum(hue_diff, 180 - hue_diff)
+        sat_diff = cv2.absdiff(ds, prev_s)
+        val_diff = cv2.absdiff(dv, prev_v)
+        return (
+            float(np.mean(hue_diff))
+            + float(np.mean(sat_diff)) * 0.5
+            + float(np.mean(val_diff)) * 0.5
+        )
+
+    def _should_emit_in_change_mode(self, bgr: np.ndarray, now: float) -> bool:
+        # 差分判定は軽量化のため専用縮小サイズで行う。
+        detect_bgr = resize_by_long_edge(bgr, C.ANALYZER_CHANGE_DETECT_DIM)
+        detect_hsv = cv2.cvtColor(detect_bgr, cv2.COLOR_BGR2HSV)
+        dh, ds, dv = cv2.split(detect_hsv)
+
+        emit_now = now >= self._cooldown_until
+        if (
+            self._prev_h is None
+            or self._prev_s is None
+            or self._prev_v is None
+            or self._prev_h.shape != dh.shape
+            or self._prev_s.shape != ds.shape
+            or self._prev_v.shape != dv.shape
+        ):
+            emit_now = False
+            self._stable_frames = 0
+            self._was_stable = False
+        else:
+            metric = self._compute_change_metric(dh, ds, dv)
+            if metric < self.cfg.diff_threshold:
+                self._stable_frames += 1
+            else:
+                self._stable_frames = 0
+                self._was_stable = False
+            emit_now = self._stable_frames >= self.cfg.stable_frames and not self._was_stable
+            if emit_now:
+                self._was_stable = True
+
+        self._prev_h = dh
+        self._prev_s = ds
+        self._prev_v = dv
+        if self._force_emit_once:
+            self._force_emit_once = False
+            emit_now = True
+        return emit_now
+
+    def _collect_graph_data(
+        self,
+        bgr: np.ndarray,
+        need_color: bool,
+        need_scatter: bool,
+        need_hsv_hist: bool,
+    ) -> dict:
+        # 設定された解析上限（max_dim）で縮小してから重い集計を行う。
+        bgr_small = resize_by_long_edge(bgr, self.cfg.max_dim)
+        hsv = cv2.cvtColor(bgr_small, cv2.COLOR_BGR2HSV)
+        h, s, v = cv2.split(hsv)
+
+        h_hist = None
+        s_hist = None
+        v_hist = None
+        if need_hsv_hist:
+            # H/S/Vヒストグラム側は従来どおり色相未定義(S=0)のみ除外
+            hue_valid = s > 0
+            h_hist = np.bincount(h[hue_valid].reshape(-1), minlength=180)[:180].astype(np.int64)
+            # S/Vヒストグラムは全画素表示
+            s_hist = np.bincount(s.reshape(-1), minlength=256)[:256].astype(np.int64)
+            v_hist = np.bincount(v.reshape(-1), minlength=256)[:256].astype(np.int64)
+
+        hist = None
+        top_colors = None
+        warm_ratio = 0.0
+        cool_ratio = 0.0
+        other_ratio = 0.0
+        if need_color:
+            sat_th = clamp_int(
+                self.cfg.wheel_sat_threshold,
+                C.WHEEL_SAT_THRESHOLD_MIN,
+                C.WHEEL_SAT_THRESHOLD_MAX,
+            )
+            wheel_mask = s >= sat_th
+            h_wheel = h[wheel_mask]
+            hist = _compute_wheel_histogram(h_wheel)
+            warm_ratio, cool_ratio, other_ratio = _compute_warm_cool_ratios(h_wheel)
+            top_colors = _compute_top_colors(bgr_small, h_wheel, wheel_mask)
+
+        sv = None
+        rgb = None
+        if need_scatter:
+            sv, rgb = _sample_sv_and_rgb(h, s, v, bgr_small, self.cfg.sample_points)
+
+        return {
+            "hist": hist,
+            "sv": sv,
+            "rgb": rgb,
+            "h_hist": h_hist,
+            "s_hist": s_hist,
+            "v_hist": v_hist,
+            "top_colors": top_colors,
+            "warm_ratio": warm_ratio,
+            "cool_ratio": cool_ratio,
+            "other_ratio": other_ratio,
+        }
+
     def _run(self):
         # mss は with 内で使い回し、毎フレーム初期化コストを避ける。
         with mss.mss() as sct:
@@ -640,111 +864,24 @@ class AnalyzerWorker(QObject):
                 emit_now = True
                 graph_update = False
                 if self.cfg.mode == C.UPDATE_MODE_CHANGE:
-                    # 差分判定は軽量化のため専用縮小サイズで行う。
-                    detect_bgr = resize_by_long_edge(bgr, C.ANALYZER_CHANGE_DETECT_DIM)
-                    detect_hsv = cv2.cvtColor(detect_bgr, cv2.COLOR_BGR2HSV)
-                    dh, ds, dv = cv2.split(detect_hsv)
-
-                    if time.perf_counter() < self._cooldown_until:
-                        emit_now = False
-                    if (
-                        self._prev_h is None
-                        or self._prev_s is None
-                        or self._prev_v is None
-                        or self._prev_h.shape != dh.shape
-                        or self._prev_s.shape != ds.shape
-                        or self._prev_v.shape != dv.shape
-                    ):
-                        emit_now = False
-                        self._stable_frames = 0
-                        self._was_stable = False
-                    else:
-                        # Hue は円環距離（180で折り返し）で差分を算出する。
-                        hue_diff = np.abs(dh.astype(np.int16) - self._prev_h.astype(np.int16))
-                        hue_diff = np.minimum(hue_diff, 180 - hue_diff)
-                        metric = (
-                            float(np.mean(hue_diff))
-                            + float(
-                                np.mean(np.abs(ds.astype(np.int16) - self._prev_s.astype(np.int16)))
-                            )
-                            * 0.5
-                            + float(
-                                np.mean(np.abs(dv.astype(np.int16) - self._prev_v.astype(np.int16)))
-                            )
-                            * 0.5
-                        )
-                        if metric < self.cfg.diff_threshold:
-                            self._stable_frames += 1
-                        else:
-                            self._stable_frames = 0
-                            self._was_stable = False
-                        emit_now = (
-                            self._stable_frames >= self.cfg.stable_frames and not self._was_stable
-                        )
-                        if emit_now:
-                            self._was_stable = True
-                    self._prev_h = dh
-                    self._prev_s = ds
-                    self._prev_v = dv
-                    if self._force_emit_once:
-                        emit_now = True
-                        self._force_emit_once = False
-
+                    emit_now = self._should_emit_in_change_mode(bgr, now=time.perf_counter())
                     # changeモードで発火したときは全ビューを同じタイミングで更新
-                    if emit_now:
-                        graph_update = True
+                    graph_update = emit_now
                 else:
                     # intervalモードでは graph_every 間隔でグラフ更新する。
                     self._frame += 1
                     graph_update = self._frame % self.cfg.graph_every == 0
 
                 dt_ms = (time.perf_counter() - t0) * 1000.0
-                hist = None
-                sv = None
-                rgb = None
-                h_masked = None
-                s_plane = None
-                v_plane = None
-                top_colors = None
-                warm_ratio = 0.0
-                cool_ratio = 0.0
-                other_ratio = 0.0
-                h_std = 0.0
-                s_std = 0.0
-                v_std = 0.0
+                graph_data = _EMPTY_GRAPH_DATA
 
                 if emit_now and graph_update and need_graph_data:
-                    # 設定された解析上限（max_dim）で縮小してから重い集計を行う。
-                    bgr_small = resize_by_long_edge(bgr, self.cfg.max_dim)
-                    hsv = cv2.cvtColor(bgr_small, cv2.COLOR_BGR2HSV)
-                    h, s, v = cv2.split(hsv)
-
-                    if need_color or need_hsv_hist:
-                        h_std = float(np.std(h))
-                        s_std = float(np.std(s))
-                        v_std = float(np.std(v))
-
-                    if need_hsv_hist:
-                        # H/S/Vヒストグラム側は従来どおり色相未定義(S=0)のみ除外
-                        h_masked = h[s > 0]
-                        # S/Vヒストグラムは全画素表示
-                        s_plane = s
-                        v_plane = v
-
-                    if need_color:
-                        sat_th = clamp_int(
-                            self.cfg.wheel_sat_threshold,
-                            C.WHEEL_SAT_THRESHOLD_MIN,
-                            C.WHEEL_SAT_THRESHOLD_MAX,
-                        )
-                        wheel_mask = s >= sat_th
-                        h_wheel = h[wheel_mask]
-                        hist = _compute_wheel_histogram(h_wheel)
-                        warm_ratio, cool_ratio, other_ratio = _compute_warm_cool_ratios(h_wheel)
-                        top_colors = _compute_top_colors(bgr_small, h_wheel, wheel_mask)
-
-                    if need_scatter:
-                        sv, rgb = _sample_sv_and_rgb(h, s, v, bgr_small, self.cfg.sample_points)
+                    graph_data = self._collect_graph_data(
+                        bgr,
+                        need_color=need_color,
+                        need_scatter=need_scatter,
+                        need_hsv_hist=need_hsv_hist,
+                    )
 
                 if emit_now:
                     should_emit_payload = need_bgr_emit or (graph_update and need_graph_data)
@@ -754,19 +891,20 @@ class AnalyzerWorker(QObject):
                         self.resultReady.emit(
                             {
                                 "bgr_preview": bgr if need_bgr_emit else None,
-                                "hist": hist if graph_update else None,
-                                "sv": sv if graph_update else None,
-                                "rgb": rgb if graph_update else None,
-                                "h_plane": h_masked if graph_update else None,
-                                "s_plane": s_plane if graph_update else None,
-                                "v_plane": v_plane if graph_update else None,
-                                "top_colors": top_colors if graph_update else None,
-                                "h_std": h_std,
-                                "s_std": s_std,
-                                "v_std": v_std,
-                                "warm_ratio": warm_ratio,
-                                "cool_ratio": cool_ratio,
-                                "other_ratio": other_ratio,
+                                "hist": graph_data["hist"] if graph_update else None,
+                                "sv": graph_data["sv"] if graph_update else None,
+                                "rgb": graph_data["rgb"] if graph_update else None,
+                                # ヒストグラムを返すため平面データは送らない。
+                                "h_plane": None,
+                                "s_plane": None,
+                                "v_plane": None,
+                                "h_hist": graph_data["h_hist"] if graph_update else None,
+                                "s_hist": graph_data["s_hist"] if graph_update else None,
+                                "v_hist": graph_data["v_hist"] if graph_update else None,
+                                "top_colors": graph_data["top_colors"] if graph_update else None,
+                                "warm_ratio": graph_data["warm_ratio"],
+                                "cool_ratio": graph_data["cool_ratio"],
+                                "other_ratio": graph_data["other_ratio"],
                                 "dt_ms": dt_ms,
                                 "cap": (cap.left(), cap.top(), cap.width(), cap.height()),
                                 "graph_update": graph_update,

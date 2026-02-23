@@ -20,6 +20,9 @@ class VectorScopeView(BaseImageLabelView):
         self._show_skin_tone_line = C.DEFAULT_VECTORSCOPE_SHOW_SKIN_LINE
         self._warn_threshold = C.DEFAULT_VECTORSCOPE_WARN_THRESHOLD
         self._last_high_sat_ratio = 0.0
+        self._mask_cache: dict[int, np.ndarray] = {}
+        self._bg_cache: dict[int, np.ndarray] = {}
+        self._ref_vectors_cache = None
 
     def set_show_skin_tone_line(self, enabled: bool):
         self._show_skin_tone_line = bool(enabled)
@@ -52,9 +55,14 @@ class VectorScopeView(BaseImageLabelView):
         return cx, cy, radius, scale
 
     def _scope_mask(self, size: int) -> np.ndarray:
+        cached = self._mask_cache.get(int(size))
+        if cached is not None:
+            return cached
         cx, cy, radius, _ = self._scope_geometry(size)
         yy, xx = np.ogrid[:size, :size]
-        return ((xx - cx) * (xx - cx) + (yy - cy) * (yy - cy)) <= (radius * radius)
+        mask = ((xx - cx) * (xx - cx) + (yy - cy) * (yy - cy)) <= (radius * radius)
+        self._mask_cache[int(size)] = mask
+        return mask
 
     def _angle_point(
         self, size: int, angle_deg: float, radius_ratio: float = 1.0
@@ -75,6 +83,8 @@ class VectorScopeView(BaseImageLabelView):
 
     def _reference_vectors(self):
         # 色方位ラベル（R/Y/G/C/B/M）の参照ベクトルを返す。
+        if self._ref_vectors_cache is not None:
+            return self._ref_vectors_cache
         refs = (
             ("R", (0, 0, 255), (70, 70, 255)),
             ("Y", (0, 255, 255), (30, 220, 255)),
@@ -83,10 +93,16 @@ class VectorScopeView(BaseImageLabelView):
             ("B", (255, 0, 0), (255, 140, 90)),
             ("M", (255, 0, 255), (245, 110, 220)),
         )
-        return [(label, self._ref_angle_from_bgr(ref_bgr), color) for label, ref_bgr, color in refs]
+        self._ref_vectors_cache = [
+            (label, self._ref_angle_from_bgr(ref_bgr), color) for label, ref_bgr, color in refs
+        ]
+        return self._ref_vectors_cache
 
     def _background(self, size: int) -> np.ndarray:
         # グリッドは主信号を邪魔しないよう薄めに描く。
+        cached = self._bg_cache.get(int(size))
+        if cached is not None:
+            return cached
         bg = np.full((size, size, 3), (8, 10, 13), dtype=np.uint8)
         cx, cy, radius, _ = self._scope_geometry(size)
         mask = self._scope_mask(size)
@@ -104,6 +120,7 @@ class VectorScopeView(BaseImageLabelView):
             px, py = self._angle_point(size, angle, 1.0)
             cv2.line(bg, (cx, cy), (px, py), (35, 42, 51), 1, cv2.LINE_AA)
         cv2.circle(bg, (cx, cy), 1, (120, 130, 142), -1, cv2.LINE_AA)
+        self._bg_cache[int(size)] = bg
         return bg
 
     def _draw_saturation_guide(self, view: np.ndarray):
@@ -168,7 +185,8 @@ class VectorScopeView(BaseImageLabelView):
 
         hist = np.zeros((size, size), dtype=np.float32)
         if np.any(valid):
-            np.add.at(hist, (ys[valid], xs[valid]), 1.0)
+            flat_idx = ys[valid] * size + xs[valid]
+            hist = np.bincount(flat_idx, minlength=size * size).astype(np.float32).reshape(size, size)
         # 密度マップは対数正規化して暗部の情報を潰しにくくする。
         hist = cv2.GaussianBlur(hist, (0, 0), 1.0)
         density = normalize_map(np.log1p(hist))
@@ -188,8 +206,8 @@ class VectorScopeView(BaseImageLabelView):
         sat = np.sqrt(u * u + v * v)
         over = valid & (sat >= thr)
         if np.any(over):
-            over_hist = np.zeros((size, size), dtype=np.float32)
-            np.add.at(over_hist, (ys[over], xs[over]), 1.0)
+            over_idx = ys[over] * size + xs[over]
+            over_hist = np.bincount(over_idx, minlength=size * size).astype(np.float32).reshape(size, size)
             over_hist = cv2.GaussianBlur(over_hist, (0, 0), 1.0)
             over_density = normalize_map(np.log1p(over_hist))
             over_alpha = np.clip(over_density[:, :, None] * 0.55, 0.0, 0.55)

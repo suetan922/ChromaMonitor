@@ -8,9 +8,12 @@ from PySide6.QtWidgets import QWidget
 
 from ..util.functions import screen_union_geometry
 
+_MIN_SELECTION_SIZE = 10
+
 
 class RoiSelector(QWidget):
     roiSelected = Signal(QRect)  # screen coords
+    selectionCanceled = Signal()
 
     def __init__(
         self, bounds: Optional[QRect] = None, help_text: str = "", as_window: bool = False
@@ -52,65 +55,67 @@ class RoiSelector(QWidget):
         y = min(max(p.y(), r.top()), r.bottom())
         return QPoint(x, y)
 
+    def _begin_selection(self, event) -> None:
+        self._dragging = True
+        self._start_local = self._event_local_point(event)
+        self._end_local = self._start_local
+        self.update()
+        self.setWindowOpacity(1.0)
+
+    def _update_selection(self, event) -> bool:
+        if not self._dragging:
+            return False
+        self._end_local = self._event_local_point(event)
+        self.update()
+        return True
+
+    def _finish_selection(self, event) -> bool:
+        if not self._dragging or event.button() != Qt.LeftButton:
+            return False
+        self._dragging = False
+        self._end_local = self._event_local_point(event)
+        r_local = QRect(self._start_local, self._end_local).normalized()
+        if r_local.width() >= _MIN_SELECTION_SIZE and r_local.height() >= _MIN_SELECTION_SIZE:
+            tl = self.mapToGlobal(r_local.topLeft())
+            br = self.mapToGlobal(r_local.bottomRight())
+            self.roiSelected.emit(QRect(tl, br).normalized())
+        else:
+            self.selectionCanceled.emit()
+        self.close()
+        return True
+
     def mousePressEvent(self, e):
         if e.button() == Qt.LeftButton:
-            self._dragging = True
-            self._start_local = self._event_local_point(e)
-            self._end_local = self._start_local
-            self.update()
-            self.setWindowOpacity(1.0)
+            self._begin_selection(e)
 
     def mouseMoveEvent(self, e):
-        if self._dragging:
-            self._end_local = self._event_local_point(e)
-            self.update()
+        self._update_selection(e)
 
     def mouseReleaseEvent(self, e):
-        if self._dragging and e.button() == Qt.LeftButton:
-            self._dragging = False
-            self._end_local = self._event_local_point(e)
-            r_local = QRect(self._start_local, self._end_local).normalized()
-            if r_local.width() >= 10 and r_local.height() >= 10:
-                tl = self.mapToGlobal(r_local.topLeft())
-                br = self.mapToGlobal(r_local.bottomRight())
-                self.roiSelected.emit(QRect(tl, br).normalized())
-            self.close()
+        self._finish_selection(e)
 
     def tabletPressEvent(self, e):
         if e.button() == Qt.LeftButton:
-            self._dragging = True
-            self._start_local = self._event_local_point(e)
-            self._end_local = self._start_local
-            self.update()
-            self.setWindowOpacity(1.0)
+            self._begin_selection(e)
             e.accept()
             return
         super().tabletPressEvent(e)
 
     def tabletMoveEvent(self, e):
-        if self._dragging:
-            self._end_local = self._event_local_point(e)
-            self.update()
+        if self._update_selection(e):
             e.accept()
             return
         super().tabletMoveEvent(e)
 
     def tabletReleaseEvent(self, e):
-        if self._dragging and e.button() == Qt.LeftButton:
-            self._dragging = False
-            self._end_local = self._event_local_point(e)
-            r_local = QRect(self._start_local, self._end_local).normalized()
-            if r_local.width() >= 10 and r_local.height() >= 10:
-                tl = self.mapToGlobal(r_local.topLeft())
-                br = self.mapToGlobal(r_local.bottomRight())
-                self.roiSelected.emit(QRect(tl, br).normalized())
-            self.close()
+        if self._finish_selection(e):
             e.accept()
             return
         super().tabletReleaseEvent(e)
 
     def keyPressEvent(self, e):
         if e.key() == Qt.Key_Escape:
+            self.selectionCanceled.emit()
             self.close()
 
     def paintEvent(self, _):

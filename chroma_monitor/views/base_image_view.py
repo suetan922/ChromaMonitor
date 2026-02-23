@@ -15,14 +15,16 @@ class BaseImageLabelView(QLabel):
     def __init__(self, empty_text: str, style: str = DEFAULT_IMAGE_VIEW_STYLE):
         super().__init__()
         self.setAlignment(Qt.AlignCenter)
-        self.setMinimumSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
+        # 最小幅のみ固定し、最小高はドック共通値で制御する。
+        self.setMinimumWidth(C.VIEW_MIN_SIZE)
+        self.setMinimumHeight(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setStyleSheet(style)
         self._empty_text = empty_text
         self._last_bgr: Optional[np.ndarray] = None
 
     def minimumSizeHint(self):
-        return QSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
+        return QSize(C.VIEW_MIN_SIZE, 0)
 
     def sizeHint(self):
         return QSize(240, 240)

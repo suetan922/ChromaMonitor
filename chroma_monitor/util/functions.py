@@ -13,6 +13,10 @@ from . import constants as C
 T = TypeVar("T")
 _MAX_RENDER_EDGE = 2048
 _MAX_RENDER_AREA = _MAX_RENDER_EDGE * _MAX_RENDER_EDGE
+_FALLBACK_SCREEN_RECT = QRect(0, 0, 1920, 1080)
+_TOP_BAR_MIN_HEIGHT = 12
+_TOP_BAR_TEXT_MIN_WIDTH = 240
+_TOP_BAR_TEXT_MIN_SEGMENT_PX = 42
 
 
 @contextmanager
@@ -50,7 +54,7 @@ def screen_union_geometry(available: bool = False) -> QRect:
         fallback_rect = ps.availableGeometry() if available else ps.virtualGeometry()
         if fallback_rect.isValid() and fallback_rect.width() > 0 and fallback_rect.height() > 0:
             return fallback_rect
-    return QRect(0, 0, 1920, 1080)
+    return QRect(_FALLBACK_SCREEN_RECT)
 
 
 def safe_choice(value: T, allowed: Sequence[T], default: T) -> T:
@@ -115,14 +119,18 @@ def clamp_render_size(width: int, height: int) -> Tuple[int, int]:
     return w, h
 
 
+def _scaled_qpixmap_from_qimage(qimg: QImage, max_w: int, max_h: int) -> QPixmap:
+    pm = QPixmap.fromImage(qimg)
+    max_w, max_h = clamp_render_size(max_w, max_h)
+    return pm.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+
+
 def rgb_to_qpixmap(rgb: np.ndarray, max_w: int, max_h: int) -> QPixmap:
     # NumPy RGB 配列を QPixmap に変換し、表示領域へフィットさせる。
     rgb = np.ascontiguousarray(rgb)
     h, w = rgb.shape[:2]
     qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888)
-    pm = QPixmap.fromImage(qimg)
-    max_w, max_h = clamp_render_size(max_w, max_h)
-    return pm.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    return _scaled_qpixmap_from_qimage(qimg, max_w=max_w, max_h=max_h)
 
 
 def gray_to_qpixmap(gray: np.ndarray, max_w: int, max_h: int) -> QPixmap:
@@ -130,9 +138,7 @@ def gray_to_qpixmap(gray: np.ndarray, max_w: int, max_h: int) -> QPixmap:
     gray = np.ascontiguousarray(gray)
     h, w = gray.shape[:2]
     qimg = QImage(gray.data, w, h, w, QImage.Format_Grayscale8)
-    pm = QPixmap.fromImage(qimg)
-    max_w, max_h = clamp_render_size(max_w, max_h)
-    return pm.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+    return _scaled_qpixmap_from_qimage(qimg, max_w=max_w, max_h=max_h)
 
 
 def bgr_to_qpixmap(bgr: np.ndarray, max_w: int = 560, max_h: int = 420) -> QPixmap:
@@ -149,7 +155,13 @@ def top_hue_bars(
     """
     if hist is None:
         return C.TOP_COLORS_TITLE, []
-    hist = np.asarray(hist).astype(np.int64)
+    hist = np.asarray(hist, dtype=np.int64).reshape(-1)
+    if hist.size != 180:
+        fixed = np.zeros(180, dtype=np.int64)
+        n = min(180, hist.size)
+        if n > 0:
+            fixed[:n] = hist[:n]
+        hist = fixed
     total = float(hist.sum())
     if total <= 0:
         return C.TOP_COLORS_TITLE, []
@@ -169,6 +181,14 @@ def top_hue_bars(
     return C.TOP_COLORS_TITLE, bars
 
 
+def _top_bar_item_ratio_color(item: Tuple) -> Tuple[float, Tuple[int, int, int]]:
+    if len(item) == 3:
+        _, ratio, color = item
+    else:
+        ratio, color = item
+    return float(ratio), tuple(int(c) for c in color)
+
+
 def render_top_color_bar(
     bars: List[Tuple], width: int = 300, height: int = C.TOP_COLOR_BAR_HEIGHT
 ) -> QPixmap:
@@ -176,24 +196,21 @@ def render_top_color_bar(
     bars: [(ratio, (r,g,b))] or [(name, ratio, (r,g,b))]
     # 比率バーを横方向へ敷き詰めて表示する。
     """
-    safe_w, safe_h = clamp_render_size(width, max(12, height))
+    safe_w, safe_h = clamp_render_size(width, max(_TOP_BAR_MIN_HEIGHT, height))
     pm = QPixmap(safe_w, safe_h)
     pm.fill(Qt.transparent)
     painter = QPainter(pm)
     try:
         painter.fillRect(QRect(0, 0, pm.width(), pm.height()), QColor(235, 235, 235))
-        show_text = pm.width() >= 240
+        show_text = pm.width() >= _TOP_BAR_TEXT_MIN_WIDTH
         x = 0
         remaining = pm.width()
         for item in bars:
-            if len(item) == 3:
-                _, ratio, color = item
-            else:
-                ratio, color = item
+            ratio, color = _top_bar_item_ratio_color(item)
             w = int(round(pm.width() * ratio))
             w = max(1, min(w, remaining))
             painter.fillRect(QRect(x, 0, w, pm.height()), QColor(*color))
-            if show_text and w >= 42:
+            if show_text and w >= _TOP_BAR_TEXT_MIN_SEGMENT_PX:
                 pct = f"{ratio*100:.1f}%"
                 painter.setPen(QColor(255, 255, 255) if sum(color) < 400 else QColor(40, 40, 40))
                 painter.drawText(QRect(x + 2, 0, w - 4, pm.height()), Qt.AlignCenter, pct)

@@ -6,7 +6,7 @@ import cv2
 import numpy as np
 
 from ..util import constants as C
-from ..util.functions import clamp_int, rgb_to_qpixmap, safe_choice
+from ..util.functions import clamp_int, resize_by_long_edge, rgb_to_qpixmap, safe_choice
 from .base_image_view import BaseImageLabelView
 from .image_math import normalize_map
 
@@ -92,7 +92,7 @@ class SaliencyView(BaseImageLabelView):
     def __init__(self):
         super().__init__("サリエンシーなし")
         self._last_saliency: Optional[np.ndarray] = None
-        self._last_overlay_rgba: Optional[np.ndarray] = None
+        self._last_overlay_bgra: Optional[np.ndarray] = None
         self._overlay_alpha = C.DEFAULT_SALIENCY_OVERLAY_ALPHA  # 0..100
         self._guide = C.DEFAULT_COMPOSITION_GUIDE  # none | thirds | center | diagonal
         self._sr_detector = None
@@ -172,35 +172,39 @@ class SaliencyView(BaseImageLabelView):
             sal = self._compute_spectral_saliency_fft(bgr)
         return normalize_map(sal)
 
-    def _make_overlay_rgba(self, saliency: np.ndarray) -> np.ndarray:
-        # サリエンシー強度を疑似カラー + αチャンネルへ変換する。
+    def _make_overlay_bgra(self, saliency: np.ndarray) -> np.ndarray:
+        # サリエンシー強度を疑似カラー(BGR) + αチャンネルへ変換する。
         sal_u8 = np.clip(np.round(saliency * 255.0), 0, 255).astype(np.uint8)
         heat_bgr = cv2.applyColorMap(sal_u8, cv2.COLORMAP_JET)
-        heat_rgb = cv2.cvtColor(heat_bgr, cv2.COLOR_BGR2RGB)
         alpha = np.clip(np.round(saliency * (self._overlay_alpha / 100.0) * 255.0), 0, 255).astype(
             np.uint8
         )
-        return np.dstack([heat_rgb, alpha])
+        return np.dstack([heat_bgr, alpha])
+
+    def _processing_long_edge(self) -> int:
+        # 表示サイズ相当までで解析すれば、見た目を保ったまま負荷を抑えられる。
+        target = max(1, self.width(), self.height())
+        return clamp_int(target, 160, 960)
 
     def update_saliency(self, bgr: np.ndarray):
         if not self._set_last_bgr(bgr):
             return
 
+        # サリエンシーは表示用のため、表示相当解像度で処理して負荷を削減する。
+        proc_bgr = resize_by_long_edge(bgr, self._processing_long_edge())
         try:
-            saliency = self._compute_saliency(bgr)
+            saliency = self._compute_saliency(proc_bgr)
         except Exception:
             # 稀な演算エラー時も描画不能にしない。
-            saliency = normalize_map(self._compute_spectral_saliency_fft(bgr))
+            saliency = normalize_map(self._compute_spectral_saliency_fft(proc_bgr))
 
         self._last_saliency = saliency
-        self._last_overlay_rgba = self._make_overlay_rgba(saliency)
+        self._last_overlay_bgra = self._make_overlay_bgra(saliency)
 
-        overlay_bgr = cv2.cvtColor(self._last_overlay_rgba[:, :, :3], cv2.COLOR_RGB2BGR).astype(
-            np.float32
-        )
-        alpha = (self._last_overlay_rgba[:, :, 3].astype(np.float32) / 255.0)[:, :, None]
+        overlay_bgr = self._last_overlay_bgra[:, :, :3].astype(np.float32)
+        alpha = (self._last_overlay_bgra[:, :, 3].astype(np.float32) / 255.0)[:, :, None]
         # 元画像をグレースケール化して残差を見やすくする
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        gray = cv2.cvtColor(proc_bgr, cv2.COLOR_BGR2GRAY)
         base = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR).astype(np.float32)
         view_bgr = np.clip(base * (1.0 - alpha) + overlay_bgr * alpha, 0, 255).astype(np.uint8)
         view_bgr = _apply_composition_guides(view_bgr, self._guide)

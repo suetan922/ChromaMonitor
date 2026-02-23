@@ -1,3 +1,4 @@
+from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QMessageBox
 
 from ..util import constants as C
@@ -6,16 +7,109 @@ from ..util.functions import blocked_signals
 from ..util.layout_state import apply_layout_state, capture_layout_state
 
 
-def apply_default_view_layout(main_window) -> None:
-    # 既定状態は全ビュー非表示（プレースホルダ表示）にする。
-    for dock in main_window._dock_map.values():
-        dock.setVisible(False)
+def _layout_engine_version(cfg: dict) -> int:
+    try:
+        return int(cfg.get(C.CFG_LAYOUT_ENGINE_VERSION, 0))
+    except Exception:
+        return 0
+
+
+def _stamp_layout_engine_version(cfg: dict) -> None:
+    cfg[C.CFG_LAYOUT_ENGINE_VERSION] = int(C.LAYOUT_ENGINE_VERSION)
+
+
+def _after_layout_apply(main_window, *, schedule_rebalance: bool = True) -> None:
     main_window.sync_window_menu_checks()
+    main_window.update_placeholder()
+    if schedule_rebalance:
+        main_window._schedule_dock_rebalance()
+    main_window._fit_window_to_desktop()
+    main_window._schedule_layout_autosave()
+
+
+def apply_three_dock_layout(
+    main_window,
+    *,
+    first_name: str,
+    second_name: str,
+    third_name: str,
+    area: Qt.DockWidgetArea = Qt.RightDockWidgetArea,
+    first_split: Qt.Orientation = Qt.Vertical,
+    second_split: Qt.Orientation = Qt.Horizontal,
+    split_parent_is_first: bool = True,
+    hide_others: bool = True,
+    primary_sizes: tuple[int, int] = (640, 300),
+    secondary_sizes: tuple[int, int] = (500, 500),
+) -> bool:
+    """Apply a generic 3-dock nested split layout.
+
+    first_split:
+        first と second の最初の分割方向。
+    split_parent_is_first:
+        True なら first 側を再分割、False なら second 側を再分割。
+    second_split:
+        上記ターゲット側を third で再分割する方向。
+    """
+    dock_map = getattr(main_window, "_dock_map", {})
+    first = dock_map.get(first_name)
+    second = dock_map.get(second_name)
+    third = dock_map.get(third_name)
+    if first is None or second is None or third is None:
+        return False
+
+    target_names = {first_name, second_name, third_name}
+    if hide_others:
+        # 既存配置を一度外してから再構築し、ネストの残骸をなくす。
+        for name, dock in dock_map.items():
+            if dock.isFloating():
+                dock.setFloating(False)
+            dock.setVisible(name in target_names)
+            main_window.removeDockWidget(dock)
+    else:
+        for dock in (first, second, third):
+            if dock.isFloating():
+                dock.setFloating(False)
+            main_window.removeDockWidget(dock)
+            dock.setVisible(True)
+
+    main_window.addDockWidget(area, first)
+    main_window.splitDockWidget(first, second, first_split)
+    split_root = first if split_parent_is_first else second
+    main_window.splitDockWidget(split_root, third, second_split)
+    for dock in (first, second, third):
+        dock.setVisible(True)
+
+    main_window.resizeDocks([first, second], list(primary_sizes), first_split)
+    main_window.resizeDocks([split_root, third], list(secondary_sizes), second_split)
+    _after_layout_apply(main_window)
+    return True
+
+
+def apply_default_view_layout(main_window) -> None:
+    # 既定状態は色相環/散布図/HSVヒストグラムのみ表示する。
+    # first=color, second=hist を縦分割した後、first 側を scatter で横分割
+    # => 上段2枚 + 下段1枚
+    ok = apply_three_dock_layout(
+        main_window,
+        first_name="dock_color",
+        second_name="dock_hist",
+        third_name="dock_scatter",
+        area=Qt.RightDockWidgetArea,
+        first_split=Qt.Vertical,
+        second_split=Qt.Horizontal,
+        split_parent_is_first=True,
+        hide_others=True,
+        primary_sizes=(640, 300),
+        secondary_sizes=(500, 500),
+    )
+    if not ok:
+        main_window.sync_window_menu_checks()
 
 
 def save_current_layout_to_config(main_window, silent: bool = False) -> None:
     # 現在のドック配置を CFG_LAYOUT_CURRENT へ保存する。
     cfg = load_config()
+    _stamp_layout_engine_version(cfg)
     cfg[C.CFG_LAYOUT_CURRENT] = capture_layout_state(main_window, main_window._dock_map)
     save_config(cfg)
     if not silent:
@@ -33,15 +127,24 @@ def schedule_layout_autosave(main_window) -> None:
 
 
 def apply_layout_from_config(main_window, cfg: dict) -> None:
-    # 復元失敗時は安全側として既定レイアウトに戻す。
-    layout = cfg.get(C.CFG_LAYOUT_CURRENT, {})
-    restored = apply_layout_state(main_window, main_window._dock_map, layout)
-    if not restored:
+    # レイアウト実装更新時は旧保存状態を一度リセットして既定へ戻す。
+    if _layout_engine_version(cfg) != C.LAYOUT_ENGINE_VERSION:
         main_window._apply_default_view_layout()
-    main_window.sync_window_menu_checks()
-    main_window.update_placeholder()
-    main_window._fit_window_to_desktop()
-    main_window._schedule_layout_autosave()
+        saved = dict(cfg)
+        _stamp_layout_engine_version(saved)
+        # 旧仕様で保存したプリセットは互換性がないため破棄する。
+        saved[C.CFG_LAYOUT_PRESETS] = {}
+        saved[C.CFG_LAYOUT_CURRENT] = capture_layout_state(main_window, main_window._dock_map)
+        save_config(saved)
+        return
+    else:
+        # 復元失敗時は安全側として既定レイアウトに戻す。
+        layout = cfg.get(C.CFG_LAYOUT_CURRENT, {})
+        restored = apply_layout_state(main_window, main_window._dock_map, layout)
+        if not restored:
+            main_window._apply_default_view_layout()
+            return
+    _after_layout_apply(main_window)
 
 
 def refresh_layout_preset_views(main_window) -> None:
@@ -81,11 +184,11 @@ def apply_layout_preset(main_window, name: str) -> None:
     layout = presets.get(name)
     if not isinstance(layout, dict):
         return
-    apply_layout_state(main_window, main_window._dock_map, layout)
-    main_window.sync_window_menu_checks()
-    main_window.update_placeholder()
-    main_window._fit_window_to_desktop()
-    main_window._schedule_layout_autosave()
+    restored = apply_layout_state(main_window, main_window._dock_map, layout)
+    if not restored:
+        main_window._apply_default_view_layout()
+        return
+    _after_layout_apply(main_window)
     main_window.on_status(f"プリセット適用: {name}")
 
 
@@ -111,6 +214,7 @@ def save_layout_preset(main_window) -> None:
     if not isinstance(presets, dict):
         presets = {}
     presets[name] = capture_layout_state(main_window, main_window._dock_map)
+    _stamp_layout_engine_version(cfg)
     cfg[C.CFG_LAYOUT_PRESETS] = presets
     cfg[C.CFG_LAYOUT_CURRENT] = presets[name]
     save_config(cfg)

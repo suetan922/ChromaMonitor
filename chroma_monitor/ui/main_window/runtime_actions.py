@@ -16,6 +16,21 @@ from ...util.functions import (
 )
 
 
+def _safe_close_widget(widget, *, only_if_visible: bool = False) -> None:
+    if widget is None:
+        return
+    try:
+        if only_if_visible and not widget.isVisible():
+            return
+        widget.close()
+    except Exception:
+        pass
+
+
+def _is_window_capture_source(main_window) -> bool:
+    return selected_capture_source(main_window) == C.CAPTURE_SOURCE_WINDOW and HAS_WIN32
+
+
 def on_status(main_window, text: str):
     # ステータス表示更新はこの関数経由に寄せる。
     main_window.lbl_status.setText(text)
@@ -90,9 +105,8 @@ def on_load_image(main_window):
     worker.finished.connect(main_window.on_image_analysis_finished)
     worker.failed.connect(main_window.on_image_analysis_failed)
     worker.canceled.connect(main_window.on_image_analysis_canceled)
-    worker.finished.connect(thread.quit)
-    worker.failed.connect(thread.quit)
-    worker.canceled.connect(thread.quit)
+    for signal in (worker.finished, worker.failed, worker.canceled):
+        signal.connect(thread.quit)
     thread.started.connect(worker.run)
     main_window._image_worker = worker
     main_window._image_thread = thread
@@ -140,6 +154,8 @@ def on_start(main_window):
     if is_image_analysis_running(main_window):
         on_status(main_window, "画像解析中です。キャンセル完了後にStartしてください。")
         return
+    # Start時点の表示状態を再同期して、必要ビューの計算漏れを防ぐ。
+    sync_worker_view_flags(main_window)
     main_window.worker.start()
     main_window.btn_start_bar.setChecked(True)
     main_window.btn_stop_bar.setChecked(False)
@@ -164,16 +180,8 @@ def close_event(main_window, event):
     cancel_image_analysis(main_window)
     cleanup_image_analysis(main_window)
     main_window.worker.stop()
-    try:
-        if main_window.preview_window.isVisible():
-            main_window.preview_window.close()
-    except Exception:
-        pass
-    try:
-        if hasattr(main_window, "_settings_window") and main_window._settings_window is not None:
-            main_window._settings_window.close()
-    except Exception:
-        pass
+    _safe_close_widget(getattr(main_window, "preview_window", None), only_if_visible=True)
+    _safe_close_widget(getattr(main_window, "_settings_window", None))
     try:
         main_window._close_roi_selectors()
     except Exception:
@@ -205,11 +213,21 @@ def selected_capture_source(main_window) -> str:
 def sync_capture_source_ui(main_window):
     # 取得元に応じて、表示すべき操作ボタンと入力欄を切り替える。
     is_window = selected_capture_source(main_window) == C.CAPTURE_SOURCE_WINDOW
-    if main_window._row_target_settings is not None:
-        main_window._row_target_settings.setVisible(is_window)
-    main_window.btn_refresh.setVisible(is_window)
-    main_window.btn_pick_roi_win.setVisible(is_window)
-    main_window.btn_pick_roi_screen.setVisible(not is_window)
+
+    # 設定ダイアログ生成前はこれらのウィジェットが親なし(top-level)のため、
+    # setVisible(True) を呼ぶと単独ウィンドウとして出てしまう。
+    has_settings_window = hasattr(main_window, "_settings_window")
+    if has_settings_window:
+        if main_window._row_target_settings is not None:
+            main_window._row_target_settings.setVisible(is_window)
+        main_window.btn_refresh.setVisible(is_window)
+        main_window.btn_pick_roi_win.setVisible(is_window)
+        main_window.btn_pick_roi_screen.setVisible(not is_window)
+    else:
+        # 起動時に誤表示しないよう、親なし状態では明示的に隠す。
+        main_window.btn_refresh.hide()
+        main_window.btn_pick_roi_win.hide()
+        main_window.btn_pick_roi_screen.hide()
 
     can_window = is_window and HAS_WIN32
     main_window.btn_refresh.setEnabled(can_window)
@@ -258,9 +276,7 @@ def _apply_capture_source(main_window, save: bool):
 
 def on_window_changed(main_window, _idx: int):
     # window モード時のみターゲットウィンドウ変更を worker へ伝える。
-    if selected_capture_source(main_window) != C.CAPTURE_SOURCE_WINDOW:
-        return
-    if not HAS_WIN32:
+    if not _is_window_capture_source(main_window):
         return
     hwnd = main_window.combo_win.currentData()
     if hwnd is None:
@@ -287,21 +303,40 @@ def on_window_changed(main_window, _idx: int):
         update_preview_snapshot(main_window)
 
 
+def on_window_text_committed(main_window):
+    # 編集可能コンボの入力文字列を候補へ寄せて選択確定する。
+    if not _is_window_capture_source(main_window):
+        return
+    text = main_window.combo_win.currentText().strip()
+    if not text:
+        if main_window.combo_win.currentData() is not None:
+            set_current_index_blocked(main_window.combo_win, 0)
+            on_window_changed(main_window, 0)
+        return
+
+    needle = text.casefold()
+    idx = -1
+    for i in range(main_window.combo_win.count()):
+        if main_window.combo_win.itemText(i).casefold() == needle:
+            idx = i
+            break
+    if idx < 0:
+        for i in range(main_window.combo_win.count()):
+            if needle in main_window.combo_win.itemText(i).casefold():
+                idx = i
+                break
+    if idx < 0:
+        return
+
+    if idx != main_window.combo_win.currentIndex():
+        set_current_index_blocked(main_window.combo_win, idx)
+    on_window_changed(main_window, idx)
+
+
 def has_visible_image_dock(main_window) -> bool:
     # 画像系ドックが1つでも開いていれば image 処理を有効にする。
-    return any(
-        dock.isVisible()
-        for dock in (
-            main_window.dock_edge,
-            main_window.dock_gray,
-            main_window.dock_binary,
-            main_window.dock_ternary,
-            main_window.dock_saliency,
-            main_window.dock_focus,
-            main_window.dock_squint,
-            main_window.dock_vectorscope,
-        )
-    )
+    targets = getattr(main_window, "_image_update_targets", ())
+    return any(dock.isVisible() for dock, _update, _after in targets)
 
 
 def sync_worker_view_flags(main_window):
