@@ -75,6 +75,16 @@ def _dock_drop_activation_margin_px(main_window) -> int:
     )
 
 
+def _dock_drop_zone_rect(main_window) -> QRect:
+    margin = _dock_drop_activation_margin_px(main_window)
+    return main_window.frameGeometry().adjusted(
+        -margin,
+        -margin,
+        margin,
+        margin,
+    )
+
+
 def _floating_dock_intersects_drop_zone(main_window, zone: QRect) -> bool:
     for dock in getattr(main_window, "_dock_map", {}).values():
         if dock is None or not dock.isVisible() or not dock.isFloating():
@@ -96,13 +106,7 @@ def _is_dock_drop_active_near_main_window(main_window) -> bool:
         return False
     if not main_window.isVisible():
         return False
-    margin = _dock_drop_activation_margin_px(main_window)
-    frame = main_window.frameGeometry().adjusted(
-        -margin,
-        -margin,
-        margin,
-        margin,
-    )
+    frame = _dock_drop_zone_rect(main_window)
     cursor_pos = QCursor.pos()
     if frame.contains(cursor_pos):
         return True
@@ -189,6 +193,11 @@ def _sync_dock_tab_close_button(main_window, bar: QTabBar) -> None:
 def _sync_dock_tab_bar_event_filters(main_window) -> None:
     seen = []
     for bar in main_window.findChildren(QTabBar):
+        try:
+            # Qt標準のタブドラッグ（切り離し/再ドック）を有効にする。
+            bar.setMovable(True)
+        except Exception:
+            pass
         if not _is_dock_related_tab_bar(main_window, bar):
             _sync_dock_tab_close_button(main_window, bar)
             continue
@@ -257,8 +266,24 @@ def _float_dock_from_tab_drag(main_window, dock: QDockWidget, global_pos) -> Non
     dock.raise_()
     dock.activateWindow()
     _sync_dock_options_by_floating_state(main_window)
+    sync_tabbed_dock_title_bars(main_window)
     _sync_dock_tab_bar_event_filters(main_window)
     main_window._schedule_layout_autosave()
+
+
+def _start_system_move_for_dock(dock: QDockWidget) -> bool:
+    if dock is None:
+        return False
+    try:
+        win = dock.windowHandle()
+    except Exception:
+        win = None
+    if win is None or not hasattr(win, "startSystemMove"):
+        return False
+    try:
+        return bool(win.startSystemMove())
+    except Exception:
+        return False
 
 
 def _hide_dock_title_bar_for_tabbed(dock: QDockWidget) -> None:
@@ -320,8 +345,6 @@ def handle_dock_tab_bar_event(main_window, bar: QTabBar, event) -> bool:
             "text": bar.tabText(idx),
             "start_global": _global_pos_from_event(event),
             "triggered": False,
-            "detached_dock": None,
-            "drag_offset": (0, 0),
         }
         return False
 
@@ -331,46 +354,30 @@ def handle_dock_tab_bar_event(main_window, bar: QTabBar, event) -> bool:
             return False
         if state.get("bar") is not bar:
             return False
-        current = _global_pos_from_event(event)
-        if current is None:
-            return False
         if state.get("triggered"):
-            dock = state.get("detached_dock")
-            if dock is None or not dock.isFloating():
-                return False
-            buttons = getattr(event, "buttons", lambda: Qt.NoButton)()
-            if not (buttons & Qt.LeftButton):
-                return False
-            off_x, off_y = state.get("drag_offset", (0, 0))
-            dock.move(int(current.x() - int(off_x)), int(current.y() - int(off_y)))
-            return True
+            return False
+        current = _global_pos_from_event(event)
         start = state.get("start_global")
-        if start is None:
+        if current is None or start is None:
             return False
         dx = int(current.x() - start.x())
         dy = int(current.y() - start.y())
+        # タブ並び替えの横ドラッグは邪魔せず、上下へ引いたときだけ切り離す。
         if abs(dy) < _TAB_DETACH_VERTICAL_DRAG_PX or abs(dy) <= abs(dx):
             return False
         dock = _dock_for_tab_text(main_window, str(state.get("text", "")))
         if dock is None:
             return False
         state["triggered"] = True
-        state["detached_dock"] = dock
         _float_dock_from_tab_drag(main_window, dock, current)
-        frame = dock.frameGeometry()
-        state["drag_offset"] = (int(current.x() - frame.x()), int(current.y() - frame.y()))
+        _start_system_move_for_dock(dock)
+        main_window._dock_tab_drag_state = None
         return True
 
     if et in (QEvent.MouseButtonRelease, QEvent.Leave):
         state = getattr(main_window, "_dock_tab_drag_state", None)
-        if isinstance(state, dict):
-            dock = state.get("detached_dock")
-            if dock is not None and dock.isFloating():
-                fit_top_level_widget_to_desktop(main_window, dock)
-                _sync_dock_options_by_floating_state(main_window)
-                _sync_dock_tab_bar_event_filters(main_window)
-                main_window._schedule_layout_autosave()
-        main_window._dock_tab_drag_state = None
+        if isinstance(state, dict) and not state.get("triggered"):
+            main_window._dock_tab_drag_state = None
     return False
 
 
@@ -943,17 +950,25 @@ def _attach_dock_to_area_group(main_window, dock: QDockWidget, area) -> None:
 def toggle_dock(main_window, dock: QDockWidget, visible: bool):
     # 閉じる/表示の両操作後に placeholder とレイアウト保存タイマーを更新する。
     if visible:
+        was_hidden = dock.isHidden()
+        # 非表示前がフローティングなら、ドックへ戻さず同じ形態で再表示する。
         if dock.isFloating():
-            dock.setFloating(False)
-        if main_window.dockWidgetArea(dock) == Qt.NoDockWidgetArea:
-            area = _default_area_for_dock(main_window, dock)
-            _attach_dock_to_area_group(main_window, dock, area)
-        dock.setVisible(True)
-        if dock.isFloating():
+            dock.setVisible(True)
             fit_top_level_widget_to_desktop(main_window, dock)
             dock.raise_()
             dock.activateWindow()
         else:
+            area = _default_area_for_dock(main_window, dock)
+            attach_on_next_show = bool(getattr(dock, "_attach_on_next_show", False))
+            if attach_on_next_show or main_window.dockWidgetArea(dock) == Qt.NoDockWidgetArea:
+                _attach_dock_to_area_group(main_window, dock, area)
+                dock._attach_on_next_show = False
+            dock.setVisible(True)
+            # 非表示ドックを再表示したとき、同エリア内に既存ドックがあればタブ合流を優先する。
+            if was_hidden and len(main_window.tabifiedDockWidgets(dock)) <= 0:
+                anchors = [d for d in _visible_docks_in_area(main_window, area) if d is not dock]
+                if anchors:
+                    main_window.tabifyDockWidget(anchors[0], dock)
             dock.raise_()
     else:
         dock.setVisible(False)

@@ -53,7 +53,7 @@ def _legacy_user_config_dir() -> Path:
         base = Path.home() / "Library" / "Application Support"
     else:
         base = Path(os.environ.get("XDG_CONFIG_HOME", Path.home() / ".config"))
-    return base / "ChromaMonitor"
+    return base / C.APP_NAME
 
 
 def _portable_config_dir() -> Path:

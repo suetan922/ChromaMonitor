@@ -1,22 +1,12 @@
 """アプリ全体で共有する定数。"""
 
-from PySide6.QtGui import QColor
-
-# App/update metadata
-APP_VERSION = "0.1.0"
-"""現在のアプリバージョン文字列。"""
-GITHUB_REPOSITORY = "suetan922/ChromaMonitor"
-"""GitHub上の ``owner/repository`` 名。"""
-RELEASES_PAGE_URL = f"https://github.com/{GITHUB_REPOSITORY}/releases"
-"""GitHub Releases 一覧URL。"""
-LATEST_RELEASE_API_URL = f"https://api.github.com/repos/{GITHUB_REPOSITORY}/releases/latest"
-"""最新リリース情報取得用のGitHub API URL。"""
-UPDATE_CHECK_TIMEOUT_MS = 5000
-"""更新確認HTTP要求のタイムアウト(ms)。"""
-
-# ROI defaults
-DEFAULT_ROI_SIZE = (640, 360)
-"""ROI未指定時の初期サイズ（幅, 高さ）。"""
+# Application identity
+APP_NAME = "ChromaMonitor"
+"""アプリケーション名。"""
+APP_GITHUB_REPOSITORY = "suetan922/ChromaMonitor"
+"""更新確認に使う GitHub リポジトリ識別子。"""
+APP_RELEASES_URL = f"https://github.com/{APP_GITHUB_REPOSITORY}/releases"
+"""リリースページURL。"""
 
 # Analyzer constraints
 ANALYZER_MAX_DIM = 400
@@ -25,26 +15,14 @@ ANALYZER_MAX_DIM_MIN = 120
 """解析長辺のUI入力最小値。"""
 ANALYZER_MAX_DIM_MAX = 4096
 """解析長辺のUI入力最大値。"""
-# 画像読み込み時のみ使う内部自動上限（UI設定には出さない）
-IMAGE_FILE_ANALYSIS_AUTO_MAX_DIM = 3072
-ANALYZER_MIN_INTERVAL_SEC = 0.05
-"""定期更新モードの最小間隔(秒)。"""
 ANALYZER_MIN_SAMPLE_POINTS = 500
 """散布図サンプリング点数の最小値。"""
 ANALYZER_MAX_SAMPLE_POINTS = 500000
 """散布図サンプリング点数の最大値。"""
-ANALYZER_MIN_GRAPH_EVERY = 1
-"""グラフ更新間引きの最小値。"""
 ANALYZER_MIN_DIFF_THRESHOLD = 0.5
 """変化検出モードの差分しきい値最小値。"""
 ANALYZER_MIN_STABLE_FRAMES = 1
 """変化検出モードの安定フレーム最小値。"""
-ANALYZER_CHANGE_POLL_SEC = 0.08
-"""変化検出のポーリング周期(秒)。"""
-ANALYZER_CHANGE_COOLDOWN_SEC = 0.12
-"""検出後クールダウン時間(秒)。"""
-ANALYZER_CHANGE_DETECT_DIM = 120
-"""変化検出用の縮小解像度（長辺）。"""
 
 # Capture sources
 CAPTURE_SOURCE_WINDOW = "window"
@@ -59,8 +37,6 @@ SCATTER_SHAPE_SQUARE = "square"
 """散布図形状: 四角座標。"""
 SCATTER_SHAPE_TRIANGLE = "triangle"
 """散布図形状: 三角座標。"""
-SCATTER_SHAPES = (SCATTER_SHAPE_SQUARE, SCATTER_SHAPE_TRIANGLE)
-"""散布図形状の許可値一覧。"""
 SCATTER_RENDER_MODE_DOMINANT = "dominant"
 """散布図描画: セル最頻色。"""
 SCATTER_RENDER_MODE_HEATMAP = "heatmap"
@@ -81,15 +57,17 @@ RGB_HIST_MODES = (RGB_HIST_MODE_SIDE_BY_SIDE, RGB_HIST_MODE_OVERLAY)
 # Analysis resolution modes
 ANALYSIS_RESOLUTION_MODE_ORIGINAL = "original"
 ANALYSIS_RESOLUTION_MODE_CUSTOM = "custom"
-ANALYSIS_RESOLUTION_MODES = (
-    ANALYSIS_RESOLUTION_MODE_ORIGINAL,
-    ANALYSIS_RESOLUTION_MODE_CUSTOM,
-)
 
 # Update modes
 UPDATE_MODE_INTERVAL = "interval"
 UPDATE_MODE_CHANGE = "change"
 UPDATE_MODES = (UPDATE_MODE_INTERVAL, UPDATE_MODE_CHANGE)
+
+# Shared hue orientation
+HUE_RED_REFERENCE_DEG = 150.0
+"""色相表示での赤(0deg)の基準角度。黄色(約60deg)が真上になる値。"""
+HUE_DIRECTION_SIGN = -1.0
+"""色相進行方向。`1.0` は反時計回り、`-1.0` は時計回り。"""
 
 # Binary presets
 BINARY_PRESET_AUTO = "auto"
@@ -114,12 +92,6 @@ FOCUS_PEAK_COLORS = (
     FOCUS_PEAK_COLOR_YELLOW,
     FOCUS_PEAK_COLOR_RED,
 )
-FOCUS_PEAK_COLOR_BGR = {
-    FOCUS_PEAK_COLOR_CYAN: (255, 235, 0),
-    FOCUS_PEAK_COLOR_GREEN: (0, 245, 120),
-    FOCUS_PEAK_COLOR_YELLOW: (0, 225, 255),
-    FOCUS_PEAK_COLOR_RED: (60, 60, 255),
-}
 
 # Squint modes
 SQUINT_MODE_BLUR = "blur"
@@ -132,110 +104,10 @@ SQUINT_MODES = (
 )
 
 # Vectorscope
-VECTORSCOPE_SIZE = 256
-"""ベクトルスコープ基準キャンバスサイズ(px)。"""
-VECTORSCOPE_CHROMA_FULL_SCALE = 181.0
-"""彩度100%を表す半径基準値。"""
-VECTORSCOPE_SKIN_LINE_ANGLE_DEG = 123.0
-"""スキントーンライン角度(度)。"""
-VECTORSCOPE_SCOPE_RADIUS_RATIO = 0.46
-"""描画領域に対するスコープ半径比。"""
 VECTORSCOPE_WARN_THRESHOLD_MIN = 40
 """高彩度警告しきい値(%)の最小値。"""
 VECTORSCOPE_WARN_THRESHOLD_MAX = 100
 """高彩度警告しきい値(%)の最大値。"""
-VECTORSCOPE_WARN_COLOR_BGR = (32, 64, 250)
-"""高彩度警告表示色(BGR)。"""
-
-# Color wheel orientation
-# YUV vectorscope基準に合わせる。0度(赤)はおおむね左上方向。
-COLOR_WHEEL_HUE_OFFSET_DEG = 106.0
-
-# Munsell-like 40 hue labels and palette (2.5 steps)
-MUNSELL_HUE_LABELS = (
-    "2.5R",
-    "5R",
-    "7.5R",
-    "10R",
-    "2.5YR",
-    "5YR",
-    "7.5YR",
-    "10YR",
-    "2.5Y",
-    "5Y",
-    "7.5Y",
-    "10Y",
-    "2.5GY",
-    "5GY",
-    "7.5GY",
-    "10GY",
-    "2.5G",
-    "5G",
-    "7.5G",
-    "10G",
-    "2.5BG",
-    "5BG",
-    "7.5BG",
-    "10BG",
-    "2.5B",
-    "5B",
-    "7.5B",
-    "10B",
-    "2.5PB",
-    "5PB",
-    "7.5PB",
-    "10PB",
-    "2.5P",
-    "5P",
-    "7.5P",
-    "10P",
-    "2.5RP",
-    "5RP",
-    "7.5RP",
-    "10RP",
-)
-MUNSELL_COLORS_RGB = (
-    (218, 43, 97),
-    (227, 32, 55),
-    (228, 31, 32),
-    (233, 108, 28),
-    (237, 148, 20),
-    (242, 172, 0),
-    (246, 194, 0),
-    (247, 200, 0),
-    (241, 211, 2),
-    (240, 220, 0),
-    (241, 224, 0),
-    (222, 217, 1),
-    (200, 214, 35),
-    (167, 198, 56),
-    (112, 180, 62),
-    (43, 169, 58),
-    (0, 157, 81),
-    (0, 161, 103),
-    (0, 161, 125),
-    (0, 156, 142),
-    (0, 152, 156),
-    (0, 148, 163),
-    (2, 137, 159),
-    (2, 135, 165),
-    (0, 122, 163),
-    (0, 110, 174),
-    (1, 94, 169),
-    (0, 76, 157),
-    (7, 62, 149),
-    (35, 39, 137),
-    (54, 39, 138),
-    (72, 39, 130),
-    (64, 40, 131),
-    (81, 40, 132),
-    (116, 39, 137),
-    (151, 27, 134),
-    (173, 37, 136),
-    (195, 38, 133),
-    (202, 38, 133),
-    (222, 35, 105),
-)
 
 # Composition guides
 COMPOSITION_GUIDE_NONE = "none"
@@ -270,8 +142,6 @@ DEFAULT_SCATTER_HUE_FILTER_ENABLED = False
 """色相フィルター有効状態の既定値。"""
 DEFAULT_SCATTER_HUE_CENTER = 0
 """色相フィルター中心値の既定値。"""
-SCATTER_HUE_FILTER_HALF_WIDTH = 10
-"""色相フィルター半値幅(度相当)。"""
 DEFAULT_ANALYSIS_RESOLUTION_MODE = ANALYSIS_RESOLUTION_MODE_ORIGINAL
 """解析解像度モード既定値。"""
 DEFAULT_WHEEL_MODE = WHEEL_MODE_HSV180
@@ -306,24 +176,8 @@ DEFAULT_VECTORSCOPE_SHOW_SKIN_LINE = True
 """ベクトルスコープ肌色線の既定表示状態。"""
 DEFAULT_VECTORSCOPE_WARN_THRESHOLD = 90
 """高彩度警告しきい値(%)既定値。"""
-DEFAULT_PREVIEW_WINDOW = False
-"""プレビュー別ウィンドウ表示の既定値。"""
 DEFAULT_ALWAYS_ON_TOP = False
 """常に最前面表示の既定値。"""
-
-# UI colors for histograms
-H_COLOR = QColor(220, 90, 90)
-"""Hヒストグラム描画色。"""
-S_COLOR = QColor(90, 170, 90)
-"""Sヒストグラム描画色。"""
-V_COLOR = QColor(80, 140, 240)
-"""Vヒストグラム描画色。"""
-R_COLOR = QColor(228, 84, 84)
-"""Rヒストグラム描画色。"""
-G_COLOR = QColor(88, 176, 96)
-"""Gヒストグラム描画色。"""
-B_COLOR = QColor(88, 126, 236)
-"""Bヒストグラム描画色。"""
 
 # Change-trigger defaults
 DEFAULT_MODE = UPDATE_MODE_INTERVAL
@@ -331,29 +185,12 @@ DEFAULT_DIFF_THRESHOLD = 4.0
 DEFAULT_STABLE_FRAMES = 3
 
 # UI behavior defaults
-WINDOW_LIST_MAX_ITEMS = 500
-"""ウィンドウ一覧コンボへ表示する最大件数。"""
 VIEW_MIN_SIZE = 48
 """ドック/ビューの共通最小サイズ(px)。"""
-SETTINGS_SAVE_DEBOUNCE_MS = 220
-"""設定保存のデバウンス時間(ms)。"""
-DOCK_REBALANCE_DEBOUNCE_MS = 36
-"""ドック再バランスのデバウンス時間(ms)。"""
-LAYOUT_ENGINE_VERSION = 2
-"""レイアウト保存仕様の内部バージョン。"""
 
 # Settings page indices
 SETTINGS_PAGE_CAPTURE = 0
-SETTINGS_PAGE_UPDATE = 1
-SETTINGS_PAGE_SCATTER = 2
-SETTINGS_PAGE_WHEEL = 3
-SETTINGS_PAGE_IMAGE = 4
-SETTINGS_PAGE_SALIENCY = 5
-SETTINGS_PAGE_FOCUS = 6
-SETTINGS_PAGE_SQUINT = 7
-SETTINGS_PAGE_VECTORSCOPE = 8
 SETTINGS_PAGE_LAYOUT = 9
-SETTINGS_PAGE_RGB_HIST = 10
 
 # Shared UI ranges
 WHEEL_SAT_THRESHOLD_MIN = 0
@@ -376,8 +213,6 @@ FOCUS_PEAK_THICKNESS_MIN = 0.1
 """フォーカスピーキング線幅の最小値。"""
 FOCUS_PEAK_THICKNESS_MAX = 6.0
 """フォーカスピーキング線幅の最大値。"""
-FOCUS_PEAK_THICKNESS_STEP = 0.1
-"""フォーカスピーキング線幅の刻み値。"""
 SQUINT_SCALE_PERCENT_MIN = 2
 """スクイント縮小率(%)の最小値。"""
 SQUINT_SCALE_PERCENT_MAX = 100
@@ -386,8 +221,6 @@ SQUINT_BLUR_SIGMA_MIN = 0.0
 """スクイントぼかしσの最小値。"""
 SQUINT_BLUR_SIGMA_MAX = 30.0
 """スクイントぼかしσの最大値。"""
-SQUINT_BLUR_SIGMA_STEP = 0.1
-"""スクイントぼかしσの刻み値。"""
 
 # Top-color display
 TOP_COLORS_TITLE = "色割合TOP5"

@@ -23,6 +23,8 @@ class BaseImageLabelView(QLabel):
         self.setStyleSheet(style)
         self._empty_text = empty_text
         self._last_bgr: Optional[np.ndarray] = None
+        self._last_resize_render_size: Optional[tuple[int, int]] = None
+        self._resize_renderer: Optional[Callable[[np.ndarray], None]] = None
 
     def minimumSizeHint(self):
         return QSize(C.VIEW_MIN_SIZE, 0)
@@ -36,10 +38,31 @@ class BaseImageLabelView(QLabel):
     def _set_last_bgr(self, bgr: Optional[np.ndarray]) -> bool:
         self._last_bgr = bgr
         if bgr is None or bgr.size == 0:
+            self._last_resize_render_size = None
             self._show_empty()
             return False
         return True
 
+    def set_resize_renderer(self, renderer: Optional[Callable[[np.ndarray], None]]) -> None:
+        """サイズ変更時に再描画するレンダラを設定する。"""
+        self._resize_renderer = renderer
+
     def _rerender_on_resize(self, renderer: Callable[[np.ndarray], None]) -> None:
-        if self._last_bgr is not None:
-            renderer(self._last_bgr)
+        if self._last_bgr is None:
+            return
+        if not self.isVisible() or self.isHidden():
+            return
+        w, h = self.width(), self.height()
+        if w <= 1 or h <= 1:
+            return
+        current_size = (int(w), int(h))
+        if current_size == self._last_resize_render_size:
+            return
+        renderer(self._last_bgr)
+        self._last_resize_render_size = current_size
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if self._resize_renderer is None:
+            return
+        self._rerender_on_resize(self._resize_renderer)

@@ -7,6 +7,7 @@ from PySide6.QtCore import QLockFile, QStandardPaths
 from PySide6.QtWidgets import QApplication
 
 from .main_window import MainWindow
+from .util import constants as C
 
 
 def _single_instance_lock_path() -> str:
@@ -29,8 +30,8 @@ def _single_instance_lock_path() -> str:
 
 def main() -> None:
     app = QApplication(sys.argv)
-    app.setApplicationName("ChromaMonitor")
-    app.setOrganizationName("ChromaMonitor")
+    app.setApplicationName(C.APP_NAME)
+    app.setOrganizationName(C.APP_NAME)
 
     lock = QLockFile(_single_instance_lock_path())
     if not lock.tryLock(0):

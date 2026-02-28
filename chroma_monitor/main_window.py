@@ -1,18 +1,14 @@
-from PySide6.QtCore import QEvent, QRect, Qt, QTimer
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtNetwork import QNetworkAccessManager
 from PySide6.QtWidgets import (
-    QAbstractSpinBox,
     QCheckBox,
     QComboBox,
     QCompleter,
-    QDockWidget,
     QDoubleSpinBox,
     QLabel,
-    QLineEdit,
     QMainWindow,
     QMenuBar,
     QPushButton,
-    QSpinBox,
 )
 
 from .analyzer import AnalyzerWorker
@@ -27,98 +23,14 @@ from .ui.main_window import window_layout as mw_windowing
 from .ui.settings_dialog import hide_settings_window as hide_settings_dialog_window
 from .ui.settings_dialog import show_settings_window as show_settings_dialog_window
 from .ui.view_docks import setup_view_docks
+from .ui.input_widgets import (
+    SelectAllLineEdit,
+    SelectAllSpinBox,
+    add_checkable_action,
+    configure_numeric_input,
+)
 from .util import constants as C
 from .views import PreviewWindow
-
-
-class SelectAllLineEdit(QLineEdit):
-    """フォーカス時は全選択、ダブルクリック時は位置編集を優先する入力欄。"""
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._select_all_on_release = False
-
-    def focusInEvent(self, event):
-        super().focusInEvent(event)
-        if event.reason() != Qt.MouseFocusReason:
-            self.selectAll()
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and not self.hasFocus():
-            self._select_all_on_release = True
-        super().mousePressEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        super().mouseReleaseEvent(event)
-        if self._select_all_on_release:
-            self.selectAll()
-            self._select_all_on_release = False
-
-    def mouseDoubleClickEvent(self, event):
-        self._select_all_on_release = False
-        super().mouseDoubleClickEvent(event)
-        point = event.position().toPoint() if hasattr(event, "position") else event.pos()
-        self.setCursorPosition(self.cursorPositionAt(point))
-        self.deselect()
-
-
-class SelectAllSpinBox(QSpinBox):
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        self._select_value_on_release = False
-
-    def _select_value_text(self):
-        editor = self.lineEdit()
-        if editor is None:
-            return
-        start = len(self.prefix())
-        length = len(self.cleanText())
-        if length <= 0:
-            editor.selectAll()
-            return
-        editor.setSelection(start, length)
-
-    def focusInEvent(self, event):
-        super().focusInEvent(event)
-        if event.reason() != Qt.MouseFocusReason:
-            QTimer.singleShot(0, self._select_value_text)
-
-    def mousePressEvent(self, event):
-        if event.button() == Qt.LeftButton and not self.hasFocus():
-            self._select_value_on_release = True
-        super().mousePressEvent(event)
-
-    def mouseReleaseEvent(self, event):
-        super().mouseReleaseEvent(event)
-        if self._select_value_on_release:
-            self._select_value_on_release = False
-            self._select_value_text()
-
-    def mouseDoubleClickEvent(self, event):
-        self._select_value_on_release = False
-        super().mouseDoubleClickEvent(event)
-
-
-def _configure_numeric_input(
-    widget: QAbstractSpinBox,
-    *,
-    min_width: int = 110,
-    min_height: int = 28,
-) -> None:
-    # Spin系入力の共通見た目を揃える。
-    widget.setButtonSymbols(QAbstractSpinBox.UpDownArrows)
-    widget.setMinimumWidth(int(min_width))
-    widget.setMinimumHeight(int(min_height))
-
-
-def _add_checkable_action(menu, text: str, checked: bool, toggled_cb):
-    # メニューのチェック可能アクション生成を共通化する。
-    action = menu.addAction(text)
-    action.setCheckable(True)
-    action.setChecked(bool(checked))
-    action.toggled.connect(toggled_cb)
-    return action
 
 
 _WINDOW_DOCK_MENU_ITEMS = (
@@ -135,6 +47,11 @@ _WINDOW_DOCK_MENU_ITEMS = (
     ("act_squint", "スクイント表示", True, "dock_squint"),
     ("act_saliency", "サリエンシーマップ", True, "dock_saliency"),
 )
+_DEFAULT_PREVIEW_WINDOW = False
+_SETTINGS_SAVE_DEBOUNCE_MS = 220
+_DOCK_REBALANCE_DEBOUNCE_MS = 36
+_FOCUS_PEAK_THICKNESS_STEP = 0.1
+_SQUINT_BLUR_SIGMA_STEP = 0.1
 
 
 class MainWindow(QMainWindow):
@@ -158,7 +75,7 @@ class MainWindow(QMainWindow):
         self._initialize_runtime_defaults()
 
     def _init_window_runtime_state(self) -> None:
-        self.setWindowTitle("ChromaMonitor")
+        self.setWindowTitle(C.APP_NAME)
         self.resize(1120, 700)
         self._did_initial_screen_fit = False
         self._layout_autosave_enabled = False
@@ -174,19 +91,19 @@ class MainWindow(QMainWindow):
         self._fit_window_timer.timeout.connect(self._fit_window_to_desktop)
         self._dock_rebalance_timer = QTimer(self)
         self._dock_rebalance_timer.setSingleShot(True)
-        self._dock_rebalance_timer.setInterval(C.DOCK_REBALANCE_DEBOUNCE_MS)
+        self._dock_rebalance_timer.setInterval(_DOCK_REBALANCE_DEBOUNCE_MS)
         self._dock_rebalance_timer.timeout.connect(self._rebalance_dock_layout)
         self._dock_rebalance_running = False
         self._dock_geometry_snapshot = {}
         self._dock_rebalance_last_main_size = self.size()
         self._settings_save_timer = QTimer(self)
         self._settings_save_timer.setSingleShot(True)
-        self._settings_save_timer.setInterval(C.SETTINGS_SAVE_DEBOUNCE_MS)
+        self._settings_save_timer.setInterval(_SETTINGS_SAVE_DEBOUNCE_MS)
         self._settings_save_timer.timeout.connect(self._flush_settings_save)
         self._settings_save_pending = False
         self._settings_load_in_progress = False
         self._startup_finished = False
-        self._release_page_url = C.RELEASES_PAGE_URL
+        self._release_page_url = C.APP_RELEASES_URL
         self._update_check_started = False
         self._update_reply = None
         self._update_network = QNetworkAccessManager(self)
@@ -225,13 +142,13 @@ class MainWindow(QMainWindow):
         self.spin_interval.setRange(0.10, 10.00)
         self.spin_interval.setSingleStep(0.10)
         self.spin_interval.setValue(C.DEFAULT_INTERVAL_SEC)
-        _configure_numeric_input(self.spin_interval)
+        configure_numeric_input(self.spin_interval)
 
         self.spin_points = SelectAllSpinBox()
         self.spin_points.setRange(C.ANALYZER_MIN_SAMPLE_POINTS, C.ANALYZER_MAX_SAMPLE_POINTS)
         self.spin_points.setSingleStep(500)
         self.spin_points.setValue(C.DEFAULT_SAMPLE_POINTS)
-        _configure_numeric_input(self.spin_points)
+        configure_numeric_input(self.spin_points)
         self.combo_analysis_resolution_mode = QComboBox()
         self.combo_analysis_resolution_mode.addItem(
             "オリジナルサイズ",
@@ -246,7 +163,7 @@ class MainWindow(QMainWindow):
         self.edit_analysis_max_dim.setSingleStep(10)
         self.edit_analysis_max_dim.setValue(C.ANALYZER_MAX_DIM)
         self.edit_analysis_max_dim.setSuffix(" px")
-        _configure_numeric_input(self.edit_analysis_max_dim)
+        configure_numeric_input(self.edit_analysis_max_dim)
 
         self.combo_capture_source = QComboBox()
         self.combo_capture_source.addItem("ウィンドウを選んで取得", C.CAPTURE_SOURCE_WINDOW)
@@ -275,7 +192,7 @@ class MainWindow(QMainWindow):
         self.spin_wheel_sat_threshold.setValue(C.DEFAULT_WHEEL_SAT_THRESHOLD)
         self.spin_wheel_sat_threshold.setSingleStep(1)
         self.spin_wheel_sat_threshold.setSuffix(" / 255")
-        _configure_numeric_input(self.spin_wheel_sat_threshold)
+        configure_numeric_input(self.spin_wheel_sat_threshold)
 
         self.combo_mode = QComboBox()
         self.combo_mode.addItem("一定間隔で更新", C.UPDATE_MODE_INTERVAL)
@@ -285,16 +202,16 @@ class MainWindow(QMainWindow):
         self.spin_diff.setDecimals(1)
         self.spin_diff.setSingleStep(C.ANALYZER_MIN_DIFF_THRESHOLD)
         self.spin_diff.setValue(C.DEFAULT_DIFF_THRESHOLD)
-        _configure_numeric_input(self.spin_diff)
+        configure_numeric_input(self.spin_diff)
         self.spin_stable = SelectAllSpinBox()
         self.spin_stable.setRange(C.ANALYZER_MIN_STABLE_FRAMES, 20)
         self.spin_stable.setValue(C.DEFAULT_STABLE_FRAMES)
-        _configure_numeric_input(self.spin_stable)
+        configure_numeric_input(self.spin_stable)
         self.spin_edge_sensitivity = SelectAllSpinBox()
         self.spin_edge_sensitivity.setRange(C.EDGE_SENSITIVITY_MIN, C.EDGE_SENSITIVITY_MAX)
         self.spin_edge_sensitivity.setValue(C.DEFAULT_EDGE_SENSITIVITY)
         self.spin_edge_sensitivity.setSuffix(" / 100")
-        _configure_numeric_input(self.spin_edge_sensitivity, min_width=130)
+        configure_numeric_input(self.spin_edge_sensitivity, min_width=130)
         self.combo_binary_preset = QComboBox()
         self.combo_binary_preset.addItem("自動", C.BINARY_PRESET_AUTO)
         self.combo_binary_preset.addItem("白を増やす", C.BINARY_PRESET_MORE_WHITE)
@@ -307,7 +224,7 @@ class MainWindow(QMainWindow):
         self.spin_saliency_alpha.setRange(C.SALIENCY_ALPHA_MIN, C.SALIENCY_ALPHA_MAX)
         self.spin_saliency_alpha.setValue(C.DEFAULT_SALIENCY_OVERLAY_ALPHA)
         self.spin_saliency_alpha.setSuffix(" %")
-        _configure_numeric_input(self.spin_saliency_alpha)
+        configure_numeric_input(self.spin_saliency_alpha)
         self.combo_composition_guide = QComboBox()
         self.combo_composition_guide.addItem("なし", C.COMPOSITION_GUIDE_NONE)
         self.combo_composition_guide.addItem("三分割", C.COMPOSITION_GUIDE_THIRDS)
@@ -319,7 +236,7 @@ class MainWindow(QMainWindow):
         )
         self.spin_focus_peak_sensitivity.setValue(C.DEFAULT_FOCUS_PEAK_SENSITIVITY)
         self.spin_focus_peak_sensitivity.setSuffix(" / 100")
-        _configure_numeric_input(self.spin_focus_peak_sensitivity, min_width=130)
+        configure_numeric_input(self.spin_focus_peak_sensitivity, min_width=130)
         self.combo_focus_peak_color = QComboBox()
         self.combo_focus_peak_color.addItem("シアン", C.FOCUS_PEAK_COLOR_CYAN)
         self.combo_focus_peak_color.addItem("グリーン", C.FOCUS_PEAK_COLOR_GREEN)
@@ -331,9 +248,9 @@ class MainWindow(QMainWindow):
         )
         self.spin_focus_peak_thickness.setValue(C.DEFAULT_FOCUS_PEAK_THICKNESS)
         self.spin_focus_peak_thickness.setDecimals(1)
-        self.spin_focus_peak_thickness.setSingleStep(C.FOCUS_PEAK_THICKNESS_STEP)
+        self.spin_focus_peak_thickness.setSingleStep(_FOCUS_PEAK_THICKNESS_STEP)
         self.spin_focus_peak_thickness.setSuffix(" px")
-        _configure_numeric_input(self.spin_focus_peak_thickness)
+        configure_numeric_input(self.spin_focus_peak_thickness)
         self.combo_squint_mode = QComboBox()
         self.combo_squint_mode.addItem("ぼかしのみ", C.SQUINT_MODE_BLUR)
         self.combo_squint_mode.addItem("縮小 → 拡大", C.SQUINT_MODE_SCALE)
@@ -342,14 +259,14 @@ class MainWindow(QMainWindow):
         self.spin_squint_scale.setRange(C.SQUINT_SCALE_PERCENT_MIN, C.SQUINT_SCALE_PERCENT_MAX)
         self.spin_squint_scale.setValue(C.DEFAULT_SQUINT_SCALE_PERCENT)
         self.spin_squint_scale.setSuffix(" %")
-        _configure_numeric_input(self.spin_squint_scale)
+        configure_numeric_input(self.spin_squint_scale)
         self.spin_squint_blur = QDoubleSpinBox()
         self.spin_squint_blur.setRange(C.SQUINT_BLUR_SIGMA_MIN, C.SQUINT_BLUR_SIGMA_MAX)
         self.spin_squint_blur.setValue(C.DEFAULT_SQUINT_BLUR_SIGMA)
         self.spin_squint_blur.setDecimals(1)
-        self.spin_squint_blur.setSingleStep(C.SQUINT_BLUR_SIGMA_STEP)
+        self.spin_squint_blur.setSingleStep(_SQUINT_BLUR_SIGMA_STEP)
         self.spin_squint_blur.setSuffix(" px")
-        _configure_numeric_input(self.spin_squint_blur)
+        configure_numeric_input(self.spin_squint_blur)
         self.chk_vectorscope_skin_line = QCheckBox("スキントーンラインを表示")
         self.chk_vectorscope_skin_line.setChecked(C.DEFAULT_VECTORSCOPE_SHOW_SKIN_LINE)
         self.spin_vectorscope_warn_threshold = SelectAllSpinBox()
@@ -359,10 +276,10 @@ class MainWindow(QMainWindow):
         )
         self.spin_vectorscope_warn_threshold.setValue(C.DEFAULT_VECTORSCOPE_WARN_THRESHOLD)
         self.spin_vectorscope_warn_threshold.setSuffix(" %")
-        _configure_numeric_input(self.spin_vectorscope_warn_threshold)
+        configure_numeric_input(self.spin_vectorscope_warn_threshold)
 
         self.chk_preview_window = QCheckBox("領域プレビュー")
-        self.chk_preview_window.setChecked(C.DEFAULT_PREVIEW_WINDOW)
+        self.chk_preview_window.setChecked(_DEFAULT_PREVIEW_WINDOW)
 
         self.edit_preset_name = SelectAllLineEdit()
         self.edit_preset_name.setPlaceholderText("プリセット名")
@@ -384,9 +301,6 @@ class MainWindow(QMainWindow):
         self.lbl_status = QLabel("準備完了")
         self.lbl_status.setStyleSheet("color:#BBBBBB;")
 
-    def _apply_mode_settings_ignoring_args(self, *_args) -> None:
-        self.apply_mode_settings()
-
     def _connect_control_signals(self) -> None:
         self.btn_refresh.clicked.connect(self.refresh_windows)
         self.combo_win.currentIndexChanged.connect(self.on_window_changed)
@@ -406,9 +320,9 @@ class MainWindow(QMainWindow):
         self.combo_wheel_mode.currentIndexChanged.connect(self.apply_wheel_settings)
         self.combo_rgb_hist_mode.currentIndexChanged.connect(self.apply_rgb_hist_settings)
         self.spin_wheel_sat_threshold.valueChanged.connect(self.apply_wheel_settings)
-        self.combo_mode.currentIndexChanged.connect(self._apply_mode_settings_ignoring_args)
-        self.spin_diff.valueChanged.connect(self._apply_mode_settings_ignoring_args)
-        self.spin_stable.valueChanged.connect(self._apply_mode_settings_ignoring_args)
+        self.combo_mode.currentIndexChanged.connect(self.apply_mode_settings)
+        self.spin_diff.valueChanged.connect(self.apply_mode_settings)
+        self.spin_stable.valueChanged.connect(self.apply_mode_settings)
         self.spin_edge_sensitivity.valueChanged.connect(self.apply_edge_settings)
         self.combo_binary_preset.currentIndexChanged.connect(self.apply_binary_settings)
         self.combo_ternary_preset.currentIndexChanged.connect(self.apply_ternary_settings)
@@ -435,7 +349,7 @@ class MainWindow(QMainWindow):
         win_menu = mb.addMenu("ウィンドウ")
 
         def _bind_dock_action(attr_name: str, title: str, default: bool, dock_attr: str):
-            action = _add_checkable_action(
+            action = add_checkable_action(
                 win_menu,
                 title,
                 default,
@@ -447,7 +361,7 @@ class MainWindow(QMainWindow):
             _bind_dock_action(*spec)
 
         menu = mb.addMenu("設定")
-        self.act_always_on_top = _add_checkable_action(
+        self.act_always_on_top = add_checkable_action(
             menu,
             "常に最前面に表示",
             C.DEFAULT_ALWAYS_ON_TOP,
@@ -537,20 +451,11 @@ class MainWindow(QMainWindow):
         # 起動直後のレイアウト収束後に、画面外へのはみ出しを最終補正する。
         QTimer.singleShot(260, self._fit_window_to_desktop)
 
-    def _setup_help_menu(self, menu_bar: QMenuBar) -> None:
-        mw_help.setup_help_menu(self, menu_bar)
-
-    def _start_release_check_once(self) -> None:
-        mw_help.start_release_check_once(self)
-
-    def _check_latest_release(self) -> None:
-        mw_help.check_latest_release(self)
-
-    def _on_release_check_finished(self, reply) -> None:
-        mw_help.on_release_check_finished(self, reply)
-
-    def _open_release_page(self) -> None:
-        mw_help.open_release_page(self)
+    _setup_help_menu = mw_help.setup_help_menu
+    _start_release_check_once = mw_help.start_release_check_once
+    _check_latest_release = mw_help.check_latest_release
+    _on_release_check_finished = mw_help.on_release_check_finished
+    _open_release_page = mw_help.open_release_page
 
     def _request_save_settings(self):
         if self._settings_load_in_progress:
@@ -605,230 +510,83 @@ class MainWindow(QMainWindow):
         self._schedule_layout_autosave()
         self._schedule_window_fit()
 
-    def _fit_window_to_desktop(self):
-        mw_windowing.fit_window_to_desktop(self)
-
-    def _schedule_window_fit(self):
-        mw_windowing.schedule_window_fit(self)
-
-    def _is_always_on_top_enabled(self) -> bool:
-        return mw_windowing.is_always_on_top_enabled(self)
-
-    def _schedule_dock_rebalance(self):
-        mw_windowing.schedule_dock_rebalance(self)
-
-    def _rebalance_dock_layout(self):
-        mw_windowing.rebalance_dock_layout(self)
-
-    def _on_dock_top_level_changed(self, dock: QDockWidget, floating: bool):
-        mw_windowing.on_dock_top_level_changed(self, dock, floating)
-
-    def _update_floating_dock_dockability(self, dock: QDockWidget):
-        mw_windowing.update_floating_dock_dockability(self, dock)
-
-    def _sync_all_floating_dock_dockability(self):
-        mw_windowing.sync_all_floating_dock_dockability(self)
+    _fit_window_to_desktop = mw_windowing.fit_window_to_desktop
+    _schedule_window_fit = mw_windowing.schedule_window_fit
+    _is_always_on_top_enabled = mw_windowing.is_always_on_top_enabled
+    _schedule_dock_rebalance = mw_windowing.schedule_dock_rebalance
+    _rebalance_dock_layout = mw_windowing.rebalance_dock_layout
+    _on_dock_top_level_changed = mw_windowing.on_dock_top_level_changed
+    _update_floating_dock_dockability = mw_windowing.update_floating_dock_dockability
+    _sync_all_floating_dock_dockability = mw_windowing.sync_all_floating_dock_dockability
 
     def _sync_tabbed_dock_title_bars(self, *_):
         mw_windowing.sync_tabbed_dock_title_bars(self)
 
-    def apply_always_on_top(self, checked: bool, save: bool = True):
-        mw_windowing.apply_always_on_top(self, checked, save=save)
-
-    def _present_settings_window(self, center_on_parent: bool = False):
-        mw_windowing.present_settings_window(self, center_on_parent=center_on_parent)
-
-    def _refresh_top_color_bar(self):
-        mw_results.refresh_top_color_bar(self)
-
-    def on_status(self, s: str):
-        mw_runtime.on_status(self, s)
-
-    def _cancel_image_analysis(self):
-        mw_runtime.cancel_image_analysis(self)
-
-    def on_load_image(self):
-        mw_runtime.on_load_image(self)
-
-    def on_image_analysis_progress(self, percent: int, text: str):
-        mw_runtime.on_image_analysis_progress(self, percent, text)
-
-    def on_image_analysis_finished(self, res: dict):
-        mw_runtime.on_image_analysis_finished(self, res)
-
-    def on_image_analysis_failed(self, message: str):
-        mw_runtime.on_image_analysis_failed(self, message)
-
-    def on_image_analysis_canceled(self):
-        mw_runtime.on_image_analysis_canceled(self)
-
-    def on_start(self):
-        mw_runtime.on_start(self)
-
-    def on_stop(self):
-        mw_runtime.on_stop(self)
-
-    def closeEvent(self, event):
-        mw_runtime.close_event(self, event)
-
-    def refresh_windows(self):
-        mw_runtime.refresh_windows(self)
-
-    def _selected_capture_source(self) -> str:
-        return mw_runtime.selected_capture_source(self)
-
-    def _sync_capture_source_ui(self):
-        mw_runtime.sync_capture_source_ui(self)
-
-    def apply_capture_source(self, *_):
-        mw_runtime.apply_capture_source(self)
-
-    def _apply_capture_source(self, save: bool):
-        mw_runtime._apply_capture_source(self, save=save)
-
-    def on_window_changed(self, idx: int):
-        mw_runtime.on_window_changed(self, idx)
-
-    def on_window_text_committed(self):
-        mw_runtime.on_window_text_committed(self)
-
-    def _selected_wheel_sat_threshold(self) -> int:
-        return mw_settings.selected_wheel_sat_threshold(self)
-
-    def _apply_ui_style(self):
-        mw_windowing.apply_ui_style(self)
-
-    def _sync_mode_dependent_rows(self):
-        mw_settings.sync_mode_dependent_rows(self)
-
-    def _sync_squint_mode_rows(self):
-        mw_settings.sync_squint_mode_rows(self)
-
-    def _sync_analysis_resolution_rows(self):
-        mw_settings.sync_analysis_resolution_rows(self)
-
-    def _sync_worker_view_flags(self):
-        mw_runtime.sync_worker_view_flags(self)
-
-    def apply_sample_points_settings(self, *_):
-        mw_settings.apply_sample_points_settings(self)
-
-    def _sync_scatter_filter_controls(self):
-        mw_settings.sync_scatter_filter_controls(self)
-
-    def apply_scatter_settings(self, *_):
-        mw_settings.apply_scatter_settings(self)
-
-    def apply_analysis_resolution_settings(self, *_args, save: bool = True):
-        mw_settings.apply_analysis_resolution_settings(self, save=save)
-
-    def apply_wheel_settings(self, *_):
-        mw_settings.apply_wheel_settings(self)
-
-    def apply_rgb_hist_settings(self, *_):
-        mw_settings.apply_rgb_hist_settings(self)
-
-    def apply_edge_settings(self, *_):
-        mw_settings.apply_edge_settings(self)
-
-    def apply_binary_settings(self, *_):
-        mw_settings.apply_binary_settings(self)
-
-    def apply_ternary_settings(self, *_):
-        mw_settings.apply_ternary_settings(self)
-
-    def apply_saliency_settings(self, *_):
-        mw_settings.apply_saliency_settings(self)
-
-    def apply_composition_guide_settings(self, *_):
-        mw_settings.apply_composition_guide_settings(self)
-
-    def apply_focus_peaking_settings(self, *_):
-        mw_settings.apply_focus_peaking_settings(self)
-
-    def apply_squint_settings(self, *_):
-        mw_settings.apply_squint_settings(self)
-
-    def _update_vectorscope_warning_label(self):
-        mw_settings.update_vectorscope_warning_label(self)
-
-    def apply_vectorscope_settings(self, *_):
-        mw_settings.apply_vectorscope_settings(self)
-
-    def _update_preview_snapshot(self):
-        mw_runtime.update_preview_snapshot(self)
-
-    def on_preview_toggled(self, checked: bool):
-        mw_runtime.on_preview_toggled(self, checked)
-
-    def on_preview_closed(self):
-        mw_runtime.on_preview_closed(self)
-
-    def apply_mode_settings(self, save: bool = True):
-        mw_settings.apply_mode_settings(self, save=save)
-
-    def load_settings(self):
-        mw_settings.load_settings(self)
-
-    def save_settings(self, silent: bool = True):
-        mw_settings.save_settings(self, silent=silent)
-
-    def sync_window_menu_checks(self, *_):
-        mw_windowing.sync_window_menu_checks(self)
-
-    def _apply_default_view_layout(self):
-        mw_layout_presets.apply_default_view_layout(self)
-
-    def save_current_layout_to_config(self, silent: bool = False):
-        mw_layout_presets.save_current_layout_to_config(self, silent=silent)
-
-    def _schedule_layout_autosave(self):
-        mw_layout_presets.schedule_layout_autosave(self)
-
-    def apply_layout_from_config(self, cfg: dict):
-        mw_layout_presets.apply_layout_from_config(self, cfg)
-
-    def refresh_layout_preset_views(self):
-        mw_layout_presets.refresh_layout_preset_views(self)
-
-    def apply_layout_preset(self, name: str):
-        mw_layout_presets.apply_layout_preset(self, name)
-
-    def load_selected_layout_preset(self):
-        mw_layout_presets.load_selected_layout_preset(self)
-
-    def save_layout_preset(self):
-        mw_layout_presets.save_layout_preset(self)
-
-    def delete_selected_layout_preset(self):
-        mw_layout_presets.delete_selected_layout_preset(self)
-
-    def toggle_dock(self, dock: QDockWidget, visible: bool):
-        mw_windowing.toggle_dock(self, dock, visible)
-
-    def update_placeholder(self):
-        mw_windowing.update_placeholder(self)
-
-    def show_settings_window(self, page_index: int = 0):
-        show_settings_dialog_window(self, page_index=page_index)
-
-    def hide_settings_window(self):
-        hide_settings_dialog_window(self)
-
-    def _close_roi_selectors(self):
-        mw_roi.close_roi_selectors(self)
-
-    def pick_roi_on_screen(self):
-        mw_roi.pick_roi_on_screen(self)
-
-    def on_roi_screen_selected(self, r: QRect):
-        mw_roi.on_roi_screen_selected(self, r)
-
-    def pick_roi_in_window(self):
-        mw_roi.pick_roi_in_window(self)
-
-    def on_roi_window_selected(self, hwnd: int, wrect: QRect, roi_abs_logical: QRect):
-        mw_roi.on_roi_window_selected(self, hwnd, wrect, roi_abs_logical)
-
-    def on_result(self, res: dict):
-        mw_results.on_result(self, res)
+    apply_always_on_top = mw_windowing.apply_always_on_top
+    _present_settings_window = mw_windowing.present_settings_window
+    _refresh_top_color_bar = mw_results.refresh_top_color_bar
+    _restore_dock_from_snapshot = mw_results.restore_dock_from_snapshot
+    on_status = mw_runtime.on_status
+    _cancel_image_analysis = mw_runtime.cancel_image_analysis
+    on_load_image = mw_runtime.on_load_image
+    on_image_analysis_progress = mw_runtime.on_image_analysis_progress
+    on_image_analysis_finished = mw_runtime.on_image_analysis_finished
+    on_image_analysis_failed = mw_runtime.on_image_analysis_failed
+    on_image_analysis_canceled = mw_runtime.on_image_analysis_canceled
+    on_start = mw_runtime.on_start
+    on_stop = mw_runtime.on_stop
+    closeEvent = mw_runtime.close_event
+    refresh_windows = mw_runtime.refresh_windows
+    _selected_capture_source = mw_runtime.selected_capture_source
+    _sync_capture_source_ui = mw_runtime.sync_capture_source_ui
+    apply_capture_source = mw_runtime.apply_capture_source
+    _apply_capture_source = mw_runtime._apply_capture_source
+    on_window_changed = mw_runtime.on_window_changed
+    on_window_text_committed = mw_runtime.on_window_text_committed
+    _selected_wheel_sat_threshold = mw_settings.selected_wheel_sat_threshold
+    _apply_ui_style = mw_windowing.apply_ui_style
+    _sync_mode_dependent_rows = mw_settings.sync_mode_dependent_rows
+    _sync_squint_mode_rows = mw_settings.sync_squint_mode_rows
+    _sync_analysis_resolution_rows = mw_settings.sync_analysis_resolution_rows
+    _sync_worker_view_flags = mw_runtime.sync_worker_view_flags
+    apply_sample_points_settings = mw_settings.apply_sample_points_settings
+    _sync_scatter_filter_controls = mw_settings.sync_scatter_filter_controls
+    apply_scatter_settings = mw_settings.apply_scatter_settings
+    apply_analysis_resolution_settings = mw_settings.apply_analysis_resolution_settings
+    apply_wheel_settings = mw_settings.apply_wheel_settings
+    apply_rgb_hist_settings = mw_settings.apply_rgb_hist_settings
+    apply_edge_settings = mw_settings.apply_edge_settings
+    apply_binary_settings = mw_settings.apply_binary_settings
+    apply_ternary_settings = mw_settings.apply_ternary_settings
+    apply_saliency_settings = mw_settings.apply_saliency_settings
+    apply_composition_guide_settings = mw_settings.apply_composition_guide_settings
+    apply_focus_peaking_settings = mw_settings.apply_focus_peaking_settings
+    apply_squint_settings = mw_settings.apply_squint_settings
+    _update_vectorscope_warning_label = mw_settings.update_vectorscope_warning_label
+    apply_vectorscope_settings = mw_settings.apply_vectorscope_settings
+    _update_preview_snapshot = mw_runtime.update_preview_snapshot
+    on_preview_toggled = mw_runtime.on_preview_toggled
+    on_preview_closed = mw_runtime.on_preview_closed
+    apply_mode_settings = mw_settings.apply_mode_settings
+    load_settings = mw_settings.load_settings
+    save_settings = mw_settings.save_settings
+    sync_window_menu_checks = mw_windowing.sync_window_menu_checks
+    _apply_default_view_layout = mw_layout_presets.apply_default_view_layout
+    save_current_layout_to_config = mw_layout_presets.save_current_layout_to_config
+    _schedule_layout_autosave = mw_layout_presets.schedule_layout_autosave
+    apply_layout_from_config = mw_layout_presets.apply_layout_from_config
+    refresh_layout_preset_views = mw_layout_presets.refresh_layout_preset_views
+    apply_layout_preset = mw_layout_presets.apply_layout_preset
+    load_selected_layout_preset = mw_layout_presets.load_selected_layout_preset
+    save_layout_preset = mw_layout_presets.save_layout_preset
+    delete_selected_layout_preset = mw_layout_presets.delete_selected_layout_preset
+    toggle_dock = mw_windowing.toggle_dock
+    update_placeholder = mw_windowing.update_placeholder
+    show_settings_window = show_settings_dialog_window
+    hide_settings_window = hide_settings_dialog_window
+    _close_roi_selectors = mw_roi.close_roi_selectors
+    pick_roi_on_screen = mw_roi.pick_roi_on_screen
+    on_roi_screen_selected = mw_roi.on_roi_screen_selected
+    pick_roi_in_window = mw_roi.pick_roi_in_window
+    on_roi_window_selected = mw_roi.on_roi_window_selected
+    on_result = mw_results.on_result

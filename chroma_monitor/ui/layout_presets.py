@@ -8,13 +8,15 @@ from ..util.config import load_config, save_config
 from ..util.functions import blocked_signals, safe_int
 from ..util.layout_state import apply_layout_state, capture_layout_state
 
+_LAYOUT_ENGINE_VERSION = 2
+
 
 def _layout_engine_version(cfg: dict) -> int:
     return safe_int(cfg.get(C.CFG_LAYOUT_ENGINE_VERSION, 0), 0)
 
 
 def _stamp_layout_engine_version(cfg: dict) -> None:
-    cfg[C.CFG_LAYOUT_ENGINE_VERSION] = int(C.LAYOUT_ENGINE_VERSION)
+    cfg[C.CFG_LAYOUT_ENGINE_VERSION] = int(_LAYOUT_ENGINE_VERSION)
 
 
 def _after_layout_apply(main_window, *, schedule_rebalance: bool = True) -> None:
@@ -97,7 +99,7 @@ def apply_default_view_layout(main_window) -> None:
 
 
 def save_current_layout_to_config(main_window, silent: bool = False) -> None:
-    # 現在のドック配置を CFG_LAYOUT_CURRENT へ保存する。
+    # 現在のドック配置を layout_current へ保存する。
     cfg = load_config()
     _stamp_layout_engine_version(cfg)
     cfg[C.CFG_LAYOUT_CURRENT] = capture_layout_state(main_window, main_window._dock_map)
@@ -118,7 +120,7 @@ def schedule_layout_autosave(main_window) -> None:
 
 def apply_layout_from_config(main_window, cfg: dict) -> None:
     # レイアウト実装更新時は旧保存状態を一度リセットして既定へ戻す。
-    if _layout_engine_version(cfg) != C.LAYOUT_ENGINE_VERSION:
+    if _layout_engine_version(cfg) != _LAYOUT_ENGINE_VERSION:
         main_window._apply_default_view_layout()
         saved = dict(cfg)
         _stamp_layout_engine_version(saved)
@@ -200,7 +202,7 @@ def save_layout_preset(main_window) -> None:
         return
 
     cfg = load_config()
-    presets = cfg.get(C.CFG_LAYOUT_PRESETS, {})
+    presets = cfg.get(_CFG_LAYOUT_PRESETS, {})
     if not isinstance(presets, dict):
         presets = {}
     presets[name] = capture_layout_state(main_window, main_window._dock_map)
@@ -226,7 +228,7 @@ def delete_selected_layout_preset(main_window) -> None:
         return
     if name in presets:
         del presets[name]
-        cfg[C.CFG_LAYOUT_PRESETS] = presets
-        save_config(cfg)
-        main_window.refresh_layout_preset_views()
-        main_window.on_status(f"プリセット削除: {name}")
+    cfg[C.CFG_LAYOUT_PRESETS] = presets
+    save_config(cfg)
+    main_window.refresh_layout_preset_views()
+    main_window.on_status(f"プリセット削除: {name}")

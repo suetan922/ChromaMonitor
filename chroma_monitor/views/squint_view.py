@@ -21,6 +21,7 @@ class SquintView(BaseImageLabelView):
         self._mode = C.DEFAULT_SQUINT_MODE
         self._scale_percent = C.DEFAULT_SQUINT_SCALE_PERCENT
         self._blur_sigma = C.DEFAULT_SQUINT_BLUR_SIGMA
+        self.set_resize_renderer(self.update_squint)
 
     def set_mode(self, mode: str):
         self._mode = safe_choice(mode, C.SQUINT_MODES, C.DEFAULT_SQUINT_MODE)
@@ -76,7 +77,3 @@ class SquintView(BaseImageLabelView):
 
         pm = bgr_to_qpixmap(view, max_w=self.width(), max_h=self.height())
         self.setPixmap(pm)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._rerender_on_resize(self.update_squint)

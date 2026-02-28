@@ -66,9 +66,9 @@ def _compute_hsv_histograms(
     v: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     # Hヒストグラムは従来どおり色相未定義(S=0)を除外する。
-    h_hist = np.bincount(h[s > 0].reshape(-1), minlength=180)[:180].astype(np.int64)
-    s_hist = np.bincount(s.reshape(-1), minlength=256)[:256].astype(np.int64)
-    v_hist = np.bincount(v.reshape(-1), minlength=256)[:256].astype(np.int64)
+    h_hist = np.bincount(h[s > 0].ravel(), minlength=180)[:180].astype(np.int64)
+    s_hist = np.bincount(s.ravel(), minlength=256)[:256].astype(np.int64)
+    v_hist = np.bincount(v.ravel(), minlength=256)[:256].astype(np.int64)
     return h_hist, s_hist, v_hist
 
 
@@ -101,18 +101,19 @@ def _compute_top_colors(
     if h_wheel.size == 0:
         return top_colors
 
-    # Full-frame cvtColorを避け、必要画素のみRGB順で参照して負荷を下げる
-    rgb_masked = bgr[wheel_mask][:, ::-1]
+    # Full-frame cvtColorを避け、必要画素のみ参照して負荷を下げる。
+    # ここでは BGR のまま集計し、最後に (R,G,B) へ組み替える。
+    bgr_masked = bgr[wheel_mask]
     seg_idx = (h_wheel // _TOP_COLOR_SEGMENT_SIZE).astype(np.int32)
     seg_counts = np.bincount(seg_idx, minlength=_TOP_COLOR_SEGMENT_COUNT)[:_TOP_COLOR_SEGMENT_COUNT]
     # セグメントごとのRGB総和を一括集計して、ループ内のマスク生成を避ける。
-    sum_r = np.bincount(seg_idx, weights=rgb_masked[:, 0], minlength=_TOP_COLOR_SEGMENT_COUNT)[
+    sum_b = np.bincount(seg_idx, weights=bgr_masked[:, 0], minlength=_TOP_COLOR_SEGMENT_COUNT)[
         :_TOP_COLOR_SEGMENT_COUNT
     ]
-    sum_g = np.bincount(seg_idx, weights=rgb_masked[:, 1], minlength=_TOP_COLOR_SEGMENT_COUNT)[
+    sum_g = np.bincount(seg_idx, weights=bgr_masked[:, 1], minlength=_TOP_COLOR_SEGMENT_COUNT)[
         :_TOP_COLOR_SEGMENT_COUNT
     ]
-    sum_b = np.bincount(seg_idx, weights=rgb_masked[:, 2], minlength=_TOP_COLOR_SEGMENT_COUNT)[
+    sum_r = np.bincount(seg_idx, weights=bgr_masked[:, 2], minlength=_TOP_COLOR_SEGMENT_COUNT)[
         :_TOP_COLOR_SEGMENT_COUNT
     ]
     order = np.argsort(seg_counts)[::-1]
@@ -146,7 +147,10 @@ def _sample_sv_and_rgb(
     bgr_flat = bgr.reshape(-1, 3)
     if k < n:
         idx = np.random.randint(0, n, size=k, dtype=np.int32)
-        hsv = np.column_stack([flat_h[idx], flat_s[idx], flat_v[idx]])
+        hsv = np.empty((k, 3), dtype=np.uint8)
+        hsv[:, 0] = flat_h[idx]
+        hsv[:, 1] = flat_s[idx]
+        hsv[:, 2] = flat_v[idx]
         rgb = np.ascontiguousarray(bgr_flat[idx][:, ::-1])
     else:
         hsv = np.empty((n, 3), dtype=np.uint8)

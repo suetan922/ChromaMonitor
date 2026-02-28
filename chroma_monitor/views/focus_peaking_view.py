@@ -8,10 +8,19 @@ from ..util.functions import (
     bgr_to_qpixmap,
     clamp_float,
     clamp_int,
+    cvt_color_cached,
+    normalized_ratio,
     resize_by_long_edge,
     safe_choice,
 )
 from .base_image_view import BaseImageLabelView
+
+_FOCUS_PEAK_COLOR_BGR = {
+    "cyan": (255, 235, 0),
+    "green": (0, 245, 120),
+    "yellow": (0, 225, 255),
+    "red": (60, 60, 255),
+}
 
 
 class FocusPeakingView(BaseImageLabelView):
@@ -21,6 +30,7 @@ class FocusPeakingView(BaseImageLabelView):
         self._sensitivity = C.DEFAULT_FOCUS_PEAK_SENSITIVITY
         self._color = C.DEFAULT_FOCUS_PEAK_COLOR
         self._thickness = C.DEFAULT_FOCUS_PEAK_THICKNESS
+        self.set_resize_renderer(self.update_focus)
 
     def set_sensitivity(self, value: int):
         self._sensitivity = clamp_int(
@@ -49,8 +59,11 @@ class FocusPeakingView(BaseImageLabelView):
             return np.zeros_like(gray, dtype=np.uint8)
 
         # 感度に応じて採用パーセンタイルを下げ、反応点を増やす。
-        span = max(1, C.FOCUS_PEAK_SENSITIVITY_MAX - C.FOCUS_PEAK_SENSITIVITY_MIN)
-        t = (self._sensitivity - C.FOCUS_PEAK_SENSITIVITY_MIN) / span
+        t = normalized_ratio(
+            self._sensitivity,
+            C.FOCUS_PEAK_SENSITIVITY_MIN,
+            C.FOCUS_PEAK_SENSITIVITY_MAX,
+        )
         percentile = 98.0 - 36.0 * t
         thr = float(np.percentile(mag, percentile))
         thr = max(thr, float(mag.mean()) * 0.45)
@@ -69,16 +82,14 @@ class FocusPeakingView(BaseImageLabelView):
         if not self._set_last_bgr(bgr):
             return
 
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        gray = cvt_color_cached(bgr, cv2.COLOR_BGR2GRAY)
         # 表示サイズに対して過剰に大きい入力は先に縮小して処理。
         gray = resize_by_long_edge(gray, C.ANALYZER_MAX_DIM)
         mask = self._focus_mask(gray)
 
         base = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR).astype(np.float32) * 0.72
         color = np.array(
-            C.FOCUS_PEAK_COLOR_BGR.get(
-                self._color, C.FOCUS_PEAK_COLOR_BGR[C.DEFAULT_FOCUS_PEAK_COLOR]
-            ),
+            _FOCUS_PEAK_COLOR_BGR.get(self._color, _FOCUS_PEAK_COLOR_BGR[C.DEFAULT_FOCUS_PEAK_COLOR]),
             dtype=np.float32,
         ).reshape(1, 1, 3)
         sigma = max(0.5, 0.35 + float(self._thickness) * 0.45)
@@ -89,7 +100,3 @@ class FocusPeakingView(BaseImageLabelView):
 
         pm = bgr_to_qpixmap(view, max_w=self.width(), max_h=self.height())
         self.setPixmap(pm)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._rerender_on_resize(self.update_focus)

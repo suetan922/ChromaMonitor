@@ -10,6 +10,12 @@ from PySide6.QtWidgets import QMenuBar
 
 from ...util import constants as C
 
+_APP_VERSION = "0.1.0"
+_LATEST_RELEASE_API_URL = (
+    f"https://api.github.com/repos/{C.APP_GITHUB_REPOSITORY}/releases/latest"
+)
+_UPDATE_CHECK_TIMEOUT_MS = 5000
+
 
 def _parse_version_tuple(text: str) -> tuple[int, ...] | None:
     parts = re.findall(r"\d+", str(text or ""))
@@ -32,10 +38,10 @@ def _is_release_newer(current_version: str, latest_tag: str) -> bool:
 def setup_help_menu(main_window, menu_bar: QMenuBar) -> None:
     main_window.help_menu = menu_bar.addMenu("ヘルプ")
     main_window.act_open_release_page = main_window.help_menu.addAction("更新情報を開く")
-    main_window.act_open_release_page.setToolTip(f"リリースページを開く（現在: v{C.APP_VERSION}）")
+    main_window.act_open_release_page.setToolTip(f"リリースページを開く（現在: v{_APP_VERSION}）")
     main_window.act_open_release_page.triggered.connect(main_window._open_release_page)
     main_window.act_version_info = main_window.help_menu.addAction(
-        f"現在のバージョン: v{C.APP_VERSION}"
+        f"現在のバージョン: v{_APP_VERSION}"
     )
     main_window.act_version_info.setEnabled(False)
     main_window.act_update_available = main_window.help_menu.addAction("")
@@ -53,11 +59,11 @@ def start_release_check_once(main_window) -> None:
 def check_latest_release(main_window) -> None:
     if main_window._update_reply is not None:
         return
-    request = QNetworkRequest(QUrl(C.LATEST_RELEASE_API_URL))
+    request = QNetworkRequest(QUrl(_LATEST_RELEASE_API_URL))
     request.setRawHeader(b"Accept", b"application/vnd.github+json")
-    request.setRawHeader(b"User-Agent", b"ChromaMonitor")
+    request.setRawHeader(b"User-Agent", C.APP_NAME.encode("utf-8"))
     if hasattr(request, "setTransferTimeout"):
-        request.setTransferTimeout(int(C.UPDATE_CHECK_TIMEOUT_MS))
+        request.setTransferTimeout(int(_UPDATE_CHECK_TIMEOUT_MS))
     main_window._update_reply = main_window._update_network.get(request)
 
 
@@ -78,7 +84,7 @@ def on_release_check_finished(main_window, reply: QNetworkReply) -> None:
         latest_url = str(payload.get("html_url", "")).strip()
         if latest_url:
             main_window._release_page_url = latest_url
-        if latest_tag and _is_release_newer(C.APP_VERSION, latest_tag):
+        if latest_tag and _is_release_newer(_APP_VERSION, latest_tag):
             main_window.act_update_available.setText(f"新しいバージョンがあります: {latest_tag}")
             main_window.act_update_available.setVisible(True)
         else:

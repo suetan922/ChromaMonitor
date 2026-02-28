@@ -10,29 +10,97 @@ from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QLabel, QSizePolicy, QWidget
 
 from ..util import constants as C
-from ..util.functions import clamp_int, safe_choice
+from ..util.functions import clamp_int, clamp_render_size, safe_choice
 
-_MAX_SCATTER_RENDER_EDGE = 2048
-_MAX_SCATTER_RENDER_AREA = _MAX_SCATTER_RENDER_EDGE * _MAX_SCATTER_RENDER_EDGE
-
-
-def _clamp_scatter_render_size(width: int, height: int) -> tuple[int, int]:
-    # 極端に大きい描画要求でメモリが跳ねないよう上限を掛ける。
-    w = max(1, int(width))
-    h = max(1, int(height))
-    w = min(w, _MAX_SCATTER_RENDER_EDGE)
-    h = min(h, _MAX_SCATTER_RENDER_EDGE)
-    area = w * h
-    if area > _MAX_SCATTER_RENDER_AREA:
-        scale = math.sqrt(_MAX_SCATTER_RENDER_AREA / float(area))
-        w = max(1, int(w * scale))
-        h = max(1, int(h * scale))
-    return w, h
-
+_SCATTER_HUE_FILTER_HALF_WIDTH = 10
+_MUNSELL_HUE_LABELS = (
+    "2.5R",
+    "5R",
+    "7.5R",
+    "10R",
+    "2.5YR",
+    "5YR",
+    "7.5YR",
+    "10YR",
+    "2.5Y",
+    "5Y",
+    "7.5Y",
+    "10Y",
+    "2.5GY",
+    "5GY",
+    "7.5GY",
+    "10GY",
+    "2.5G",
+    "5G",
+    "7.5G",
+    "10G",
+    "2.5BG",
+    "5BG",
+    "7.5BG",
+    "10BG",
+    "2.5B",
+    "5B",
+    "7.5B",
+    "10B",
+    "2.5PB",
+    "5PB",
+    "7.5PB",
+    "10PB",
+    "2.5P",
+    "5P",
+    "7.5P",
+    "10P",
+    "2.5RP",
+    "5RP",
+    "7.5RP",
+    "10RP",
+)
+_MUNSELL_COLORS_RGB = (
+    (218, 43, 97),
+    (227, 32, 55),
+    (228, 31, 32),
+    (233, 108, 28),
+    (237, 148, 20),
+    (242, 172, 0),
+    (246, 194, 0),
+    (247, 200, 0),
+    (241, 211, 2),
+    (240, 220, 0),
+    (241, 224, 0),
+    (222, 217, 1),
+    (200, 214, 35),
+    (167, 198, 56),
+    (112, 180, 62),
+    (43, 169, 58),
+    (0, 157, 81),
+    (0, 161, 103),
+    (0, 161, 125),
+    (0, 156, 142),
+    (0, 152, 156),
+    (0, 148, 163),
+    (2, 137, 159),
+    (2, 135, 165),
+    (0, 122, 163),
+    (0, 110, 174),
+    (1, 94, 169),
+    (0, 76, 157),
+    (7, 62, 149),
+    (35, 39, 137),
+    (54, 39, 138),
+    (72, 39, 130),
+    (64, 40, 131),
+    (81, 40, 132),
+    (116, 39, 137),
+    (151, 27, 134),
+    (173, 37, 136),
+    (195, 38, 133),
+    (202, 38, 133),
+    (222, 35, 105),
+)
 
 def _build_hue180_to_munsell40_weights() -> np.ndarray:
     src_bins = 180
-    dst_bins = len(C.MUNSELL_HUE_LABELS)
+    dst_bins = len(_MUNSELL_HUE_LABELS)
     src_step = 360.0 / float(src_bins)  # 2 deg
     dst_step = 360.0 / float(dst_bins)  # 9 deg
 
@@ -84,7 +152,7 @@ class ColorWheelWidget(QWidget):
         # 180ビン色相を重み行列で 40 色相へ再サンプリングする。
         src = np.asarray(self._hist, dtype=np.float32)
         if src.size != 180:
-            return np.zeros(len(C.MUNSELL_HUE_LABELS), dtype=np.float32)
+            return np.zeros(len(_MUNSELL_HUE_LABELS), dtype=np.float32)
         return (HUE180_TO_MUNSELL40_WEIGHTS @ src).astype(np.float32)
 
     def _wheel_bins(self):
@@ -92,7 +160,7 @@ class ColorWheelWidget(QWidget):
         mode = safe_choice(self._mode, C.WHEEL_MODES, C.DEFAULT_WHEEL_MODE)
         if mode == C.WHEEL_MODE_MUNSELL40:
             counts = self._munsell_hist()
-            colors = [QColor(r, g, b, 255) for (r, g, b) in C.MUNSELL_COLORS_RGB]
+            colors = [QColor(r, g, b, 255) for (r, g, b) in _MUNSELL_COLORS_RGB]
             return counts, colors
 
         counts = np.asarray(self._hist, dtype=np.float32)
@@ -151,7 +219,10 @@ class ColorWheelWidget(QWidget):
                 c.setAlpha(alpha)
                 p.setPen(Qt.NoPen)
                 p.setBrush(c)
-                center_deg = (float(C.COLOR_WHEEL_HUE_OFFSET_DEG) + (h * step_deg)) % 360.0
+                center_deg = (
+                    float(C.HUE_RED_REFERENCE_DEG)
+                    + float(C.HUE_DIRECTION_SIGN) * (h * step_deg)
+                ) % 360.0
                 start_deg = center_deg - (step_deg / 2.0) - overlap_deg
                 span_deg = step_deg + overlap_deg * 2.0
                 p.drawPie(
@@ -273,7 +344,7 @@ class ScatterRasterWidget(QLabel):
             if self._square_limit
             else max(self.width(), self.height())
         )
-        target_side, _ = _clamp_scatter_render_size(base_side, base_side)
+        target_side, _ = clamp_render_size(base_side, base_side)
         pm = QPixmap.fromImage(qimg).scaled(
             target_side, target_side, Qt.KeepAspectRatio, Qt.SmoothTransformation
         )
@@ -320,7 +391,7 @@ class ScatterRasterWidget(QLabel):
         diff = np.abs(h_arr.astype(np.int16, copy=False) - center)
         wrap = 180 - diff
         dist = np.minimum(diff, wrap)
-        return dist <= int(C.SCATTER_HUE_FILTER_HALF_WIDTH)
+        return dist <= int(_SCATTER_HUE_FILTER_HALF_WIDTH)
 
     def _render_scatter_dominant(
         self, x: np.ndarray, y: np.ndarray, rgb_u8: np.ndarray
@@ -392,13 +463,15 @@ class ScatterRasterWidget(QLabel):
         if x.size == 0 or y.size == 0:
             return out
 
-        density = np.zeros((256 * 256,), dtype=np.float32)
+        # 4近傍の重み付けは flat index をまとめて作って bincount で一括集計する。
+        flat_chunks = []
         for dy in (0, 1):
             yy = np.clip(y + dy, 0, 255)
             for dx in (0, 1):
                 xx = np.clip(x + dx, 0, 255)
-                flat = (yy << 8) + xx
-                np.add.at(density, flat.astype(np.int32, copy=False), 1.0)
+                flat_chunks.append((yy << 8) + xx)
+        flat_idx = np.concatenate(flat_chunks, axis=0).astype(np.int32, copy=False)
+        density = np.bincount(flat_idx, minlength=256 * 256).astype(np.float32, copy=False)
 
         density_img = density.reshape((256, 256))
         if float(density_img.max()) <= 0.0:
@@ -440,7 +513,11 @@ class ScatterRasterWidget(QLabel):
                 self._show_scatter_frame_only()
                 return
 
-            rgb_u8 = np.clip(rgb_arr[:n, :3], 0, 255).astype(np.uint8, copy=False)
+            rgb_view = rgb_arr[:n, :3]
+            if rgb_view.dtype == np.uint8:
+                rgb_u8 = np.ascontiguousarray(rgb_view)
+            else:
+                rgb_u8 = np.clip(rgb_view, 0, 255).astype(np.uint8, copy=False)
             if sv_arr.shape[1] >= 3:
                 # [H,S,V] 形式なら Hue を直接利用する。
                 h_arr = np.clip(
@@ -493,7 +570,11 @@ class ScatterRasterWidget(QLabel):
                     self._show_scatter_frame_only()
                     return
                 sv_used = sv_arr[:n, 1:3] if sv_arr.shape[1] >= 3 else sv_arr[:n, :2]
-                rgb_u8 = np.clip(rgb_arr[:n, :3], 0, 255).astype(np.uint8, copy=False)
+                rgb_view = rgb_arr[:n, :3]
+                if rgb_view.dtype == np.uint8:
+                    rgb_u8 = np.ascontiguousarray(rgb_view)
+                else:
+                    rgb_u8 = np.clip(rgb_view, 0, 255).astype(np.uint8, copy=False)
                 x, y = self._compute_scatter_xy(sv_used)
                 img = self._render_scatter_dominant(x, y, rgb_u8)
             except Exception:
@@ -510,6 +591,12 @@ class ScatterRasterWidget(QLabel):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
+        if event.size() == event.oldSize():
+            return
+        if not self.isVisible() or self.isHidden():
+            return
+        if self.width() <= 1 or self.height() <= 1:
+            return
         if self._last_sv is not None and self._last_rgb is not None:
             self.update_scatter(self._last_sv, self._last_rgb)
         else:

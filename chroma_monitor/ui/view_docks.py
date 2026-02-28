@@ -1,6 +1,7 @@
 """ビュー用ドックの構築処理。"""
 
 from PySide6.QtCore import QSize, Qt
+from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
     QCheckBox,
     QDockWidget,
@@ -29,6 +30,10 @@ from ..views import (
     TernaryView,
     VectorScopeView,
 )
+
+_H_COLOR = QColor(220, 90, 90)
+_S_COLOR = QColor(90, 170, 90)
+_V_COLOR = QColor(80, 140, 240)
 
 
 class UniformMinDockWidget(QDockWidget):
@@ -68,6 +73,16 @@ def _create_dock(
     return dock
 
 
+def _clear_attach_on_show_flag(dock: QDockWidget, visible: bool) -> None:
+    if visible and getattr(dock, "_attach_on_next_show", False):
+        dock._attach_on_next_show = False
+
+
+def _restore_from_snapshot_if_visible(main_window, dock: QDockWidget, visible: bool) -> None:
+    if visible:
+        main_window._restore_dock_from_snapshot(dock)
+
+
 def _configure_view_dock(main_window, dock: QDockWidget) -> None:
     # 各ドックの共通機能（移動/フロート/閉じる等）を設定する。
     dock.setFeatures(
@@ -81,6 +96,12 @@ def _configure_view_dock(main_window, dock: QDockWidget) -> None:
     dock.visibilityChanged.connect(main_window.update_placeholder)
     dock.visibilityChanged.connect(main_window.sync_window_menu_checks)
     dock.visibilityChanged.connect(main_window._sync_tabbed_dock_title_bars)
+    dock.visibilityChanged.connect(
+        lambda v, d=dock: _clear_attach_on_show_flag(d, bool(v))
+    )
+    dock.visibilityChanged.connect(
+        lambda v, mw=main_window, d=dock: _restore_from_snapshot_if_visible(mw, d, bool(v))
+    )
 
     for signal in (dock.topLevelChanged, dock.dockLocationChanged):
         # 配置が変わったときだけ自動保存を予約する。
@@ -95,10 +116,12 @@ def _register_docks(
     # dock_* 属性 / _dock_map / 既定エリアを同時に構築して重複管理を避ける。
     main_window._dock_map = {}
     main_window._dock_default_areas = {}
+    main_window._dock_name_by_object = {}
     for name, dock, default_area in dock_specs:
         setattr(main_window, name, dock)
         main_window._dock_map[name] = dock
         main_window._dock_default_areas[name] = default_area
+        main_window._dock_name_by_object[dock] = name
 
 
 def _build_dock_actions(main_window) -> dict[str, object]:
@@ -110,6 +133,20 @@ def _build_dock_actions(main_window) -> dict[str, object]:
         if action is not None:
             dock_actions[dock_name] = action
     return dock_actions
+
+
+def _detach_initially_hidden_docks(main_window) -> None:
+    # 既定で非表示のドックはレイアウトから外す。
+    # 再表示時は toggle_dock 側の共通追加処理（エリア内タブ化）を使う。
+    for name, dock in main_window._dock_map.items():
+        action = main_window._dock_actions.get(name)
+        if action is None or action.isChecked():
+            continue
+        if dock.isFloating():
+            dock.setFloating(False)
+        dock.setVisible(False)
+        main_window.removeDockWidget(dock)
+        dock._attach_on_next_show = True
 
 
 def setup_view_docks(main_window) -> None:
@@ -156,9 +193,9 @@ def setup_view_docks(main_window) -> None:
     main_window.lbl_scatter_hue_center.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
 
     # バケット幅を揃えて視覚的スケールを統一
-    main_window.hist_h = ChannelHistogram("色相", 180, 179, C.H_COLOR, bucket=2)
-    main_window.hist_s = ChannelHistogram("彩度", 256, 255, C.S_COLOR, bucket=2)
-    main_window.hist_v = ChannelHistogram("明度", 256, 255, C.V_COLOR, bucket=2)
+    main_window.hist_h = ChannelHistogram("色相", 180, 179, _H_COLOR, bucket=2)
+    main_window.hist_s = ChannelHistogram("彩度", 256, 255, _S_COLOR, bucket=2)
+    main_window.hist_v = ChannelHistogram("明度", 256, 255, _V_COLOR, bucket=2)
     main_window.rgb_hist_view = RgbHistogramWidget()
     main_window.rgb_hist_view.set_display_mode(C.DEFAULT_RGB_HIST_MODE)
 
@@ -240,9 +277,8 @@ def setup_view_docks(main_window) -> None:
         "R/G/B ヒストグラム",
         "dock_rgb_hist",
         rgb_hist_container,
-        area=Qt.BottomDockWidgetArea,
+        area=Qt.RightDockWidgetArea,
     )
-    rgb_hist_dock.setVisible(False)
 
     main_window.edge_view = EdgeView()
     edge_container = _build_single_view_container(main_window.edge_view)
@@ -318,7 +354,7 @@ def setup_view_docks(main_window) -> None:
             ("dock_color", color_dock, Qt.LeftDockWidgetArea),
             ("dock_scatter", scatter_dock, Qt.RightDockWidgetArea),
             ("dock_hist", hist_dock, Qt.BottomDockWidgetArea),
-            ("dock_rgb_hist", rgb_hist_dock, Qt.BottomDockWidgetArea),
+            ("dock_rgb_hist", rgb_hist_dock, Qt.RightDockWidgetArea),
             ("dock_edge", edge_dock, Qt.RightDockWidgetArea),
             ("dock_gray", gray_dock, Qt.RightDockWidgetArea),
             ("dock_binary", binary_dock, Qt.RightDockWidgetArea),
@@ -380,4 +416,5 @@ def setup_view_docks(main_window) -> None:
         [280, 200, 180, 170, 160, 180, 170, 170, 170],
         Qt.Vertical,
     )
+    _detach_initially_hidden_docks(main_window)
     main_window._sync_tabbed_dock_title_bars()

@@ -2,56 +2,37 @@
 
 import cv2
 import numpy as np
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage, QPixmap
 
 from ..util import constants as C
-from ..util.functions import clamp_int, resize_by_long_edge, safe_choice
+from ..util.functions import (
+    clamp_int,
+    cvt_color_cached,
+    gray_to_qpixmap,
+    resize_by_long_edge,
+    safe_choice,
+)
 from .base_image_view import BaseImageLabelView
-
-_MAX_RENDER_EDGE = 2048
-_MAX_RENDER_AREA = _MAX_RENDER_EDGE * _MAX_RENDER_EDGE
-
-
-def _gray_to_qpixmap(gray: np.ndarray, max_w: int, max_h: int) -> QPixmap:
-    # グレースケール配列の軽量変換経路。
-    gray = np.ascontiguousarray(gray)
-    h, w = gray.shape[:2]
-    qimg = QImage(gray.data, w, h, w, QImage.Format_Grayscale8)
-    pm = QPixmap.fromImage(qimg)
-    safe_w = max(1, min(int(max_w), _MAX_RENDER_EDGE))
-    safe_h = max(1, min(int(max_h), _MAX_RENDER_EDGE))
-    area = safe_w * safe_h
-    if area > _MAX_RENDER_AREA:
-        scale = (_MAX_RENDER_AREA / float(area)) ** 0.5
-        safe_w = max(1, int(safe_w * scale))
-        safe_h = max(1, int(safe_h * scale))
-    return pm.scaled(safe_w, safe_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-
 
 class GrayscaleView(BaseImageLabelView):
 
     def __init__(self):
         super().__init__("グレースケールなし")
+        self.set_resize_renderer(self.update_gray)
 
     def update_gray(self, bgr: np.ndarray):
         if not self._set_last_bgr(bgr):
             return
         # グレースケールは元解像度のまま表示し、見た目の忠実度を優先する。
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
-        pm = _gray_to_qpixmap(gray, max_w=self.width(), max_h=self.height())
+        gray = cvt_color_cached(bgr, cv2.COLOR_BGR2GRAY)
+        pm = gray_to_qpixmap(gray, max_w=self.width(), max_h=self.height())
         self.setPixmap(pm)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._rerender_on_resize(self.update_gray)
-
 
 class BinaryView(BaseImageLabelView):
 
     def __init__(self):
         super().__init__("2値化なし")
         self._preset = C.DEFAULT_BINARY_PRESET  # auto | more_white | more_black
+        self.set_resize_renderer(self.update_binary)
 
     def set_preset(self, preset: str):
         self._preset = safe_choice(preset, C.BINARY_PRESETS, C.DEFAULT_BINARY_PRESET)
@@ -61,7 +42,7 @@ class BinaryView(BaseImageLabelView):
     def update_binary(self, bgr: np.ndarray):
         if not self._set_last_bgr(bgr):
             return
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        gray = cvt_color_cached(bgr, cv2.COLOR_BGR2GRAY)
         # 固定上限で縮小して処理量を抑える（表示時に再スケールされる）。
         gray = resize_by_long_edge(gray, C.ANALYZER_MAX_DIM)
 
@@ -74,19 +55,15 @@ class BinaryView(BaseImageLabelView):
             shift = 20
         thr = clamp_int(round(float(otsu_thr) + shift), 0, 255)
         _thr, binary = cv2.threshold(gray, thr, 255, cv2.THRESH_BINARY)
-        pm = _gray_to_qpixmap(binary, max_w=self.width(), max_h=self.height())
+        pm = gray_to_qpixmap(binary, max_w=self.width(), max_h=self.height())
         self.setPixmap(pm)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._rerender_on_resize(self.update_binary)
-
 
 class TernaryView(BaseImageLabelView):
 
     def __init__(self):
         super().__init__("3値化なし")
         self._preset = C.DEFAULT_TERNARY_PRESET  # standard | soft | strong
+        self.set_resize_renderer(self.update_ternary)
 
     def set_preset(self, preset: str):
         self._preset = safe_choice(preset, C.TERNARY_PRESETS, C.DEFAULT_TERNARY_PRESET)
@@ -96,7 +73,7 @@ class TernaryView(BaseImageLabelView):
     def update_ternary(self, bgr: np.ndarray):
         if not self._set_last_bgr(bgr):
             return
-        gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY)
+        gray = cvt_color_cached(bgr, cv2.COLOR_BGR2GRAY)
         # 3値化計算は縮小画像で実施し、リアルタイム性を維持する。
         gray = resize_by_long_edge(gray, C.ANALYZER_MAX_DIM)
 
@@ -118,9 +95,5 @@ class TernaryView(BaseImageLabelView):
         ternary[gray >= t1] = 127
         ternary[gray >= t2] = 255
 
-        pm = _gray_to_qpixmap(ternary, max_w=self.width(), max_h=self.height())
+        pm = gray_to_qpixmap(ternary, max_w=self.width(), max_h=self.height())
         self.setPixmap(pm)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._rerender_on_resize(self.update_ternary)

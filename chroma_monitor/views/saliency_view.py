@@ -98,6 +98,7 @@ class SaliencyView(BaseImageLabelView):
         self._guide = C.DEFAULT_COMPOSITION_GUIDE  # none | thirds | center | diagonal
         self._sr_detector = None
         self._sr_detector_ready = False
+        self.set_resize_renderer(self.update_saliency)
 
     def set_overlay_alpha(self, value: int):
         # アルファ変更は直近フレームを再描画して即時反映する。
@@ -213,7 +214,3 @@ class SaliencyView(BaseImageLabelView):
         view_rgb = cv2.cvtColor(view_bgr, cv2.COLOR_BGR2RGB)
         pm = rgb_to_qpixmap(view_rgb, max_w=self.width(), max_h=self.height())
         self.setPixmap(pm)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._rerender_on_resize(self.update_saliency)

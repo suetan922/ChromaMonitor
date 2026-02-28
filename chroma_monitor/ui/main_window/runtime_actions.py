@@ -5,15 +5,18 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QThread
 from PySide6.QtWidgets import QFileDialog, QMainWindow, QMessageBox, QProgressDialog
 
-from ...analyzer import ImageFileAnalyzeWorker
+from ...analysis.image_file_worker import ImageFileAnalyzeWorker
 from ...capture.win32_windows import HAS_WIN32, list_windows
 from ...util import constants as C
 from ...util.functions import (
     blocked_signals,
+    is_widget_renderable,
     safe_choice,
     set_checked_blocked,
     set_current_index_blocked,
 )
+
+_WINDOW_LIST_MAX_ITEMS = 500
 
 
 def _safe_close_widget(widget, *, only_if_visible: bool = False) -> None:
@@ -195,7 +198,7 @@ def refresh_windows(main_window):
     with blocked_signals(main_window.combo_win):
         main_window.combo_win.clear()
         main_window.combo_win.addItem("（未選択）", None)
-        for hwnd, title in wins[: C.WINDOW_LIST_MAX_ITEMS]:
+        for hwnd, title in wins[: _WINDOW_LIST_MAX_ITEMS]:
             main_window.combo_win.addItem(title, hwnd)
     if not HAS_WIN32:
         on_status(main_window, "この環境ではウィンドウ選択は使えません（画面の領域選択を使用）")
@@ -336,7 +339,10 @@ def on_window_text_committed(main_window):
 def has_visible_image_dock(main_window) -> bool:
     # 画像系ドックが1つでも開いていれば image 処理を有効にする。
     targets = getattr(main_window, "_image_update_targets", ())
-    return any(dock.isVisible() for dock, _update, _after in targets)
+    return any(
+        is_widget_renderable(dock) and is_widget_renderable(dock.widget())
+        for dock, *_ in targets
+    )
 
 
 def sync_worker_view_flags(main_window):
@@ -360,7 +366,7 @@ def update_preview_snapshot(main_window):
     ):
         on_status(main_window, "ターゲットウィンドウを選択してください")
         return
-    bgr, _cap, err = main_window.worker.capture_once()
+    bgr, _, err = main_window.worker.capture_once()
     if bgr is None:
         if err:
             on_status(main_window, err)

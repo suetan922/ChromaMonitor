@@ -16,7 +16,6 @@ from .analysis.frame_analysis import (
     _compute_top_colors,
     _compute_wheel_stats,
     _sample_sv_and_rgb,
-    analyze_bgr_frame,
 )
 from .capture.win32_windows import HAS_WIN32, ctypes_win_api, win32gui
 from .util import constants as C
@@ -35,119 +34,12 @@ _EMPTY_GRAPH_DATA = {
     "cool_ratio": 0.0,
     "other_ratio": 0.0,
 }
-
-
-class ImageFileAnalyzeWorker(QObject):
-
-    progress = Signal(int, str)
-    finished = Signal(dict)
-    failed = Signal(str)
-    canceled = Signal()
-
-    def __init__(self, path: str, sample_points: int, wheel_sat_threshold: int):
-        super().__init__()
-        self.path = str(path)
-        self.sample_points = int(sample_points)
-        self.wheel_sat_threshold = int(wheel_sat_threshold)
-        self._cancel = threading.Event()
-
-    def request_cancel(self):
-        # キャンセルは排他不要のイベントフラグで通知する。
-        self._cancel.set()
-
-    def _is_canceled(self) -> bool:
-        return self._cancel.is_set()
-
-    def _emit_progress(self, percent: int, text: str):
-        self.progress.emit(int(percent), text)
-
-    @staticmethod
-    def _decode_to_bgr_preserve_depth(buf: np.ndarray) -> Optional[np.ndarray]:
-        img = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
-        if img is None or img.size == 0:
-            return None
-        if img.ndim == 2:
-            return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        if img.ndim != 3:
-            return None
-        channels = int(img.shape[2])
-        if channels == 3:
-            return img
-        if channels == 4:
-            return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-        if channels == 1:
-            return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        return None
-
-    @staticmethod
-    def _auto_analysis_max_dim(bgr: np.ndarray) -> int:
-        # 画像読み込み時は高解像度を優先しつつ、極端な大画像のみ内部で上限を掛ける。
-        if bgr is None or bgr.size == 0:
-            return 0
-        h, w = bgr.shape[:2]
-        long_edge = max(int(h), int(w))
-        if long_edge <= int(C.IMAGE_FILE_ANALYSIS_AUTO_MAX_DIM):
-            return 0
-        return int(C.IMAGE_FILE_ANALYSIS_AUTO_MAX_DIM)
-
-    def run(self):
-        try:
-            # OpenCVの日本語パス対応のため、imdecode経路で読み込む。
-            self._emit_progress(1, "画像を読み込み中…")
-            if self._is_canceled():
-                self.canceled.emit()
-                return
-
-            buf = np.fromfile(self.path, dtype=np.uint8)
-            if buf.size == 0:
-                self.failed.emit("画像ファイルを読み込めませんでした。")
-                return
-            bgr = self._decode_to_bgr_preserve_depth(buf)
-            if bgr is None or bgr.size == 0:
-                self.failed.emit("画像データのデコードに失敗しました。")
-                return
-
-            h_img, w_img = bgr.shape[:2]
-            if np.issubdtype(bgr.dtype, np.integer):
-                bit_depth = bgr.dtype.itemsize * 8
-                self._emit_progress(8, f"解析準備中… ({w_img}x{h_img}, {bit_depth}bit)")
-            else:
-                self._emit_progress(8, f"解析準備中… ({w_img}x{h_img})")
-            if self._is_canceled():
-                self.canceled.emit()
-                return
-
-            auto_max_dim = self._auto_analysis_max_dim(bgr)
-            if auto_max_dim > 0:
-                self._emit_progress(
-                    10,
-                    f"大きい画像のため内部解析を長辺{auto_max_dim}pxに調整します…",
-                )
-                if self._is_canceled():
-                    self.canceled.emit()
-                    return
-
-            t0 = time.perf_counter()
-            res = analyze_bgr_frame(
-                bgr=bgr,
-                sample_points=self.sample_points,
-                wheel_sat_threshold=self.wheel_sat_threshold,
-                max_dim=auto_max_dim,
-                progress_cb=self._emit_progress,
-                cancel_cb=self._is_canceled,
-            )
-            if res is None:
-                self.canceled.emit()
-                return
-            res["dt_ms"] = (time.perf_counter() - t0) * 1000.0
-
-            self._emit_progress(100, "解析完了")
-            if self._is_canceled():
-                self.canceled.emit()
-                return
-            self.finished.emit(res)
-        except Exception:
-            self.failed.emit("画像解析に失敗しました。")
+_DEFAULT_ROI_SIZE = (640, 360)
+_ANALYZER_MIN_INTERVAL_SEC = 0.05
+_ANALYZER_MIN_GRAPH_EVERY = 1
+_ANALYZER_CHANGE_POLL_SEC = 0.08
+_ANALYZER_CHANGE_COOLDOWN_SEC = 0.12
+_ANALYZER_CHANGE_DETECT_DIM = 120
 
 
 @dataclass
@@ -157,7 +49,7 @@ class AnalyzerConfig:
     sample_points: int = C.DEFAULT_SAMPLE_POINTS
     max_dim: int = C.ANALYZER_MAX_DIM
     wheel_sat_threshold: int = C.DEFAULT_WHEEL_SAT_THRESHOLD
-    graph_every: int = C.ANALYZER_MIN_GRAPH_EVERY
+    graph_every: int = _ANALYZER_MIN_GRAPH_EVERY
     mode: str = C.DEFAULT_MODE
     diff_threshold: float = C.DEFAULT_DIFF_THRESHOLD
     stable_frames: int = C.DEFAULT_STABLE_FRAMES
@@ -226,7 +118,7 @@ class AnalyzerWorker(QObject):
         self._result_inflight.clear()
 
     def set_interval(self, sec: float):
-        self.cfg.interval_sec = max(C.ANALYZER_MIN_INTERVAL_SEC, float(sec))
+        self.cfg.interval_sec = max(_ANALYZER_MIN_INTERVAL_SEC, float(sec))
 
     def set_sample_points(self, n: int):
         self.cfg.sample_points = clamp_int(
@@ -247,7 +139,7 @@ class AnalyzerWorker(QObject):
         )
 
     def set_graph_every(self, n: int):
-        self.cfg.graph_every = max(C.ANALYZER_MIN_GRAPH_EVERY, int(n))
+        self.cfg.graph_every = max(_ANALYZER_MIN_GRAPH_EVERY, int(n))
 
     def set_mode(self, mode: str):
         self.cfg.mode = mode if mode in C.UPDATE_MODES else C.DEFAULT_MODE
@@ -405,7 +297,7 @@ class AnalyzerWorker(QObject):
         used_q = set()
         used_m = set()
         mapping = {}
-        for _score, qi, mi in pairs:
+        for _, qi, mi in pairs:
             if qi in used_q or mi in used_m:
                 continue
             used_q.add(qi)
@@ -659,7 +551,7 @@ class AnalyzerWorker(QObject):
         vmon = sct.monitors[0]
         if cap is None:
             # 初回は画面中央に既定ROIを自動生成する。
-            cw, ch = C.DEFAULT_ROI_SIZE
+            cw, ch = _DEFAULT_ROI_SIZE
             cx = vmon["left"] + vmon["width"] // 2
             cy = vmon["top"] + vmon["height"] // 2
             cap = QRect(cx - cw // 2, cy - ch // 2, cw, ch)
@@ -681,7 +573,7 @@ class AnalyzerWorker(QObject):
             "height": int(height),
         }
         try:
-            img = np.array(sct.grab(mon))
+            img = np.asarray(sct.grab(mon), dtype=np.uint8)
         except mss.exception.ScreenShotError:
             return None, None, "画面キャプチャに失敗しました（権限/表示/Wayland設定を確認）"
         bgr = cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
@@ -726,7 +618,7 @@ class AnalyzerWorker(QObject):
 
     def _should_emit_in_change_mode(self, bgr: np.ndarray, now: float) -> bool:
         # 差分判定は軽量化のため専用縮小サイズで行う。
-        detect_bgr = resize_by_long_edge(bgr, C.ANALYZER_CHANGE_DETECT_DIM)
+        detect_bgr = resize_by_long_edge(bgr, _ANALYZER_CHANGE_DETECT_DIM)
         detect_hsv = cv2.cvtColor(detect_bgr, cv2.COLOR_BGR2HSV)
         # split はチャネルごとに配列コピーするため、ビュー参照で取り出す。
         dh = detect_hsv[:, :, 0]
@@ -827,6 +719,24 @@ class AnalyzerWorker(QObject):
                 cap: Optional[QRect] = None
                 bgr: Optional[np.ndarray] = None
 
+                cfg = self.cfg
+                need_color = bool(cfg.view_color)
+                need_scatter = bool(cfg.view_scatter)
+                need_hsv_hist = bool(cfg.view_hsv_hist)
+                need_graph_data = need_color or need_scatter or need_hsv_hist
+                need_image = bool(cfg.view_image)
+                need_preview = bool(cfg.want_preview)
+                need_bgr_emit = need_image or need_preview
+                if not need_graph_data and not need_bgr_emit:
+                    # 表示先が1つもない間はキャプチャ/解析を休止してCPU使用率を下げる。
+                    loop_interval = (
+                        cfg.interval_sec
+                        if cfg.mode == C.UPDATE_MODE_INTERVAL
+                        else _ANALYZER_CHANGE_POLL_SEC
+                    )
+                    time.sleep(max(0.01, float(loop_interval)))
+                    continue
+
                 # ウィンドウ取得モードでは、ROI未指定時もウィンドウ全体を直接キャプチャする
                 # （画面領域選択とは排他的に扱う）
                 if self.target_hwnd is not None and HAS_WIN32:
@@ -855,24 +765,16 @@ class AnalyzerWorker(QObject):
                     time.sleep(0.2)
                     continue
 
-                need_color = bool(self.cfg.view_color)
-                need_scatter = bool(self.cfg.view_scatter)
-                need_hsv_hist = bool(self.cfg.view_hsv_hist)
-                need_graph_data = need_color or need_scatter or need_hsv_hist
-                need_image = bool(self.cfg.view_image)
-                need_preview = bool(self.cfg.want_preview)
-                need_bgr_emit = need_image or need_preview
-
                 emit_now = True
                 graph_update = False
-                if self.cfg.mode == C.UPDATE_MODE_CHANGE:
+                if cfg.mode == C.UPDATE_MODE_CHANGE:
                     emit_now = self._should_emit_in_change_mode(bgr, now=time.perf_counter())
                     # changeモードで発火したときは全ビューを同じタイミングで更新
                     graph_update = emit_now
                 else:
                     # intervalモードでは graph_every 間隔でグラフ更新する。
                     self._frame += 1
-                    graph_update = self._frame % self.cfg.graph_every == 0
+                    graph_update = self._frame % cfg.graph_every == 0
 
                 dt_ms = (time.perf_counter() - t0) * 1000.0
                 graph_data = _EMPTY_GRAPH_DATA
@@ -912,16 +814,16 @@ class AnalyzerWorker(QObject):
                                 "graph_update": graph_update,
                             }
                         )
-                        if self.cfg.mode == C.UPDATE_MODE_CHANGE:
+                        if cfg.mode == C.UPDATE_MODE_CHANGE:
                             # 連続発火を抑える短いクールダウン
                             self._cooldown_until = (
-                                time.perf_counter() + C.ANALYZER_CHANGE_COOLDOWN_SEC
+                                time.perf_counter() + _ANALYZER_CHANGE_COOLDOWN_SEC
                             )
 
                 loop_interval = (
-                    self.cfg.interval_sec
-                    if self.cfg.mode == C.UPDATE_MODE_INTERVAL
-                    else C.ANALYZER_CHANGE_POLL_SEC
+                    cfg.interval_sec
+                    if cfg.mode == C.UPDATE_MODE_INTERVAL
+                    else _ANALYZER_CHANGE_POLL_SEC
                 )
                 remain = loop_interval - (time.perf_counter() - t0)
                 if remain > 0:

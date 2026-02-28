@@ -10,6 +10,12 @@ from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QStackedLayout, QWidget
 from ..util import constants as C
 from ..util.functions import safe_choice
 
+_R_COLOR = QColor(228, 84, 84)
+_G_COLOR = QColor(88, 176, 96)
+_B_COLOR = QColor(88, 126, 236)
+_HIST_MAX_TEXT_MIN_WIDTH = 190
+_HIST_MAX_TEXT_MIN_HEIGHT = 120
+
 
 def _fit_hist_size(hist: np.ndarray, size: int) -> np.ndarray:
     arr = np.asarray(hist, dtype=np.int64).reshape(-1)
@@ -156,6 +162,11 @@ class ChannelHistogram(QWidget):
             p.drawText(axis_rect, Qt.AlignRight | Qt.AlignVCenter, str(self._max_value))
 
             stats = f"平均 {self._mean:.1f} / 標準偏差 {self._std:.1f}"
+            if (
+                plot.width() >= _HIST_MAX_TEXT_MIN_WIDTH
+                and self.height() >= _HIST_MAX_TEXT_MIN_HEIGHT
+            ):
+                stats = f"max {max_y} / {stats}"
             p.drawText(
                 QRect(plot.left(), plot.bottom() + 20, plot.width(), 18),
                 Qt.AlignCenter | Qt.AlignVCenter,
@@ -242,11 +253,11 @@ class RgbOverlayHistogram(QWidget):
                     p.drawLine(prev_x, prev_y, x, y)
                     prev_x, prev_y = x, y
 
-            color_r = QColor(C.R_COLOR)
+            color_r = QColor(_R_COLOR)
             color_r.setAlpha(210)
-            color_g = QColor(C.G_COLOR)
+            color_g = QColor(_G_COLOR)
             color_g.setAlpha(210)
-            color_b = QColor(C.B_COLOR)
+            color_b = QColor(_B_COLOR)
             color_b.setAlpha(210)
             _draw_curve(h_r, color_r)
             _draw_curve(h_g, color_g)
@@ -271,9 +282,9 @@ class RgbHistogramWidget(QWidget):
         super().__init__()
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._display_mode = C.DEFAULT_RGB_HIST_MODE
-        self._hist_r = ChannelHistogram("赤", 256, 255, QColor(C.R_COLOR), bucket=2)
-        self._hist_g = ChannelHistogram("緑", 256, 255, QColor(C.G_COLOR), bucket=2)
-        self._hist_b = ChannelHistogram("青", 256, 255, QColor(C.B_COLOR), bucket=2)
+        self._hist_r = ChannelHistogram("赤", 256, 255, QColor(_R_COLOR), bucket=2)
+        self._hist_g = ChannelHistogram("緑", 256, 255, QColor(_G_COLOR), bucket=2)
+        self._hist_b = ChannelHistogram("青", 256, 255, QColor(_B_COLOR), bucket=2)
         self._overlay = RgbOverlayHistogram()
 
         side_widget = QWidget()
@@ -316,4 +327,12 @@ class RgbHistogramWidget(QWidget):
         self._hist_r.update_from_hist(hist_r)
         self._hist_g.update_from_hist(hist_g)
         self._hist_b.update_from_hist(hist_b)
+        # 横並び3チャネルはY軸スケールを揃えて相対比較しやすくする。
+        shared_max_y = max(
+            int(self._hist_r.bucketed_max()),
+            int(self._hist_g.bucketed_max()),
+            int(self._hist_b.bucketed_max()),
+        )
+        for view in (self._hist_r, self._hist_g, self._hist_b):
+            view.set_shared_max_y(shared_max_y if shared_max_y > 0 else None)
         self._overlay.update_from_histograms(hist_r, hist_g, hist_b)

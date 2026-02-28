@@ -10,6 +10,12 @@ from ..util.functions import bgr_to_qpixmap, clamp_int, resize_by_long_edge
 from .base_image_view import BaseImageLabelView
 from .image_math import normalize_map
 
+_VECTORSCOPE_SIZE = 256
+_VECTORSCOPE_CHROMA_FULL_SCALE = 181.0
+_VECTORSCOPE_SKIN_LINE_ANGLE_DEG = 123.0
+_VECTORSCOPE_SCOPE_RADIUS_RATIO = 0.46
+_VECTORSCOPE_WARN_COLOR_BGR = (32, 64, 250)
+
 
 class VectorScopeView(BaseImageLabelView):
 
@@ -24,6 +30,32 @@ class VectorScopeView(BaseImageLabelView):
         self._mask_cache: dict[int, np.ndarray] = {}
         self._bg_cache: dict[int, np.ndarray] = {}
         self._ref_vectors_cache = None
+        self._red_raw_angle_deg = self._ref_angle_from_bgr((0, 0, 255))
+        self._uv_transform = self._build_uv_transform()
+        self.set_resize_renderer(self.update_scope)
+
+    def _display_angle_from_raw(self, raw_angle_deg: float) -> float:
+        return (
+            float(C.HUE_RED_REFERENCE_DEG)
+            + float(C.HUE_DIRECTION_SIGN) * (float(raw_angle_deg) - self._red_raw_angle_deg)
+        ) % 360.0
+
+    def _build_uv_transform(self) -> tuple[float, float, float, float]:
+        ref = math.radians(float(C.HUE_RED_REFERENCE_DEG))
+        raw = math.radians(float(self._red_raw_angle_deg))
+        r_ref = np.array(
+            [[math.cos(ref), -math.sin(ref)], [math.sin(ref), math.cos(ref)]], dtype=np.float32
+        )
+        r_neg_raw = np.array(
+            [[math.cos(raw), math.sin(raw)], [-math.sin(raw), math.cos(raw)]], dtype=np.float32
+        )
+        if float(C.HUE_DIRECTION_SIGN) >= 0.0:
+            m = r_ref @ r_neg_raw
+        else:
+            # 反転方向は x軸反転行列を挟んで表現する（赤基準は固定）。
+            mirror_x = np.array([[1.0, 0.0], [0.0, -1.0]], dtype=np.float32)
+            m = r_ref @ mirror_x @ r_neg_raw
+        return float(m[0, 0]), float(m[0, 1]), float(m[1, 0]), float(m[1, 1])
 
     def set_show_skin_tone_line(self, enabled: bool):
         self._show_skin_tone_line = bool(enabled)
@@ -43,15 +75,15 @@ class VectorScopeView(BaseImageLabelView):
     def _render_size(self) -> int:
         # 表示サイズに追従して描画解像度を上げ、拡大ぼけを抑える
         target = min(self.width(), self.height())
-        target = clamp_int(target, max(160, C.VECTORSCOPE_SIZE), 640)
+        target = clamp_int(target, max(160, _VECTORSCOPE_SIZE), 640)
         return int(target)
 
     def _scope_geometry(self, size: int):
         # U/V 平面を中心原点へ投影するための幾何パラメータ。
         cx = (size - 1) // 2
         cy = (size - 1) // 2
-        radius = max(8, int(round(size * float(C.VECTORSCOPE_SCOPE_RADIUS_RATIO))))
-        full = max(1.0, float(C.VECTORSCOPE_CHROMA_FULL_SCALE))
+        radius = max(8, int(round(size * float(_VECTORSCOPE_SCOPE_RADIUS_RATIO))))
+        full = max(1.0, float(_VECTORSCOPE_CHROMA_FULL_SCALE))
         scale = radius / full
         return cx, cy, radius, scale
 
@@ -95,7 +127,8 @@ class VectorScopeView(BaseImageLabelView):
             ("M", (255, 0, 255), (245, 110, 220)),
         )
         self._ref_vectors_cache = [
-            (label, self._ref_angle_from_bgr(ref_bgr), color) for label, ref_bgr, color in refs
+            (label, self._display_angle_from_raw(self._ref_angle_from_bgr(ref_bgr)), color)
+            for label, ref_bgr, color in refs
         ]
         return self._ref_vectors_cache
 
@@ -152,13 +185,10 @@ class VectorScopeView(BaseImageLabelView):
         if not self._show_skin_tone_line:
             return
         size = view.shape[0]
-        cx, cy, radius, _ = self._scope_geometry(size)
-        angle = math.radians(float(C.VECTORSCOPE_SKIN_LINE_ANGLE_DEG))
+        cx, cy, _radius, _ = self._scope_geometry(size)
         p1 = (cx, cy)
-        p2 = (
-            int(round(cx + math.cos(angle) * radius)),
-            int(round(cy - math.sin(angle) * radius)),
-        )
+        angle = self._display_angle_from_raw(_VECTORSCOPE_SKIN_LINE_ANGLE_DEG)
+        p2 = self._angle_point(size, angle, 1.0)
         cv2.line(view, p1, p2, (30, 38, 52), 2, cv2.LINE_AA)
         cv2.line(view, p1, p2, (132, 166, 202), 1, cv2.LINE_AA)
 
@@ -176,20 +206,31 @@ class VectorScopeView(BaseImageLabelView):
         size = max(64, self._render_size())
         cx, cy, _radius, scale = self._scope_geometry(size)
         scope_mask = self._scope_mask(size)
-        xs = np.round(cx + u * scale).astype(np.int32)
-        ys = np.round(cy - v * scale).astype(np.int32)
+        m00, m01, m10, m11 = self._uv_transform
+        u_disp = m00 * u + m01 * v
+        v_disp = m10 * u + m11 * v
+        xs = np.round(cx + u_disp * scale).astype(np.int32)
+        ys = np.round(cy - v_disp * scale).astype(np.int32)
         valid = (xs >= 0) & (xs < size) & (ys >= 0) & (ys < size)
-        if np.any(valid):
-            inside = np.zeros_like(valid, dtype=bool)
-            inside[valid] = scope_mask[ys[valid], xs[valid]]
-            valid &= inside
-
+        valid_idx = np.flatnonzero(valid)
+        flat_idx = None
         hist = np.zeros((size, size), dtype=np.float32)
-        if np.any(valid):
-            flat_idx = ys[valid] * size + xs[valid]
-            hist = (
-                np.bincount(flat_idx, minlength=size * size).astype(np.float32).reshape(size, size)
-            )
+        if valid_idx.size > 0:
+            ys_flat = ys.reshape(-1)
+            xs_flat = xs.reshape(-1)
+            inside = scope_mask[ys_flat[valid_idx], xs_flat[valid_idx]]
+            if np.any(inside):
+                valid_idx = valid_idx[inside]
+                ys_valid = ys_flat[valid_idx]
+                xs_valid = xs_flat[valid_idx]
+                flat_idx = ys_valid * size + xs_valid
+                hist = (
+                    np.bincount(flat_idx, minlength=size * size)
+                    .astype(np.float32, copy=False)
+                    .reshape(size, size)
+                )
+            else:
+                valid_idx = np.empty((0,), dtype=np.int64)
         # 密度マップは対数正規化して暗部の情報を潰しにくくする。
         hist = cv2.GaussianBlur(hist, (0, 0), 1.0)
         density = normalize_map(np.log1p(hist))
@@ -205,23 +246,35 @@ class VectorScopeView(BaseImageLabelView):
         view_f[~scope_mask] = base[~scope_mask]
 
         # しきい値を超える高彩度域を控えめに警告する
-        thr = float(self._warn_threshold) / 100.0 * float(C.VECTORSCOPE_CHROMA_FULL_SCALE)
-        sat = np.sqrt(u * u + v * v)
-        over = valid & (sat >= thr)
-        if np.any(over):
-            over_idx = ys[over] * size + xs[over]
+        thr = float(self._warn_threshold) / 100.0 * float(_VECTORSCOPE_CHROMA_FULL_SCALE)
+        total_valid = int(valid_idx.size)
+        over_count = 0
+        if total_valid > 0 and flat_idx is not None:
+            u_flat = u.reshape(-1)
+            v_flat = v.reshape(-1)
+            sat_valid = np.sqrt(
+                u_flat[valid_idx] * u_flat[valid_idx] + v_flat[valid_idx] * v_flat[valid_idx]
+            )
+            over_valid = sat_valid >= thr
+            over_count = int(np.count_nonzero(over_valid))
+            if over_count > 0:
+                over_idx = flat_idx[over_valid]
+            else:
+                over_idx = None
+        else:
+            over_idx = None
+
+        if over_idx is not None:
             over_hist = (
                 np.bincount(over_idx, minlength=size * size).astype(np.float32).reshape(size, size)
             )
             over_hist = cv2.GaussianBlur(over_hist, (0, 0), 1.0)
             over_density = normalize_map(np.log1p(over_hist))
             over_alpha = np.clip(over_density[:, :, None] * 0.55, 0.0, 0.55)
-            warn_color = np.array(C.VECTORSCOPE_WARN_COLOR_BGR, dtype=np.float32).reshape(1, 1, 3)
+            warn_color = np.array(_VECTORSCOPE_WARN_COLOR_BGR, dtype=np.float32).reshape(1, 1, 3)
             view_f = np.clip(view_f * (1.0 - over_alpha) + warn_color * over_alpha, 0, 255)
 
         view = view_f.astype(np.uint8)
-        total_valid = int(np.count_nonzero(valid))
-        over_count = int(np.count_nonzero(over))
         # 設定画面の警告表示で使うため比率を保持しておく。
         self._last_high_sat_ratio = (over_count * 100.0 / total_valid) if total_valid > 0 else 0.0
 
@@ -231,7 +284,3 @@ class VectorScopeView(BaseImageLabelView):
 
         pm = bgr_to_qpixmap(view, max_w=self.width(), max_h=self.height())
         self.setPixmap(pm)
-
-    def resizeEvent(self, event):
-        super().resizeEvent(event)
-        self._rerender_on_resize(self.update_scope)

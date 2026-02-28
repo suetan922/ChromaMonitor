@@ -13,6 +13,16 @@ from PySide6.QtWidgets import (
 
 from ..util import constants as C
 
+_SETTINGS_PAGE_UPDATE = 1
+_SETTINGS_PAGE_SCATTER = 2
+_SETTINGS_PAGE_WHEEL = 3
+_SETTINGS_PAGE_IMAGE = 4
+_SETTINGS_PAGE_SALIENCY = 5
+_SETTINGS_PAGE_FOCUS = 6
+_SETTINGS_PAGE_SQUINT = 7
+_SETTINGS_PAGE_VECTORSCOPE = 8
+_SETTINGS_PAGE_RGB_HIST = 10
+
 
 def _make_labeled_row(label_text: str, widget: QWidget) -> QWidget:
     # 左ラベル + 右入力ウィジェットの共通行を作る。
@@ -221,15 +231,15 @@ def show_settings_window(main_window, page_index: int = 0):
 
         main_window._settings_nav_to_page = [
             C.SETTINGS_PAGE_CAPTURE,
-            C.SETTINGS_PAGE_UPDATE,
-            C.SETTINGS_PAGE_WHEEL,
-            C.SETTINGS_PAGE_SCATTER,
-            C.SETTINGS_PAGE_VECTORSCOPE,
-            C.SETTINGS_PAGE_IMAGE,
-            C.SETTINGS_PAGE_RGB_HIST,
-            C.SETTINGS_PAGE_FOCUS,
-            C.SETTINGS_PAGE_SQUINT,
-            C.SETTINGS_PAGE_SALIENCY,
+            _SETTINGS_PAGE_UPDATE,
+            _SETTINGS_PAGE_WHEEL,
+            _SETTINGS_PAGE_SCATTER,
+            _SETTINGS_PAGE_VECTORSCOPE,
+            _SETTINGS_PAGE_IMAGE,
+            _SETTINGS_PAGE_RGB_HIST,
+            _SETTINGS_PAGE_FOCUS,
+            _SETTINGS_PAGE_SQUINT,
+            _SETTINGS_PAGE_SALIENCY,
             C.SETTINGS_PAGE_LAYOUT,
         ]
         main_window._settings_page_to_nav = {
