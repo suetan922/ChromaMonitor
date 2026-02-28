@@ -347,8 +347,13 @@ def has_visible_image_dock(main_window) -> bool:
 
 def sync_worker_view_flags(main_window):
     # 可視ビューに合わせて worker 側の計算フラグを絞る。
+    color_visible = bool(
+        main_window.dock_color.isVisible()
+        or getattr(main_window, "dock_color_band", None) is not None
+        and main_window.dock_color_band.isVisible()
+    )
     main_window.worker.set_view_flags(
-        color=bool(main_window.dock_color.isVisible()),
+        color=color_visible,
         scatter=bool(main_window.dock_scatter.isVisible()),
         hsv_hist=bool(main_window.dock_hist.isVisible()),
         image=has_visible_image_dock(main_window),

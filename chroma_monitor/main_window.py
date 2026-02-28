@@ -35,6 +35,7 @@ from .views import PreviewWindow
 
 _WINDOW_DOCK_MENU_ITEMS = (
     ("act_color", "色相環", True, "dock_color"),
+    ("act_color_band", "カラー割合", True, "dock_color_band"),
     ("act_hist", "H/S/V ヒストグラム", True, "dock_hist"),
     ("act_rgb_hist", "R/G/B ヒストグラム", False, "dock_rgb_hist"),
     ("act_scatter", "S-V 散布図", True, "dock_scatter"),

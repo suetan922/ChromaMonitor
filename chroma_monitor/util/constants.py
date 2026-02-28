@@ -265,8 +265,8 @@ SQUINT_BLUR_SIGMA_MAX = 30.0
 """スクイントぼかしσの最大値。"""
 
 # Top-color display
-TOP_COLORS_TITLE = "色割合TOP5"
-TOP_COLORS_COUNT = 5
+TOP_COLORS_TITLE = "色割合TOP8"
+TOP_COLORS_COUNT = 8
 TOP_COLOR_BAR_HEIGHT = 24
 
 # Config keys

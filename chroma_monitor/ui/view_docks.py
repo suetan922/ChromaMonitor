@@ -201,10 +201,10 @@ def setup_view_docks(main_window) -> None:
 
     main_window._last_top_bars = []
     main_window._top_bar_render_key = None
-    main_window.lbl_top5_title = QLabel(C.TOP_COLORS_TITLE)
-    main_window.lbl_top5_title.setStyleSheet("color:#111; font-size:12px; font-weight:600;")
-    main_window.lbl_top5_title.setMinimumHeight(0)
-    main_window.lbl_top5_title.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
+    main_window.lbl_color_band_title = QLabel(C.TOP_COLORS_TITLE)
+    main_window.lbl_color_band_title.setStyleSheet("color:#111; font-size:12px; font-weight:600;")
+    main_window.lbl_color_band_title.setMinimumHeight(0)
+    main_window.lbl_color_band_title.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
 
     main_window.top_colors_bar = QLabel()
     main_window.top_colors_bar.setMinimumHeight(0)
@@ -224,10 +224,23 @@ def setup_view_docks(main_window) -> None:
     cw_l.setContentsMargins(2, 2, 2, 2)
     cw_l.setSpacing(2)
     cw_l.addWidget(main_window.wheel, 1)
-    cw_l.addWidget(main_window.lbl_top5_title)
-    cw_l.addWidget(main_window.top_colors_bar)
-    cw_l.addWidget(main_window.lbl_warmcool)
     color_dock = _create_dock(main_window, "色相環", "dock_color", color_widget)
+
+    color_band_widget = QWidget()
+    cb_l = QVBoxLayout(color_band_widget)
+    cb_l.setContentsMargins(6, 6, 6, 6)
+    cb_l.setSpacing(4)
+    cb_l.addWidget(main_window.lbl_color_band_title)
+    cb_l.addWidget(main_window.top_colors_bar)
+    cb_l.addWidget(main_window.lbl_warmcool)
+    cb_l.addStretch(1)
+    color_band_dock = _create_dock(
+        main_window,
+        "カラー割合",
+        "dock_color_band",
+        color_band_widget,
+        area=Qt.LeftDockWidgetArea,
+    )
 
     scatter_container = QWidget()
     sc_l = QHBoxLayout(scatter_container)
@@ -352,6 +365,7 @@ def setup_view_docks(main_window) -> None:
         main_window,
         [
             ("dock_color", color_dock, Qt.LeftDockWidgetArea),
+            ("dock_color_band", color_band_dock, Qt.LeftDockWidgetArea),
             ("dock_scatter", scatter_dock, Qt.RightDockWidgetArea),
             ("dock_hist", hist_dock, Qt.BottomDockWidgetArea),
             ("dock_rgb_hist", rgb_hist_dock, Qt.RightDockWidgetArea),
@@ -389,6 +403,7 @@ def setup_view_docks(main_window) -> None:
     # 初期配置: 左にカラー、右側にビュー群、下にヒストグラム。
     # タブ固定を避け、自由な多段再配置を優先する。
     main_window.addDockWidget(Qt.LeftDockWidgetArea, color_dock)
+    main_window.splitDockWidget(color_dock, color_band_dock, Qt.Vertical)
     main_window.addDockWidget(Qt.RightDockWidgetArea, scatter_dock)
     main_window.splitDockWidget(scatter_dock, edge_dock, Qt.Vertical)
     main_window.splitDockWidget(edge_dock, gray_dock, Qt.Vertical)

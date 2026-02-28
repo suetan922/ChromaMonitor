@@ -16,6 +16,7 @@ _TOP_BAR_MIN_HEIGHT = 12
 _TOP_BAR_TEXT_MIN_WIDTH = 240
 _TOP_BAR_TEXT_MIN_SEGMENT_PX = 42
 _SNAPSHOT_DOCK_COLOR = "dock_color"
+_SNAPSHOT_DOCK_COLOR_BAND = "dock_color_band"
 _SNAPSHOT_DOCK_SCATTER = "dock_scatter"
 _SNAPSHOT_DOCK_HIST = "dock_hist"
 
@@ -218,6 +219,13 @@ def _render_color_dock_from_snapshot(main_window, snapshot: dict) -> bool:
     if hist is None or not is_widget_renderable(main_window.dock_color):
         return False
     main_window.wheel.update_hist(hist)
+    return True
+
+
+def _render_color_band_dock_from_snapshot(main_window, snapshot: dict) -> bool:
+    hist = snapshot.get("hist")
+    if hist is None or not is_widget_renderable(getattr(main_window, "dock_color_band", None)):
+        return False
     bars = snapshot.get("top_colors")
     if bars is None:
         _, bars = top_hue_bars(hist)
@@ -352,7 +360,7 @@ def update_image_docks_from_frame(main_window, bgr_preview) -> set[str]:
 
 
 def _snapshot_has_graph_data_for_dock(snapshot: dict, dock_name: str) -> bool:
-    if dock_name == _SNAPSHOT_DOCK_COLOR:
+    if dock_name in (_SNAPSHOT_DOCK_COLOR, _SNAPSHOT_DOCK_COLOR_BAND):
         return snapshot.get("hist") is not None
     if dock_name == _SNAPSHOT_DOCK_SCATTER:
         return snapshot.get("sv") is not None and snapshot.get("rgb") is not None
@@ -422,7 +430,12 @@ def restore_dock_from_snapshot(main_window, dock) -> None:
     if rendered_version == snapshot_version:
         return
 
-    if dock_name in (_SNAPSHOT_DOCK_COLOR, _SNAPSHOT_DOCK_SCATTER, _SNAPSHOT_DOCK_HIST):
+    if dock_name in (
+        _SNAPSHOT_DOCK_COLOR,
+        _SNAPSHOT_DOCK_COLOR_BAND,
+        _SNAPSHOT_DOCK_SCATTER,
+        _SNAPSHOT_DOCK_HIST,
+    ):
         if not _ensure_snapshot_graph_data_for_dock(main_window, dock_name):
             return
 
@@ -430,6 +443,8 @@ def restore_dock_from_snapshot(main_window, dock) -> None:
     updated = False
     if dock_name == _SNAPSHOT_DOCK_COLOR:
         updated = _render_color_dock_from_snapshot(main_window, snapshot)
+    elif dock_name == _SNAPSHOT_DOCK_COLOR_BAND:
+        updated = _render_color_band_dock_from_snapshot(main_window, snapshot)
     elif dock_name == _SNAPSHOT_DOCK_SCATTER:
         updated = _render_scatter_dock_from_snapshot(main_window, snapshot)
     elif dock_name == _SNAPSHOT_DOCK_HIST:
@@ -458,6 +473,8 @@ def on_result(main_window, res: dict):
         if res["graph_update"]:
             if _render_color_dock_from_snapshot(main_window, snapshot):
                 rendered_docks.add(_SNAPSHOT_DOCK_COLOR)
+            if _render_color_band_dock_from_snapshot(main_window, snapshot):
+                rendered_docks.add(_SNAPSHOT_DOCK_COLOR_BAND)
             if _render_scatter_dock_from_snapshot(main_window, snapshot):
                 rendered_docks.add(_SNAPSHOT_DOCK_SCATTER)
             if _render_hist_dock_from_snapshot(main_window, snapshot):
