@@ -49,6 +49,44 @@ WHEEL_MODE_HSV180 = "hsv180"
 WHEEL_MODE_MUNSELL40 = "munsell40"
 WHEEL_MODES = (WHEEL_MODE_HSV180, WHEEL_MODE_MUNSELL40)
 
+# Color harmony guide types
+WHEEL_HARMONY_GUIDE_NONE = "none"
+"""色彩調和ガイド: 表示なし。"""
+WHEEL_HARMONY_GUIDE_IDENTITY = "identity"
+"""色彩調和ガイド: アイデンティティ。"""
+WHEEL_HARMONY_GUIDE_ANALOGOUS = "analogous"
+"""色彩調和ガイド: アナロジー。"""
+WHEEL_HARMONY_GUIDE_INTERMEDIATE = "intermediate"
+"""色彩調和ガイド: インターミディエート。"""
+WHEEL_HARMONY_GUIDE_COMPLEMENTARY = "complementary"
+"""色彩調和ガイド: コンプリメンタリー。"""
+WHEEL_HARMONY_GUIDE_OPPONENT = "opponent"
+"""色彩調和ガイド: オポーネント。"""
+WHEEL_HARMONY_GUIDE_SPLIT_COMPLEMENTARY = "split_complementary"
+"""色彩調和ガイド: スプリットコンプリメンタリー。"""
+WHEEL_HARMONY_GUIDE_TRIAD = "triad"
+"""色彩調和ガイド: トライアド。"""
+WHEEL_HARMONY_GUIDE_TETRAD = "tetrad"
+"""色彩調和ガイド: テトラード。"""
+WHEEL_HARMONY_GUIDE_PENTAD = "pentad"
+"""色彩調和ガイド: ペンタード。"""
+WHEEL_HARMONY_GUIDE_HEXAD = "hexad"
+"""色彩調和ガイド: ヘクサード。"""
+WHEEL_HARMONY_GUIDE_TYPES = (
+    WHEEL_HARMONY_GUIDE_NONE,
+    WHEEL_HARMONY_GUIDE_IDENTITY,
+    WHEEL_HARMONY_GUIDE_ANALOGOUS,
+    WHEEL_HARMONY_GUIDE_INTERMEDIATE,
+    WHEEL_HARMONY_GUIDE_COMPLEMENTARY,
+    WHEEL_HARMONY_GUIDE_OPPONENT,
+    WHEEL_HARMONY_GUIDE_SPLIT_COMPLEMENTARY,
+    WHEEL_HARMONY_GUIDE_TRIAD,
+    WHEEL_HARMONY_GUIDE_TETRAD,
+    WHEEL_HARMONY_GUIDE_PENTAD,
+    WHEEL_HARMONY_GUIDE_HEXAD,
+)
+"""色彩調和ガイドの許可値一覧。"""
+
 # RGB histogram display modes
 RGB_HIST_MODE_SIDE_BY_SIDE = "side_by_side"
 RGB_HIST_MODE_OVERLAY = "overlay"
@@ -146,6 +184,10 @@ DEFAULT_ANALYSIS_RESOLUTION_MODE = ANALYSIS_RESOLUTION_MODE_ORIGINAL
 """解析解像度モード既定値。"""
 DEFAULT_WHEEL_MODE = WHEEL_MODE_HSV180
 """色相環モード既定値。"""
+DEFAULT_WHEEL_HARMONY_GUIDE_ENABLED = False
+"""色彩調和ガイド表示の既定値。"""
+DEFAULT_WHEEL_HARMONY_GUIDE_TYPE = WHEEL_HARMONY_GUIDE_IDENTITY
+"""色彩調和ガイド種別の既定値。"""
 DEFAULT_RGB_HIST_MODE = RGB_HIST_MODE_SIDE_BY_SIDE
 """RGBヒストグラム表示モード既定値。"""
 DEFAULT_WHEEL_SAT_THRESHOLD = 1
@@ -239,6 +281,8 @@ CFG_SCATTER_HUE_CENTER = "scatter_hue_center"
 CFG_WHEEL_MODE = "wheel_mode"
 CFG_RGB_HIST_MODE = "rgb_hist_mode"
 CFG_WHEEL_SAT_THRESHOLD = "wheel_sat_threshold"
+CFG_WHEEL_HARMONY_GUIDE_ENABLED = "wheel_harmony_guide_enabled"
+CFG_WHEEL_HARMONY_GUIDE_TYPE = "wheel_harmony_guide_type"
 CFG_CAPTURE_SOURCE = "capture_source"
 CFG_EDGE_SENSITIVITY = "edge_sensitivity"
 CFG_BINARY_PRESET = "binary_preset"

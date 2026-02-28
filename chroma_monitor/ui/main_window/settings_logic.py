@@ -92,6 +92,8 @@ def _collect_settings_payload(main_window) -> dict:
         C.CFG_WHEEL_MODE: selected_wheel_mode(main_window),
         C.CFG_RGB_HIST_MODE: selected_rgb_hist_mode(main_window),
         C.CFG_WHEEL_SAT_THRESHOLD: selected_wheel_sat_threshold(main_window),
+        C.CFG_WHEEL_HARMONY_GUIDE_ENABLED: selected_wheel_harmony_guide_enabled(main_window),
+        C.CFG_WHEEL_HARMONY_GUIDE_TYPE: selected_wheel_harmony_guide_type(main_window),
         C.CFG_ALWAYS_ON_TOP: main_window._is_always_on_top_enabled(),
         C.CFG_MODE: selected_mode(main_window),
         C.CFG_DIFF_THRESHOLD: float(main_window.spin_diff.value()),
@@ -150,6 +152,18 @@ def selected_wheel_sat_threshold(main_window) -> int:
         main_window.spin_wheel_sat_threshold.value(),
         C.WHEEL_SAT_THRESHOLD_MIN,
         C.WHEEL_SAT_THRESHOLD_MAX,
+    )
+
+
+def selected_wheel_harmony_guide_enabled(main_window) -> bool:
+    return bool(main_window.chk_wheel_harmony_guide.isChecked())
+
+
+def selected_wheel_harmony_guide_type(main_window) -> str:
+    return _selected_combo_data(
+        main_window.combo_wheel_harmony_guide,
+        C.WHEEL_HARMONY_GUIDE_TYPES,
+        C.DEFAULT_WHEEL_HARMONY_GUIDE_TYPE,
     )
 
 
@@ -306,6 +320,10 @@ def apply_wheel_settings(main_window, *_):
     # 色相環表示方式と彩度しきい値を同時に反映。
     main_window.wheel.set_mode(selected_wheel_mode(main_window))
     main_window.worker.set_wheel_sat_threshold(selected_wheel_sat_threshold(main_window))
+    guide_enabled = selected_wheel_harmony_guide_enabled(main_window)
+    main_window.combo_wheel_harmony_guide.setEnabled(guide_enabled)
+    main_window.wheel.set_harmony_guide_enabled(guide_enabled)
+    main_window.wheel.set_harmony_guide_type(selected_wheel_harmony_guide_type(main_window))
     main_window._request_save_settings()
 
 
@@ -515,8 +533,27 @@ def _load_wheel_and_capture_settings(main_window, cfg: dict) -> None:
         C.WHEEL_SAT_THRESHOLD_MIN,
         C.WHEEL_SAT_THRESHOLD_MAX,
     )
+    wheel_harmony_guide_enabled = bool(
+        cfg.get(C.CFG_WHEEL_HARMONY_GUIDE_ENABLED, C.DEFAULT_WHEEL_HARMONY_GUIDE_ENABLED)
+    )
+    wheel_harmony_guide_type = safe_choice(
+        cfg.get(C.CFG_WHEEL_HARMONY_GUIDE_TYPE, C.DEFAULT_WHEEL_HARMONY_GUIDE_TYPE),
+        C.WHEEL_HARMONY_GUIDE_TYPES,
+        C.DEFAULT_WHEEL_HARMONY_GUIDE_TYPE,
+    )
+    set_checked_blocked(main_window.chk_wheel_harmony_guide, wheel_harmony_guide_enabled)
+    _apply_combo_choice(
+        main_window.combo_wheel_harmony_guide,
+        wheel_harmony_guide_type,
+        C.WHEEL_HARMONY_GUIDE_TYPES,
+        C.DEFAULT_WHEEL_HARMONY_GUIDE_TYPE,
+    )
+    main_window.combo_wheel_harmony_guide.setEnabled(wheel_harmony_guide_enabled)
+
     _set_value_blocked(main_window.spin_wheel_sat_threshold, wheel_sat_threshold)
     main_window.wheel.set_mode(selected_wheel_mode(main_window))
+    main_window.wheel.set_harmony_guide_enabled(wheel_harmony_guide_enabled)
+    main_window.wheel.set_harmony_guide_type(selected_wheel_harmony_guide_type(main_window))
     main_window.worker.set_wheel_sat_threshold(wheel_sat_threshold)
     main_window.worker.set_graph_every(C.DEFAULT_GRAPH_EVERY)
 

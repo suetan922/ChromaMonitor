@@ -97,6 +97,24 @@ _MUNSELL_COLORS_RGB = (
     (202, 38, 133),
     (222, 35, 105),
 )
+_WHEEL_HARMONY_GUIDE_PATTERNS = {
+    C.WHEEL_HARMONY_GUIDE_IDENTITY: (0.0,),
+    C.WHEEL_HARMONY_GUIDE_ANALOGOUS: (-30.0, 0.0, 30.0),
+    C.WHEEL_HARMONY_GUIDE_INTERMEDIATE: (-60.0, 0.0, 60.0),
+    C.WHEEL_HARMONY_GUIDE_COMPLEMENTARY: (0.0, 180.0),
+    C.WHEEL_HARMONY_GUIDE_OPPONENT: (0.0, 150.0),
+    C.WHEEL_HARMONY_GUIDE_SPLIT_COMPLEMENTARY: (0.0, 150.0, 210.0),
+    C.WHEEL_HARMONY_GUIDE_TRIAD: (0.0, 120.0, 240.0),
+    C.WHEEL_HARMONY_GUIDE_TETRAD: (0.0, 90.0, 180.0, 270.0),
+    C.WHEEL_HARMONY_GUIDE_PENTAD: (0.0, 72.0, 144.0, 216.0, 288.0),
+    C.WHEEL_HARMONY_GUIDE_HEXAD: (0.0, 60.0, 120.0, 180.0, 240.0, 300.0),
+}
+_WHEEL_HARMONY_GUIDE_RADIUS_RATIO = 0.82
+_WHEEL_HARMONY_GUIDE_DOT_RADIUS = 3
+_WHEEL_HARMONY_GUIDE_RING_COLOR = QColor(123, 144, 173, 92)
+_WHEEL_HARMONY_GUIDE_SPOKE_COLOR = QColor(39, 89, 170, 120)
+_WHEEL_HARMONY_GUIDE_SHAPE_COLOR = QColor(30, 92, 194, 212)
+_WHEEL_HARMONY_GUIDE_DOT_COLOR = QColor(30, 92, 194, 236)
 
 def _build_hue180_to_munsell40_weights() -> np.ndarray:
     src_bins = 180
@@ -138,6 +156,16 @@ class ColorWheelWidget(QWidget):
         self._mode = C.DEFAULT_WHEEL_MODE
         self._base_ratio = 0.33
         self._min_thickness_ratio = 0.06
+        self._guide_enabled = bool(C.DEFAULT_WHEEL_HARMONY_GUIDE_ENABLED)
+        self._guide_type = safe_choice(
+            C.DEFAULT_WHEEL_HARMONY_GUIDE_TYPE,
+            C.WHEEL_HARMONY_GUIDE_TYPES,
+            C.DEFAULT_WHEEL_HARMONY_GUIDE_TYPE,
+        )
+        self._guide_rotation_deg = 0.0
+        self._guide_drag_active = False
+        self._guide_drag_start_angle = 0.0
+        self._guide_drag_start_rotation = 0.0
 
     def update_hist(self, hist: np.ndarray):
         # 受け取ったヒストグラムを描画向けに float32 化して保持する。
@@ -147,6 +175,25 @@ class ColorWheelWidget(QWidget):
     def set_mode(self, mode: str):
         self._mode = safe_choice(mode, C.WHEEL_MODES, C.DEFAULT_WHEEL_MODE)
         self.update()
+
+    def set_harmony_guide_enabled(self, enabled: bool):
+        self._guide_enabled = bool(enabled)
+        self.update()
+
+    def set_harmony_guide_type(self, guide_type: str):
+        self._guide_type = safe_choice(
+            guide_type,
+            C.WHEEL_HARMONY_GUIDE_TYPES,
+            C.DEFAULT_WHEEL_HARMONY_GUIDE_TYPE,
+        )
+        self.update()
+
+    def set_harmony_guide_rotation(self, rotation_deg: float):
+        self._guide_rotation_deg = float(rotation_deg)
+        self.update()
+
+    def harmony_guide_rotation(self) -> float:
+        return float(self._guide_rotation_deg)
 
     def _munsell_hist(self) -> np.ndarray:
         # 180ビン色相を重み行列で 40 色相へ再サンプリングする。
@@ -172,21 +219,131 @@ class ColorWheelWidget(QWidget):
             colors.append(c)
         return counts, colors
 
+    def _wheel_geometry(self) -> tuple[int, int, int, int]:
+        rect = self.rect().adjusted(12, 12, -12, -12)
+        cx, cy = rect.center().x(), rect.center().y()
+        r = min(rect.width(), rect.height()) // 2
+        inner_r = int(r * self._base_ratio)
+        return cx, cy, r, inner_r
+
+    @staticmethod
+    def _normalize_signed_delta_deg(delta_deg: float) -> float:
+        normalized = (float(delta_deg) + 180.0) % 360.0 - 180.0
+        return normalized
+
+    def _hue_offset_to_angle_deg(self, hue_deg: float) -> float:
+        return (
+            float(C.HUE_RED_REFERENCE_DEG)
+            + float(self._guide_rotation_deg)
+            + float(C.HUE_DIRECTION_SIGN) * float(hue_deg)
+        ) % 360.0
+
+    def _guide_points(self, cx: int, cy: int, inner_r: int) -> list[QPoint]:
+        offsets = _WHEEL_HARMONY_GUIDE_PATTERNS.get(self._guide_type)
+        if not offsets:
+            return []
+        guide_r = max(8, int(round(inner_r * _WHEEL_HARMONY_GUIDE_RADIUS_RATIO)))
+        points = []
+        for deg in offsets:
+            angle = math.radians(self._hue_offset_to_angle_deg(deg))
+            x = int(round(cx + math.cos(angle) * guide_r))
+            y = int(round(cy - math.sin(angle) * guide_r))
+            points.append(QPoint(x, y))
+        return points
+
+    def _draw_harmony_guide(self, painter: QPainter, cx: int, cy: int, inner_r: int) -> None:
+        if not self._guide_enabled:
+            return
+        if self._guide_type == C.WHEEL_HARMONY_GUIDE_NONE:
+            return
+        points = self._guide_points(cx, cy, inner_r)
+        if not points:
+            return
+
+        guide_r = max(8, int(round(inner_r * _WHEEL_HARMONY_GUIDE_RADIUS_RATIO)))
+        painter.setPen(QPen(_WHEEL_HARMONY_GUIDE_RING_COLOR, 1))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawEllipse(QPoint(cx, cy), guide_r, guide_r)
+
+        painter.setPen(QPen(_WHEEL_HARMONY_GUIDE_SPOKE_COLOR, 1))
+        for pt in points:
+            painter.drawLine(cx, cy, pt.x(), pt.y())
+
+        painter.setPen(QPen(_WHEEL_HARMONY_GUIDE_SHAPE_COLOR, 2))
+        if len(points) == 1:
+            painter.drawLine(cx, cy, points[0].x(), points[0].y())
+        elif len(points) == 2:
+            painter.drawLine(points[0], points[1])
+        else:
+            sorted_points = sorted(
+                points,
+                key=lambda pt: (math.atan2(cy - pt.y(), pt.x() - cx) + math.tau) % math.tau,
+            )
+            for i in range(len(sorted_points)):
+                painter.drawLine(sorted_points[i], sorted_points[(i + 1) % len(sorted_points)])
+
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(_WHEEL_HARMONY_GUIDE_DOT_COLOR)
+        for pt in points:
+            painter.drawEllipse(pt, _WHEEL_HARMONY_GUIDE_DOT_RADIUS, _WHEEL_HARMONY_GUIDE_DOT_RADIUS)
+
+    @staticmethod
+    def _point_angle_deg(px: int, py: int, cx: int, cy: int) -> float:
+        # 画面座標(下向き+Y)を数学座標へ変換して角度化する。
+        return math.degrees(math.atan2(float(cy - py), float(px - cx))) % 360.0
+
+    def _is_guide_drag_enabled(self) -> bool:
+        return bool(
+            self._guide_enabled
+            and self._guide_type != C.WHEEL_HARMONY_GUIDE_NONE
+            and self._guide_type in _WHEEL_HARMONY_GUIDE_PATTERNS
+        )
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.LeftButton and self._is_guide_drag_enabled():
+            cx, cy, _r, inner_r = self._wheel_geometry()
+            pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            dx = int(pos.x()) - int(cx)
+            dy = int(pos.y()) - int(cy)
+            if dx * dx + dy * dy <= int(inner_r * inner_r):
+                self._guide_drag_active = True
+                self._guide_drag_start_angle = self._point_angle_deg(pos.x(), pos.y(), cx, cy)
+                self._guide_drag_start_rotation = float(self._guide_rotation_deg)
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._guide_drag_active:
+            cx, cy, _r, _inner_r = self._wheel_geometry()
+            pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            current_angle = self._point_angle_deg(pos.x(), pos.y(), cx, cy)
+            delta = self._normalize_signed_delta_deg(current_angle - self._guide_drag_start_angle)
+            self._guide_rotation_deg = float(self._guide_drag_start_rotation + delta)
+            self.update()
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.LeftButton and self._guide_drag_active:
+            self._guide_drag_active = False
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
     def paintEvent(self, _):
         p = QPainter(self)
         try:
             p.setRenderHint(QPainter.Antialiasing, True)
             p.fillRect(self.rect(), QColor(255, 255, 255, 255))
 
-            rect = self.rect().adjusted(12, 12, -12, -12)
-            cx, cy = rect.center().x(), rect.center().y()
-            r = min(rect.width(), rect.height()) // 2
+            cx, cy, r, inner_r = self._wheel_geometry()
 
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(235, 235, 235, 255))
             p.drawEllipse(QPoint(cx, cy), r, r)
 
-            inner_r = int(r * self._base_ratio)
             p.setBrush(QColor(255, 255, 255, 255))
             p.drawEllipse(QPoint(cx, cy), inner_r, inner_r)
 
@@ -248,6 +405,7 @@ class ColorWheelWidget(QWidget):
             p.setPen(Qt.NoPen)
             p.setBrush(QColor(255, 255, 255, 255))
             p.drawEllipse(QPoint(cx, cy), inner_r, inner_r)
+            self._draw_harmony_guide(p, cx, cy, inner_r)
         finally:
             p.end()
 

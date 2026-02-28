@@ -154,6 +154,9 @@ def show_settings_window(main_window, page_index: int = 0):
                 word_wrap=True,
             )
         )
+        lw.addWidget(main_window.chk_wheel_harmony_guide)
+        lw.addWidget(_make_labeled_row("色彩調和タイプ", main_window.combo_wheel_harmony_guide))
+        lw.addWidget(_make_hint_label("ガイド表示中は色相環内側を左ドラッグで回転できます。"))
         lw.addStretch(1)
         pages.addWidget(page_wheel)
 

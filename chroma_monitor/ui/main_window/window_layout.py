@@ -858,9 +858,13 @@ def apply_ui_style(main_window):
         QPushButton:hover { border:1px solid #b6bac0; background:#eef0f3; }
         QPushButton:pressed { background:#e4e6ea; }
         QComboBox { background:#ffffff; border:1px solid #cdd1d6; padding:4px 6px; color:#111; border-radius:4px; }
+        QComboBox:disabled { background:#eceff3; border:1px solid #d6dbe2; color:#8a9099; }
         QDoubleSpinBox, QSpinBox {
             background:#ffffff; border:1px solid #cdd1d6; color:#111; border-radius:4px;
             padding:4px 24px 4px 6px;
+        }
+        QDoubleSpinBox:disabled, QSpinBox:disabled {
+            background:#eceff3; border:1px solid #d6dbe2; color:#8a9099;
         }
         QSpinBox::up-button, QDoubleSpinBox::up-button {
             subcontrol-origin:border;
