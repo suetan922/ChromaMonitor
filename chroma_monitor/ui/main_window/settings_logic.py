@@ -94,6 +94,16 @@ def _collect_settings_payload(main_window) -> dict:
         C.CFG_WHEEL_SAT_THRESHOLD: selected_wheel_sat_threshold(main_window),
         C.CFG_WHEEL_HARMONY_GUIDE_ENABLED: selected_wheel_harmony_guide_enabled(main_window),
         C.CFG_WHEEL_HARMONY_GUIDE_TYPE: selected_wheel_harmony_guide_type(main_window),
+        C.CFG_WHEEL_HARMONY_GUIDE_ROTATION: selected_wheel_harmony_guide_rotation(main_window),
+        C.CFG_COLOR_BAND_USE_WHEEL_SAT_THRESHOLD: selected_color_band_use_wheel_sat_threshold(
+            main_window
+        ),
+        C.CFG_COLOR_BAND_SAT_THRESHOLD: selected_color_band_sat_threshold(main_window),
+        C.CFG_COLOR_BAND_USE_WHEEL_HARMONY: selected_color_band_use_wheel_harmony(main_window),
+        C.CFG_COLOR_BAND_HARMONY_GUIDE_ENABLED: selected_color_band_harmony_guide_enabled(
+            main_window
+        ),
+        C.CFG_COLOR_BAND_HARMONY_GUIDE_TYPE: selected_color_band_harmony_guide_type(main_window),
         C.CFG_ALWAYS_ON_TOP: main_window._is_always_on_top_enabled(),
         C.CFG_MODE: selected_mode(main_window),
         C.CFG_DIFF_THRESHOLD: float(main_window.spin_diff.value()),
@@ -164,6 +174,44 @@ def selected_wheel_harmony_guide_type(main_window) -> str:
         main_window.combo_wheel_harmony_guide,
         C.WHEEL_HARMONY_GUIDE_TYPES,
         C.DEFAULT_WHEEL_HARMONY_GUIDE_TYPE,
+    )
+
+
+def selected_wheel_harmony_guide_rotation(main_window) -> float:
+    wheel = getattr(main_window, "wheel", None)
+    if wheel is None or not hasattr(wheel, "harmony_guide_rotation"):
+        return 0.0
+    try:
+        return float(wheel.harmony_guide_rotation())
+    except Exception:
+        return 0.0
+
+
+def selected_color_band_use_wheel_sat_threshold(main_window) -> bool:
+    return bool(main_window.chk_color_band_use_wheel_sat_threshold.isChecked())
+
+
+def selected_color_band_sat_threshold(main_window) -> int:
+    return clamp_int(
+        main_window.spin_color_band_sat_threshold.value(),
+        C.WHEEL_SAT_THRESHOLD_MIN,
+        C.WHEEL_SAT_THRESHOLD_MAX,
+    )
+
+
+def selected_color_band_use_wheel_harmony(main_window) -> bool:
+    return bool(main_window.chk_color_band_use_wheel_harmony.isChecked())
+
+
+def selected_color_band_harmony_guide_enabled(main_window) -> bool:
+    return bool(main_window.chk_color_band_harmony_guide.isChecked())
+
+
+def selected_color_band_harmony_guide_type(main_window) -> str:
+    return _selected_combo_data(
+        main_window.combo_color_band_harmony_guide,
+        C.WHEEL_HARMONY_GUIDE_TYPES,
+        C.DEFAULT_COLOR_BAND_HARMONY_GUIDE_TYPE,
     )
 
 
@@ -281,6 +329,17 @@ def sync_scatter_filter_controls(main_window):
     main_window.lbl_scatter_hue_center.setEnabled(enabled)
 
 
+def sync_color_band_controls(main_window):
+    use_wheel_sat = selected_color_band_use_wheel_sat_threshold(main_window)
+    main_window.spin_color_band_sat_threshold.setEnabled(not use_wheel_sat)
+    use_wheel_harmony = selected_color_band_use_wheel_harmony(main_window)
+    own_harmony_enabled = selected_color_band_harmony_guide_enabled(main_window)
+    main_window.chk_color_band_harmony_guide.setEnabled(not use_wheel_harmony)
+    main_window.combo_color_band_harmony_guide.setEnabled(
+        (not use_wheel_harmony) and own_harmony_enabled
+    )
+
+
 def apply_sample_points_settings(main_window, *_):
     # サンプル数は散布図サンプリング負荷に直結する設定。
     main_window.worker.set_sample_points(int(main_window.spin_points.value()))
@@ -324,6 +383,30 @@ def apply_wheel_settings(main_window, *_):
     main_window.combo_wheel_harmony_guide.setEnabled(guide_enabled)
     main_window.wheel.set_harmony_guide_enabled(guide_enabled)
     main_window.wheel.set_harmony_guide_type(selected_wheel_harmony_guide_type(main_window))
+    # チップ詳細の調和候補も即時更新する。
+    if hasattr(main_window, "list_color_chips") and hasattr(main_window, "_on_color_chip_selected"):
+        main_window._on_color_chip_selected(int(main_window.list_color_chips.currentRow()))
+    if hasattr(main_window, "apply_color_band_settings"):
+        main_window.apply_color_band_settings(save=False)
+    main_window._request_save_settings()
+
+
+def apply_color_band_settings(main_window, *_args, save: bool = True):
+    sync_color_band_controls(main_window)
+    snapshot = getattr(main_window, "_latest_result_snapshot", None)
+    if isinstance(snapshot, dict):
+        snapshot["top_colors_full"] = None
+        main_window._latest_result_snapshot = snapshot
+    if hasattr(main_window, "_restore_dock_from_snapshot"):
+        main_window._restore_dock_from_snapshot(getattr(main_window, "dock_color_band", None))
+    if hasattr(main_window, "_on_color_chip_selected") and hasattr(main_window, "list_color_chips"):
+        main_window._on_color_chip_selected(int(main_window.list_color_chips.currentRow()))
+    if save:
+        main_window._request_save_settings()
+
+
+def on_wheel_harmony_rotation_changed(main_window, _rotation_deg: float):
+    # 色相環ガイドの回転は設定へ永続化する。
     main_window._request_save_settings()
 
 
@@ -541,6 +624,11 @@ def _load_wheel_and_capture_settings(main_window, cfg: dict) -> None:
         C.WHEEL_HARMONY_GUIDE_TYPES,
         C.DEFAULT_WHEEL_HARMONY_GUIDE_TYPE,
     )
+    wheel_harmony_guide_rotation = _cfg_float(
+        cfg,
+        C.CFG_WHEEL_HARMONY_GUIDE_ROTATION,
+        0.0,
+    )
     set_checked_blocked(main_window.chk_wheel_harmony_guide, wheel_harmony_guide_enabled)
     _apply_combo_choice(
         main_window.combo_wheel_harmony_guide,
@@ -554,8 +642,54 @@ def _load_wheel_and_capture_settings(main_window, cfg: dict) -> None:
     main_window.wheel.set_mode(selected_wheel_mode(main_window))
     main_window.wheel.set_harmony_guide_enabled(wheel_harmony_guide_enabled)
     main_window.wheel.set_harmony_guide_type(selected_wheel_harmony_guide_type(main_window))
+    main_window.wheel.set_harmony_guide_rotation(wheel_harmony_guide_rotation)
     main_window.worker.set_wheel_sat_threshold(wheel_sat_threshold)
     main_window.worker.set_graph_every(C.DEFAULT_GRAPH_EVERY)
+
+    color_band_use_wheel_sat = bool(
+        cfg.get(
+            C.CFG_COLOR_BAND_USE_WHEEL_SAT_THRESHOLD,
+            C.DEFAULT_COLOR_BAND_USE_WHEEL_SAT_THRESHOLD,
+        )
+    )
+    color_band_sat_threshold = _cfg_int(
+        cfg,
+        C.CFG_COLOR_BAND_SAT_THRESHOLD,
+        C.DEFAULT_COLOR_BAND_SAT_THRESHOLD,
+        C.WHEEL_SAT_THRESHOLD_MIN,
+        C.WHEEL_SAT_THRESHOLD_MAX,
+    )
+    color_band_use_wheel_harmony = bool(
+        cfg.get(
+            C.CFG_COLOR_BAND_USE_WHEEL_HARMONY,
+            C.DEFAULT_COLOR_BAND_USE_WHEEL_HARMONY,
+        )
+    )
+    color_band_harmony_enabled = bool(
+        cfg.get(
+            C.CFG_COLOR_BAND_HARMONY_GUIDE_ENABLED,
+            C.DEFAULT_COLOR_BAND_HARMONY_GUIDE_ENABLED,
+        )
+    )
+    color_band_harmony_type = safe_choice(
+        cfg.get(
+            C.CFG_COLOR_BAND_HARMONY_GUIDE_TYPE,
+            C.DEFAULT_COLOR_BAND_HARMONY_GUIDE_TYPE,
+        ),
+        C.WHEEL_HARMONY_GUIDE_TYPES,
+        C.DEFAULT_COLOR_BAND_HARMONY_GUIDE_TYPE,
+    )
+    set_checked_blocked(main_window.chk_color_band_use_wheel_sat_threshold, color_band_use_wheel_sat)
+    _set_value_blocked(main_window.spin_color_band_sat_threshold, color_band_sat_threshold)
+    set_checked_blocked(main_window.chk_color_band_use_wheel_harmony, color_band_use_wheel_harmony)
+    set_checked_blocked(main_window.chk_color_band_harmony_guide, color_band_harmony_enabled)
+    _apply_combo_choice(
+        main_window.combo_color_band_harmony_guide,
+        color_band_harmony_type,
+        C.WHEEL_HARMONY_GUIDE_TYPES,
+        C.DEFAULT_COLOR_BAND_HARMONY_GUIDE_TYPE,
+    )
+    apply_color_band_settings(main_window, save=False)
 
     _apply_combo_choice(
         main_window.combo_capture_source,

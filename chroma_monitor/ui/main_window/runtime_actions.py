@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread
+from PySide6.QtCore import Qt, QThread, QTimer
 from PySide6.QtWidgets import QFileDialog, QMainWindow, QMessageBox, QProgressDialog
 
 from ...analysis.image_file_worker import ImageFileAnalyzeWorker
@@ -138,7 +138,26 @@ def on_image_analysis_progress(main_window, percent: int, text: str):
 def on_image_analysis_finished(main_window, res: dict):
     cleanup_image_analysis(main_window)
     main_window.on_result(res)
+    _restore_visible_docks_from_snapshot(main_window)
+    # 画像解析結果は単発更新のため、レイアウト確定後にも再適用して描画取りこぼしを防ぐ。
+    QTimer.singleShot(0, lambda mw=main_window: _restore_visible_docks_from_snapshot(mw))
+    QTimer.singleShot(80, lambda mw=main_window: _restore_visible_docks_from_snapshot(mw))
     on_status(main_window, f"画像解析完了 ({res.get('dt_ms', 0.0):.1f} ms)")
+
+
+def _restore_visible_docks_from_snapshot(main_window) -> None:
+    for dock in getattr(main_window, "_dock_map", {}).values():
+        if dock is None:
+            continue
+        try:
+            if not dock.isVisible():
+                continue
+        except Exception:
+            continue
+        try:
+            main_window._restore_dock_from_snapshot(dock)
+        except Exception:
+            pass
 
 
 def on_image_analysis_failed(main_window, message: str):
@@ -193,18 +212,29 @@ def close_event(main_window, event):
 
 
 def refresh_windows(main_window):
-    # Win32 環境ではウィンドウ一覧を再取得し、先頭に未選択行を固定で置く。
+    # Win32 環境ではウィンドウ一覧を再取得し、可能なら既存選択を維持する。
     wins = list_windows() if HAS_WIN32 else []
+    prev_hwnd = main_window.combo_win.currentData()
     with blocked_signals(main_window.combo_win):
         main_window.combo_win.clear()
-        main_window.combo_win.addItem("（未選択）", None)
         for hwnd, title in wins[: _WINDOW_LIST_MAX_ITEMS]:
             main_window.combo_win.addItem(title, hwnd)
+        selected_idx = -1
+        if prev_hwnd is not None:
+            for i in range(main_window.combo_win.count()):
+                if main_window.combo_win.itemData(i) == prev_hwnd:
+                    selected_idx = i
+                    break
+        main_window.combo_win.setCurrentIndex(selected_idx)
+        if selected_idx < 0 and main_window.combo_win.lineEdit() is not None:
+            main_window.combo_win.clearEditText()
     if not HAS_WIN32:
         on_status(main_window, "この環境ではウィンドウ選択は使えません（画面の領域選択を使用）")
     else:
         on_status(main_window, f"ウィンドウ {len(wins)} 件")
     sync_capture_source_ui(main_window)
+    if _is_window_capture_source(main_window):
+        on_window_changed(main_window, int(main_window.combo_win.currentIndex()))
 
 
 def selected_capture_source(main_window) -> str:
@@ -254,21 +284,16 @@ def _apply_capture_source(main_window, save: bool):
         on_status(main_window, "この環境では画面範囲モードを使用します")
 
     if source == C.CAPTURE_SOURCE_WINDOW:
-        if HAS_WIN32 and main_window.combo_win.count() <= 1:
+        if HAS_WIN32 and main_window.combo_win.count() <= 0:
             refresh_windows(main_window)
         main_window.worker.set_roi_on_screen(None)
         # ウィンドウ取得時の初期ROIはウィンドウ全体に戻す
         main_window.worker.set_roi_in_window(None)
         hwnd = main_window.combo_win.currentData()
-        # 未選択なら先頭の実ウィンドウを初期選択
-        if hwnd is None and main_window.combo_win.count() > 1:
-            set_current_index_blocked(main_window.combo_win, 1)
-            hwnd = main_window.combo_win.currentData()
         main_window.worker.set_target_window(int(hwnd) if hwnd is not None else None)
     else:
         main_window.worker.set_target_window(None)
         main_window.worker.set_roi_in_window(None)
-        set_current_index_blocked(main_window.combo_win, 0)
 
     sync_capture_source_ui(main_window)
     if main_window.chk_preview_window.isChecked():
@@ -313,8 +338,10 @@ def on_window_text_committed(main_window):
     text = main_window.combo_win.currentText().strip()
     if not text:
         if main_window.combo_win.currentData() is not None:
-            set_current_index_blocked(main_window.combo_win, 0)
-            on_window_changed(main_window, 0)
+            set_current_index_blocked(main_window.combo_win, -1)
+            if main_window.combo_win.lineEdit() is not None:
+                main_window.combo_win.clearEditText()
+            on_window_changed(main_window, -1)
         return
 
     needle = text.casefold()
@@ -347,16 +374,21 @@ def has_visible_image_dock(main_window) -> bool:
 
 def sync_worker_view_flags(main_window):
     # 可視ビューに合わせて worker 側の計算フラグを絞る。
+    color_band_visible = bool(
+        getattr(main_window, "dock_color_band", None) is not None
+        and main_window.dock_color_band.isVisible()
+    )
     color_visible = bool(
         main_window.dock_color.isVisible()
-        or getattr(main_window, "dock_color_band", None) is not None
-        and main_window.dock_color_band.isVisible()
+        or color_band_visible
     )
     main_window.worker.set_view_flags(
         color=color_visible,
         scatter=bool(main_window.dock_scatter.isVisible()),
         hsv_hist=bool(main_window.dock_hist.isVisible()),
-        image=has_visible_image_dock(main_window),
+        # カラー割合は無彩色(白/灰/黒)集計で bgr_preview を使うため、
+        # 当該ドック表示中は画像系ドックが無くても bgr を受け取る。
+        image=bool(has_visible_image_dock(main_window) or color_band_visible),
         preview=bool(main_window.chk_preview_window.isChecked()),
     )
 

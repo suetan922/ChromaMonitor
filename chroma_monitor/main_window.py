@@ -185,22 +185,15 @@ class MainWindow(QMainWindow):
         self.combo_wheel_mode = QComboBox()
         self.combo_wheel_mode.addItem("HSV 180ビン", C.WHEEL_MODE_HSV180)
         self.combo_wheel_mode.addItem("マンセル基準（40色相）", C.WHEEL_MODE_MUNSELL40)
+        def _populate_harmony_combo(combo: QComboBox) -> None:
+            combo.clear()
+            for guide_type in C.WHEEL_HARMONY_GUIDE_COMBO_ORDER:
+                combo.addItem(C.WHEEL_HARMONY_GUIDE_LABELS[guide_type], guide_type)
+
         self.chk_wheel_harmony_guide = QCheckBox("色彩調和ガイドを表示")
         self.chk_wheel_harmony_guide.setChecked(C.DEFAULT_WHEEL_HARMONY_GUIDE_ENABLED)
         self.combo_wheel_harmony_guide = QComboBox()
-        self.combo_wheel_harmony_guide.addItem("アイデンティティ", C.WHEEL_HARMONY_GUIDE_IDENTITY)
-        self.combo_wheel_harmony_guide.addItem("アナロジー", C.WHEEL_HARMONY_GUIDE_ANALOGOUS)
-        self.combo_wheel_harmony_guide.addItem("インターミディエート", C.WHEEL_HARMONY_GUIDE_INTERMEDIATE)
-        self.combo_wheel_harmony_guide.addItem("コンプリメンタリー", C.WHEEL_HARMONY_GUIDE_COMPLEMENTARY)
-        self.combo_wheel_harmony_guide.addItem("オポーネント", C.WHEEL_HARMONY_GUIDE_OPPONENT)
-        self.combo_wheel_harmony_guide.addItem(
-            "スプリットコンプリメンタリー",
-            C.WHEEL_HARMONY_GUIDE_SPLIT_COMPLEMENTARY,
-        )
-        self.combo_wheel_harmony_guide.addItem("トライアド", C.WHEEL_HARMONY_GUIDE_TRIAD)
-        self.combo_wheel_harmony_guide.addItem("テトラード", C.WHEEL_HARMONY_GUIDE_TETRAD)
-        self.combo_wheel_harmony_guide.addItem("ペンタード", C.WHEEL_HARMONY_GUIDE_PENTAD)
-        self.combo_wheel_harmony_guide.addItem("ヘクサード", C.WHEEL_HARMONY_GUIDE_HEXAD)
+        _populate_harmony_combo(self.combo_wheel_harmony_guide)
         default_harmony_idx = self.combo_wheel_harmony_guide.findData(C.DEFAULT_WHEEL_HARMONY_GUIDE_TYPE)
         if default_harmony_idx >= 0:
             self.combo_wheel_harmony_guide.setCurrentIndex(default_harmony_idx)
@@ -214,6 +207,42 @@ class MainWindow(QMainWindow):
         self.spin_wheel_sat_threshold.setSingleStep(1)
         self.spin_wheel_sat_threshold.setSuffix(" / 255")
         configure_numeric_input(self.spin_wheel_sat_threshold)
+        self.chk_color_band_use_wheel_sat_threshold = QCheckBox(
+            "彩度しきい値を色相環と同じにする"
+        )
+        self.chk_color_band_use_wheel_sat_threshold.setChecked(
+            C.DEFAULT_COLOR_BAND_USE_WHEEL_SAT_THRESHOLD
+        )
+        self.spin_color_band_sat_threshold = SelectAllSpinBox()
+        self.spin_color_band_sat_threshold.setRange(C.WHEEL_SAT_THRESHOLD_MIN, C.WHEEL_SAT_THRESHOLD_MAX)
+        self.spin_color_band_sat_threshold.setValue(C.DEFAULT_COLOR_BAND_SAT_THRESHOLD)
+        self.spin_color_band_sat_threshold.setSingleStep(1)
+        self.spin_color_band_sat_threshold.setSuffix(" / 255")
+        configure_numeric_input(self.spin_color_band_sat_threshold)
+        self.chk_color_band_use_wheel_harmony = QCheckBox(
+            "色彩調和を色相環と同じ設定にする"
+        )
+        self.chk_color_band_use_wheel_harmony.setChecked(C.DEFAULT_COLOR_BAND_USE_WHEEL_HARMONY)
+        self.chk_color_band_harmony_guide = QCheckBox("色彩調和を表示")
+        self.chk_color_band_harmony_guide.setChecked(C.DEFAULT_COLOR_BAND_HARMONY_GUIDE_ENABLED)
+        self.combo_color_band_harmony_guide = QComboBox()
+        _populate_harmony_combo(self.combo_color_band_harmony_guide)
+        default_color_band_harmony_idx = self.combo_color_band_harmony_guide.findData(
+            C.DEFAULT_COLOR_BAND_HARMONY_GUIDE_TYPE
+        )
+        if default_color_band_harmony_idx >= 0:
+            self.combo_color_band_harmony_guide.setCurrentIndex(default_color_band_harmony_idx)
+        self.spin_color_band_sat_threshold.setEnabled(
+            not self.chk_color_band_use_wheel_sat_threshold.isChecked()
+        )
+        own_harmony_enabled = (
+            not self.chk_color_band_use_wheel_harmony.isChecked()
+            and self.chk_color_band_harmony_guide.isChecked()
+        )
+        self.chk_color_band_harmony_guide.setEnabled(
+            not self.chk_color_band_use_wheel_harmony.isChecked()
+        )
+        self.combo_color_band_harmony_guide.setEnabled(own_harmony_enabled)
 
         self.combo_mode = QComboBox()
         self.combo_mode.addItem("一定間隔で更新", C.UPDATE_MODE_INTERVAL)
@@ -343,6 +372,11 @@ class MainWindow(QMainWindow):
         self.combo_wheel_harmony_guide.currentIndexChanged.connect(self.apply_wheel_settings)
         self.combo_rgb_hist_mode.currentIndexChanged.connect(self.apply_rgb_hist_settings)
         self.spin_wheel_sat_threshold.valueChanged.connect(self.apply_wheel_settings)
+        self.chk_color_band_use_wheel_sat_threshold.toggled.connect(self.apply_color_band_settings)
+        self.spin_color_band_sat_threshold.valueChanged.connect(self.apply_color_band_settings)
+        self.chk_color_band_use_wheel_harmony.toggled.connect(self.apply_color_band_settings)
+        self.chk_color_band_harmony_guide.toggled.connect(self.apply_color_band_settings)
+        self.combo_color_band_harmony_guide.currentIndexChanged.connect(self.apply_color_band_settings)
         self.combo_mode.currentIndexChanged.connect(self.apply_mode_settings)
         self.spin_diff.valueChanged.connect(self.apply_mode_settings)
         self.spin_stable.valueChanged.connect(self.apply_mode_settings)
@@ -429,8 +463,14 @@ class MainWindow(QMainWindow):
         # 解析ビュー用ドック群を構築。
         setup_view_docks(self)
         if hasattr(self, "tabifiedDockWidgetActivated"):
-            self.tabifiedDockWidgetActivated.connect(self._sync_tabbed_dock_title_bars)
+            self.tabifiedDockWidgetActivated.connect(self._on_tabified_dock_activated)
         self.top_colors_bar.installEventFilter(self)
+        if hasattr(self, "list_color_chips"):
+            self.list_color_chips.currentRowChanged.connect(self._on_color_chip_selected)
+        if hasattr(self.wheel, "harmonyGuideRotationChanged"):
+            self.wheel.harmonyGuideRotationChanged.connect(
+                self._on_wheel_harmony_rotation_changed
+            )
         self.chk_scatter_hue_filter.toggled.connect(self.apply_scatter_settings)
         self.slider_scatter_hue_center.valueChanged.connect(self.apply_scatter_settings)
         self._sync_scatter_filter_controls()
@@ -441,6 +481,16 @@ class MainWindow(QMainWindow):
             )
             d.installEventFilter(self)
         self._sync_worker_view_flags()
+
+    def _on_tabified_dock_activated(self, dock) -> None:
+        # タブ切替時に表示フラグ再同期と表示復元を行い、更新取りこぼしを防ぐ。
+        self._sync_tabbed_dock_title_bars()
+        self._sync_worker_view_flags()
+        if dock is None:
+            return
+        self._restore_dock_from_snapshot(dock)
+        QTimer.singleShot(0, lambda d=dock, self=self: self._restore_dock_from_snapshot(d))
+        QTimer.singleShot(60, lambda d=dock, self=self: self._restore_dock_from_snapshot(d))
 
     def _initialize_runtime_defaults(self) -> None:
         self.worker.set_interval(self.spin_interval.value())
@@ -511,6 +561,11 @@ class MainWindow(QMainWindow):
         if obj is getattr(self, "top_colors_bar", None) and event.type() == QEvent.Resize:
             self._refresh_top_color_bar()
             return super().eventFilter(obj, event)
+        if (
+            obj is getattr(self, "dock_color_band", None)
+            and event.type() in (QEvent.Resize, QEvent.Show)
+        ):
+            self._update_color_band_compact_visibility()
         if mw_windowing.is_dock_tab_bar(self, obj):
             if mw_windowing.handle_dock_tab_bar_event(self, obj, event):
                 return True
@@ -520,6 +575,11 @@ class MainWindow(QMainWindow):
                 self._update_floating_dock_dockability(obj)
                 if not obj.isFloating():
                     self._schedule_dock_rebalance()
+                else:
+                    self._track_floating_dock_size(obj)
+                if event.type() in (QEvent.Show, QEvent.Resize):
+                    # 初回表示直後にサイズが確定してからスナップショット復元できるようにする。
+                    self._restore_dock_from_snapshot(obj)
         return super().eventFilter(obj, event)
 
     def moveEvent(self, event):
@@ -541,6 +601,7 @@ class MainWindow(QMainWindow):
     _on_dock_top_level_changed = mw_windowing.on_dock_top_level_changed
     _update_floating_dock_dockability = mw_windowing.update_floating_dock_dockability
     _sync_all_floating_dock_dockability = mw_windowing.sync_all_floating_dock_dockability
+    _track_floating_dock_size = mw_windowing.track_floating_dock_size
 
     def _sync_tabbed_dock_title_bars(self, *_):
         mw_windowing.sync_tabbed_dock_title_bars(self)
@@ -548,6 +609,9 @@ class MainWindow(QMainWindow):
     apply_always_on_top = mw_windowing.apply_always_on_top
     _present_settings_window = mw_windowing.present_settings_window
     _refresh_top_color_bar = mw_results.refresh_top_color_bar
+    _on_color_chip_selected = mw_results.on_color_chip_selected
+    _on_wheel_harmony_rotation_changed = mw_settings.on_wheel_harmony_rotation_changed
+    _update_color_band_compact_visibility = mw_results.update_color_band_compact_visibility
     _restore_dock_from_snapshot = mw_results.restore_dock_from_snapshot
     on_status = mw_runtime.on_status
     _cancel_image_analysis = mw_runtime.cancel_image_analysis
@@ -571,12 +635,14 @@ class MainWindow(QMainWindow):
     _sync_mode_dependent_rows = mw_settings.sync_mode_dependent_rows
     _sync_squint_mode_rows = mw_settings.sync_squint_mode_rows
     _sync_analysis_resolution_rows = mw_settings.sync_analysis_resolution_rows
+    _sync_color_band_controls = mw_settings.sync_color_band_controls
     _sync_worker_view_flags = mw_runtime.sync_worker_view_flags
     apply_sample_points_settings = mw_settings.apply_sample_points_settings
     _sync_scatter_filter_controls = mw_settings.sync_scatter_filter_controls
     apply_scatter_settings = mw_settings.apply_scatter_settings
     apply_analysis_resolution_settings = mw_settings.apply_analysis_resolution_settings
     apply_wheel_settings = mw_settings.apply_wheel_settings
+    apply_color_band_settings = mw_settings.apply_color_band_settings
     apply_rgb_hist_settings = mw_settings.apply_rgb_hist_settings
     apply_edge_settings = mw_settings.apply_edge_settings
     apply_binary_settings = mw_settings.apply_binary_settings

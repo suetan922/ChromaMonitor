@@ -1,6 +1,6 @@
 """ウィンドウ配置とドッキング挙動の補助処理。"""
 
-from PySide6.QtCore import QEvent, QRect, Qt
+from PySide6.QtCore import QEvent, QRect, QSize, Qt, QTimer
 from PySide6.QtGui import QCursor, QGuiApplication
 from PySide6.QtWidgets import (
     QApplication,
@@ -38,6 +38,91 @@ _TAB_DETACH_VERTICAL_DRAG_PX = 22
 _DOCK_DROP_ACTIVATION_MARGIN_RATIO = 0.16
 _DOCK_DROP_ACTIVATION_MARGIN_MIN_PX = 96
 _DOCK_DROP_ACTIVATION_MARGIN_MAX_PX = 360
+_FLOATING_SIZE_REMEMBER_RESUME_MS = 160
+
+
+def _dock_window_handle(dock: QDockWidget):
+    try:
+        return dock.windowHandle()
+    except Exception:
+        return None
+
+
+def _remember_floating_dock_size(dock: QDockWidget) -> None:
+    if dock is None or not dock.isFloating():
+        return
+    if bool(getattr(dock, "_floating_suspend_size_remember", False)):
+        return
+    if bool(getattr(dock, "_floating_size_restore_lock", False)):
+        return
+    size = dock.size()
+    if size.width() <= 0 or size.height() <= 0:
+        return
+    dock._floating_logical_size = QSize(int(size.width()), int(size.height()))
+
+
+def _restore_floating_dock_size_on_screen_change(main_window, dock: QDockWidget) -> None:
+    if dock is None:
+        return
+    dock._floating_screen_fix_pending = False
+    if not dock.isFloating() or not dock.isVisible():
+        return
+    if dock.windowState() & Qt.WindowMinimized:
+        return
+
+    remembered = getattr(dock, "_floating_logical_size", None)
+    if isinstance(remembered, QSize) and remembered.width() > 0 and remembered.height() > 0:
+        target_w = max(int(dock.minimumWidth()), int(remembered.width()))
+        target_h = max(int(dock.minimumHeight()), int(remembered.height()))
+    else:
+        size = dock.size()
+        target_w = max(int(dock.minimumWidth()), int(size.width()))
+        target_h = max(int(dock.minimumHeight()), int(size.height()))
+
+    dock._floating_size_restore_lock = True
+    try:
+        if dock.width() != target_w or dock.height() != target_h:
+            dock.resize(target_w, target_h)
+        fit_top_level_widget_to_desktop(main_window, dock)
+    finally:
+        dock._floating_size_restore_lock = False
+        # 画面跨ぎ直後はOS/Qt由来の一時リサイズが発生しうるため、
+        # ここでは記録を更新せず、短時間だけ再記録を抑止する。
+        dock._floating_suspend_size_remember = True
+        QTimer.singleShot(
+            _FLOATING_SIZE_REMEMBER_RESUME_MS,
+            lambda d=dock: setattr(d, "_floating_suspend_size_remember", False),
+        )
+
+
+def _schedule_floating_dock_screen_fix(main_window, dock: QDockWidget) -> None:
+    if dock is None or not dock.isFloating():
+        return
+    if bool(getattr(dock, "_floating_screen_fix_pending", False)):
+        return
+    dock._floating_suspend_size_remember = True
+    dock._floating_screen_fix_pending = True
+    QTimer.singleShot(0, lambda mw=main_window, d=dock: _restore_floating_dock_size_on_screen_change(mw, d))
+
+
+def _ensure_floating_dock_screen_tracking(main_window, dock: QDockWidget) -> None:
+    if dock is None:
+        return
+    win = _dock_window_handle(dock)
+    if win is None:
+        return
+    if bool(getattr(dock, "_floating_screen_tracking_connected", False)):
+        return
+
+    def _on_screen_changed(_screen, mw=main_window, d=dock):
+        _schedule_floating_dock_screen_fix(mw, d)
+
+    try:
+        win.screenChanged.connect(_on_screen_changed)
+    except Exception:
+        return
+    dock._floating_screen_tracking_connected = True
+    dock._floating_screen_changed_slot = _on_screen_changed
 
 
 def _clamp_top_left_in_available(
@@ -425,10 +510,19 @@ def on_dock_top_level_changed(main_window, dock: QDockWidget, floating: bool):
     sync_tabbed_dock_title_bars(main_window)
     sync_dock_on_top(main_window, dock)
     if floating:
+        _ensure_floating_dock_screen_tracking(main_window, dock)
         fit_top_level_widget_to_desktop(main_window, dock)
+        _remember_floating_dock_size(dock)
     else:
         schedule_dock_rebalance(main_window)
     main_window._schedule_layout_autosave()
+
+
+def track_floating_dock_size(main_window, dock: QDockWidget) -> None:
+    if dock is None or not dock.isFloating():
+        return
+    _ensure_floating_dock_screen_tracking(main_window, dock)
+    _remember_floating_dock_size(dock)
 
 
 def desktop_available_geometry(main_window) -> QRect:
@@ -777,17 +871,25 @@ def set_widget_on_top(_main_window, widget: QWidget | None, enabled: bool) -> No
     if widget is None:
         return
     desired = bool(enabled)
-    current = bool(widget.windowFlags() & Qt.WindowStaysOnTopHint)
-    if current == desired:
+    current_widget_flag = bool(widget.windowFlags() & Qt.WindowStaysOnTopHint)
+    win = _dock_window_handle(widget) if isinstance(widget, QDockWidget) else widget.windowHandle()
+    current_window_flag = bool(win.flags() & Qt.WindowStaysOnTopHint) if win is not None else current_widget_flag
+    if current_widget_flag == desired and current_window_flag == desired:
         return
     was_visible = widget.isVisible()
     saved_geometry = QRect(widget.geometry()) if widget.isWindow() else QRect()
     widget.setWindowFlag(Qt.WindowStaysOnTopHint, desired)
+    if win is not None:
+        try:
+            win.setFlag(Qt.WindowStaysOnTopHint, desired)
+        except Exception:
+            pass
     if was_visible:
         widget.show()
         if widget.isWindow():
             widget.setGeometry(saved_geometry)
         widget.raise_()
+        widget.activateWindow()
 
 
 def sync_dock_on_top(main_window, dock: QDockWidget):
@@ -827,6 +929,8 @@ def apply_always_on_top(main_window, checked: bool, save: bool = True):
             main_window.restoreState(dock_state)
         except Exception:
             pass
+    # restoreState 後に windowFlag が落ちる環境があるため再適用する。
+    sync_all_on_top_widgets(main_window)
     main_window._dock_geometry_snapshot = {}
     main_window._dock_rebalance_last_main_size = main_window.size()
     if save:
@@ -943,7 +1047,28 @@ def _visible_docks_in_area(main_window, area):
     return docks
 
 
+def _preferred_visible_tab_anchor(main_window, dock: QDockWidget) -> QDockWidget | None:
+    anchor_name = str(getattr(dock, "_preferred_tab_anchor_name", "")).strip()
+    if not anchor_name:
+        return None
+    anchor = getattr(main_window, anchor_name, None)
+    if not isinstance(anchor, QDockWidget) or anchor is dock:
+        return None
+    if not anchor.isVisible() or anchor.isFloating():
+        return None
+    if main_window.dockWidgetArea(anchor) == Qt.NoDockWidgetArea:
+        return None
+    return anchor
+
+
 def _attach_dock_to_area_group(main_window, dock: QDockWidget, area) -> None:
+    preferred_anchor = _preferred_visible_tab_anchor(main_window, dock)
+    if preferred_anchor is not None:
+        anchor_area = main_window.dockWidgetArea(preferred_anchor)
+        main_window.addDockWidget(anchor_area, dock)
+        main_window.tabifyDockWidget(preferred_anchor, dock)
+        return
+
     anchors = [d for d in _visible_docks_in_area(main_window, area) if d is not dock]
     main_window.addDockWidget(area, dock)
     if anchors:
@@ -970,9 +1095,16 @@ def toggle_dock(main_window, dock: QDockWidget, visible: bool):
             dock.setVisible(True)
             # 非表示ドックを再表示したとき、同エリア内に既存ドックがあればタブ合流を優先する。
             if was_hidden and len(main_window.tabifiedDockWidgets(dock)) <= 0:
-                anchors = [d for d in _visible_docks_in_area(main_window, area) if d is not dock]
-                if anchors:
-                    main_window.tabifyDockWidget(anchors[0], dock)
+                preferred_anchor = _preferred_visible_tab_anchor(main_window, dock)
+                if preferred_anchor is not None:
+                    anchor_area = main_window.dockWidgetArea(preferred_anchor)
+                    if main_window.dockWidgetArea(dock) != anchor_area:
+                        main_window.addDockWidget(anchor_area, dock)
+                    main_window.tabifyDockWidget(preferred_anchor, dock)
+                else:
+                    anchors = [d for d in _visible_docks_in_area(main_window, area) if d is not dock]
+                    if anchors:
+                        main_window.tabifyDockWidget(anchors[0], dock)
             dock.raise_()
     else:
         dock.setVisible(False)

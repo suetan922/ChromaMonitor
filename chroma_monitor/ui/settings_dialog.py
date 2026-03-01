@@ -22,6 +22,7 @@ _SETTINGS_PAGE_FOCUS = 6
 _SETTINGS_PAGE_SQUINT = 7
 _SETTINGS_PAGE_VECTORSCOPE = 8
 _SETTINGS_PAGE_RGB_HIST = 10
+_SETTINGS_PAGE_COLOR_BAND = 11
 
 
 def _make_labeled_row(label_text: str, widget: QWidget) -> QWidget:
@@ -73,6 +74,7 @@ def show_settings_window(main_window, page_index: int = 0):
                 "キャプチャ",
                 "更新",
                 "色相環",
+                "カラー割合",
                 "散布図",
                 "ベクトルスコープ",
                 "エッジ/2値化/3値化",
@@ -150,7 +152,7 @@ def show_settings_window(main_window, page_index: int = 0):
         lw.addWidget(_make_labeled_row("彩度しきい値", main_window.spin_wheel_sat_threshold))
         lw.addWidget(
             _make_hint_label(
-                "この値未満の彩度は色相環集計から除外します。0で最大限拾います。",
+                "色相環: 0 のときは無彩色も含みます。1 以上では「しきい値未満」を除外します（しきい値ちょうどは含みます）。",
                 word_wrap=True,
             )
         )
@@ -232,10 +234,32 @@ def show_settings_window(main_window, page_index: int = 0):
         lrgb.addStretch(1)
         pages.addWidget(page_rgb_hist)
 
+        # --- カラー割合設定ページ ---
+        page_color_band, lcb = _create_settings_page()
+        lcb.addWidget(_make_hint_label("カラー割合の集計条件と配色候補表示を設定します"))
+        lcb.addWidget(main_window.chk_color_band_use_wheel_sat_threshold)
+        lcb.addWidget(
+            _make_labeled_row("彩度しきい値", main_window.spin_color_band_sat_threshold)
+        )
+        lcb.addWidget(
+            _make_hint_label(
+                "カラー割合: 0 のときは無彩色を含みます。1 以上では「しきい値以下」を除外し、有彩色のみで割合を計算します。",
+                word_wrap=True,
+            )
+        )
+        lcb.addWidget(main_window.chk_color_band_use_wheel_harmony)
+        lcb.addWidget(main_window.chk_color_band_harmony_guide)
+        lcb.addWidget(
+            _make_labeled_row("色彩調和タイプ", main_window.combo_color_band_harmony_guide)
+        )
+        lcb.addStretch(1)
+        pages.addWidget(page_color_band)
+
         main_window._settings_nav_to_page = [
             C.SETTINGS_PAGE_CAPTURE,
             _SETTINGS_PAGE_UPDATE,
             _SETTINGS_PAGE_WHEEL,
+            _SETTINGS_PAGE_COLOR_BAND,
             _SETTINGS_PAGE_SCATTER,
             _SETTINGS_PAGE_VECTORSCOPE,
             _SETTINGS_PAGE_IMAGE,
@@ -294,6 +318,8 @@ def show_settings_window(main_window, page_index: int = 0):
     main_window._sync_analysis_resolution_rows()
     main_window._sync_mode_dependent_rows()
     main_window._sync_squint_mode_rows()
+    if hasattr(main_window, "_sync_color_band_controls"):
+        main_window._sync_color_band_controls()
     if created:
         main_window._settings_window.resize(760, 520)
     main_window._present_settings_window(center_on_parent=created)

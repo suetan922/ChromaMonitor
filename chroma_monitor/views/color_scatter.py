@@ -5,7 +5,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QPoint, QSize, Qt
+from PySide6.QtCore import QPoint, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QLabel, QSizePolicy, QWidget
 
@@ -97,18 +97,6 @@ _MUNSELL_COLORS_RGB = (
     (202, 38, 133),
     (222, 35, 105),
 )
-_WHEEL_HARMONY_GUIDE_PATTERNS = {
-    C.WHEEL_HARMONY_GUIDE_IDENTITY: (0.0,),
-    C.WHEEL_HARMONY_GUIDE_ANALOGOUS: (-30.0, 0.0, 30.0),
-    C.WHEEL_HARMONY_GUIDE_INTERMEDIATE: (-60.0, 0.0, 60.0),
-    C.WHEEL_HARMONY_GUIDE_COMPLEMENTARY: (0.0, 180.0),
-    C.WHEEL_HARMONY_GUIDE_OPPONENT: (0.0, 150.0),
-    C.WHEEL_HARMONY_GUIDE_SPLIT_COMPLEMENTARY: (0.0, 150.0, 210.0),
-    C.WHEEL_HARMONY_GUIDE_TRIAD: (0.0, 120.0, 240.0),
-    C.WHEEL_HARMONY_GUIDE_TETRAD: (0.0, 90.0, 180.0, 270.0),
-    C.WHEEL_HARMONY_GUIDE_PENTAD: (0.0, 72.0, 144.0, 216.0, 288.0),
-    C.WHEEL_HARMONY_GUIDE_HEXAD: (0.0, 60.0, 120.0, 180.0, 240.0, 300.0),
-}
 _WHEEL_HARMONY_GUIDE_RADIUS_RATIO = 0.82
 _WHEEL_HARMONY_GUIDE_DOT_RADIUS = 3
 _WHEEL_HARMONY_GUIDE_RING_COLOR = QColor(123, 144, 173, 92)
@@ -145,6 +133,7 @@ HUE180_TO_MUNSELL40_WEIGHTS = _build_hue180_to_munsell40_weights()
 
 
 class ColorWheelWidget(QWidget):
+    harmonyGuideRotationChanged = Signal(float)
 
     def __init__(self):
         super().__init__()
@@ -189,7 +178,11 @@ class ColorWheelWidget(QWidget):
         self.update()
 
     def set_harmony_guide_rotation(self, rotation_deg: float):
-        self._guide_rotation_deg = float(rotation_deg)
+        normalized = self._normalize_rotation_deg(rotation_deg)
+        if abs(normalized - float(self._guide_rotation_deg)) < 1e-6:
+            return
+        self._guide_rotation_deg = normalized
+        self.harmonyGuideRotationChanged.emit(float(self._guide_rotation_deg))
         self.update()
 
     def harmony_guide_rotation(self) -> float:
@@ -231,6 +224,10 @@ class ColorWheelWidget(QWidget):
         normalized = (float(delta_deg) + 180.0) % 360.0 - 180.0
         return normalized
 
+    @staticmethod
+    def _normalize_rotation_deg(rotation_deg: float) -> float:
+        return (float(rotation_deg) + 180.0) % 360.0 - 180.0
+
     def _hue_offset_to_angle_deg(self, hue_deg: float) -> float:
         return (
             float(C.HUE_RED_REFERENCE_DEG)
@@ -239,7 +236,7 @@ class ColorWheelWidget(QWidget):
         ) % 360.0
 
     def _guide_points(self, cx: int, cy: int, inner_r: int) -> list[QPoint]:
-        offsets = _WHEEL_HARMONY_GUIDE_PATTERNS.get(self._guide_type)
+        offsets = C.WHEEL_HARMONY_GUIDE_OFFSETS_DEG.get(self._guide_type)
         if not offsets:
             return []
         guide_r = max(8, int(round(inner_r * _WHEEL_HARMONY_GUIDE_RADIUS_RATIO)))
@@ -296,7 +293,7 @@ class ColorWheelWidget(QWidget):
         return bool(
             self._guide_enabled
             and self._guide_type != C.WHEEL_HARMONY_GUIDE_NONE
-            and self._guide_type in _WHEEL_HARMONY_GUIDE_PATTERNS
+            and self._guide_type in C.WHEEL_HARMONY_GUIDE_OFFSETS_DEG
         )
 
     def mousePressEvent(self, event):
@@ -319,8 +316,7 @@ class ColorWheelWidget(QWidget):
             pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
             current_angle = self._point_angle_deg(pos.x(), pos.y(), cx, cy)
             delta = self._normalize_signed_delta_deg(current_angle - self._guide_drag_start_angle)
-            self._guide_rotation_deg = float(self._guide_drag_start_rotation + delta)
-            self.update()
+            self.set_harmony_guide_rotation(self._guide_drag_start_rotation + delta)
             event.accept()
             return
         super().mouseMoveEvent(event)
@@ -341,7 +337,8 @@ class ColorWheelWidget(QWidget):
             cx, cy, r, inner_r = self._wheel_geometry()
 
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(235, 235, 235, 255))
+            # 黄色系でも輪郭が埋もれにくいよう、土台グレーを少し暗くする。
+            p.setBrush(QColor(220, 220, 220, 255))
             p.drawEllipse(QPoint(cx, cy), r, r)
 
             p.setBrush(QColor(255, 255, 255, 255))
@@ -351,29 +348,60 @@ class ColorWheelWidget(QWidget):
             if ring_max <= 2:
                 return
 
-            # ヒストグラム風のリング帯を扇形で描画する
-            # 角度を少し重ねて、見た目の切れ目を減らす
+            # ヒストグラム風のリング帯を扇形で描画する。
+            # まず全色相の薄いベースリングを描き、その上に実測分のみ重ねる。
             base_thickness = max(2, int(round(ring_max * self._min_thickness_ratio)))
             counts, colors = self._wheel_bins()
             n_bins = max(1, int(len(counts)))
             step_deg = 360.0 / float(n_bins)
-            overlap_deg = 0.25
+            overlap_deg = 0.0
             local_max = float(np.max(counts)) if counts.size else 0.0
             if local_max <= 0.0:
                 local_max = 1.0
+
+            # 色相分布の有無に関わらず、全色相の位置を把握できるよう薄い基準リングを残す。
+            base_outer_r = inner_r + base_thickness
+            for h in range(n_bins):
+                c = QColor(colors[h])
+                c.setAlpha(32)
+                p.setPen(Qt.NoPen)
+                p.setBrush(c)
+                center_deg = (
+                    float(C.HUE_RED_REFERENCE_DEG)
+                    + float(C.HUE_DIRECTION_SIGN) * (h * step_deg)
+                ) % 360.0
+                start_deg = center_deg - (step_deg / 2.0) - overlap_deg
+                span_deg = step_deg + overlap_deg * 2.0
+                p.drawPie(
+                    int(cx - base_outer_r),
+                    int(cy - base_outer_r),
+                    int(base_outer_r * 2),
+                    int(base_outer_r * 2),
+                    int(start_deg * 16),
+                    int(span_deg * 16),
+                )
+                p.setBrush(QColor(255, 255, 255, 255))
+                p.drawPie(
+                    int(cx - inner_r),
+                    int(cy - inner_r),
+                    int(inner_r * 2),
+                    int(inner_r * 2),
+                    int(start_deg * 16),
+                    int(span_deg * 16),
+                )
+
             for h in range(n_bins):
                 count = float(counts[h])
+                if count <= 0.0:
+                    continue
                 norm = min(1.0, count / local_max)
-                # 低頻度の色も潰れにくいように、軽いガンマ補正で持ち上げる
-                norm = math.pow(norm, 0.78) if norm > 0.0 else 0.0
                 thickness_ratio = (
                     self._min_thickness_ratio + (1.0 - self._min_thickness_ratio) * norm
                 )
                 thickness = max(base_thickness, int(round(ring_max * thickness_ratio)))
                 outer_r = inner_r + thickness
                 c = QColor(colors[h])
-                alpha = 36 if count <= 0 else 225
-                c.setAlpha(alpha)
+                c.setAlpha(225)
                 p.setPen(Qt.NoPen)
                 p.setBrush(c)
                 center_deg = (

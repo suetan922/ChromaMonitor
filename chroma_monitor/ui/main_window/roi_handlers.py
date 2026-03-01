@@ -4,7 +4,6 @@ from PySide6.QtWidgets import QMessageBox
 
 from ...capture.win32_windows import HAS_WIN32
 from ...util import constants as C
-from ...util.functions import set_current_index_blocked
 from ...views import RoiSelector
 
 
@@ -90,7 +89,6 @@ def on_roi_screen_selected(main_window, r: QRect):
     main_window.worker.set_target_window(None)
     main_window.worker.set_roi_on_screen(r)
     main_window.worker.set_roi_in_window(None)
-    set_current_index_blocked(main_window.combo_win, 0)
     main_window.on_status(f"画面領域: x={r.left()} y={r.top()} w={r.width()} h={r.height()}")
     main_window._update_preview_snapshot()
 

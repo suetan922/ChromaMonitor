@@ -3,12 +3,16 @@
 from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QCheckBox,
     QDockWidget,
     QHBoxLayout,
     QLabel,
+    QListWidget,
     QMainWindow,
+    QScrollArea,
     QSizePolicy,
+    QSplitter,
     QSlider,
     QTabWidget,
     QVBoxLayout,
@@ -201,23 +205,113 @@ def setup_view_docks(main_window) -> None:
 
     main_window._last_top_bars = []
     main_window._top_bar_render_key = None
+    main_window._color_detail_has_selection = False
+    main_window._color_detail_merge_complement = False
     main_window.lbl_color_band_title = QLabel(C.TOP_COLORS_TITLE)
     main_window.lbl_color_band_title.setStyleSheet("color:#111; font-size:12px; font-weight:600;")
     main_window.lbl_color_band_title.setMinimumHeight(0)
     main_window.lbl_color_band_title.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
 
     main_window.top_colors_bar = QLabel()
-    main_window.top_colors_bar.setMinimumHeight(0)
+    # バーは常に見えるよう、固定高さ + 横方向のみ伸縮にする。
+    main_window.top_colors_bar.setMinimumHeight(C.TOP_COLOR_BAR_HEIGHT)
     main_window.top_colors_bar.setMaximumHeight(C.TOP_COLOR_BAR_HEIGHT)
     main_window.top_colors_bar.setMinimumWidth(0)
-    main_window.top_colors_bar.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+    main_window.top_colors_bar.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
     main_window.top_colors_bar.setScaledContents(False)
 
     main_window.lbl_warmcool = QLabel("暖色: -   寒色: -   その他: -")
     main_window.lbl_warmcool.setStyleSheet("color:#111; font-size:12px;")
     main_window.lbl_warmcool.setWordWrap(True)
     main_window.lbl_warmcool.setMinimumHeight(0)
-    main_window.lbl_warmcool.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
+    main_window.lbl_warmcool.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    main_window.list_color_chips = QListWidget()
+    main_window.list_color_chips.setMinimumHeight(0)
+    main_window.list_color_chips.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+    main_window.list_color_chips.setSelectionMode(QAbstractItemView.SingleSelection)
+    main_window.list_color_chips.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    main_window.list_color_chips.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+    main_window.list_color_chips.setSpacing(2)
+    main_window.list_color_chips.setStyleSheet(
+        "QListWidget { background:#ffffff; border:1px solid #d6dbe4; border-radius:6px; }"
+        "QListWidget::item { padding:2px 4px; }"
+        "QListWidget::item:selected { border:1px solid #2563eb; }"
+    )
+
+    main_window.lbl_color_detail_title = QLabel("配色の参考情報")
+    main_window.lbl_color_detail_title.setStyleSheet("color:#111; font-size:12px; font-weight:600;")
+    main_window.lbl_color_detail_title.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
+
+    main_window.lbl_color_detail_info = QLabel("一覧から色を選択してください。")
+    main_window.lbl_color_detail_info.setStyleSheet("color:#111; font-size:12px;")
+    main_window.lbl_color_detail_info.setWordWrap(True)
+    main_window.lbl_color_detail_info.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    main_window.lbl_color_harmony_info = QLabel("色彩調和")
+    main_window.lbl_color_harmony_info.setStyleSheet("color:#111; font-size:12px;")
+    main_window.lbl_color_harmony_info.setWordWrap(True)
+    main_window.lbl_color_harmony_info.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    main_window.color_harmony_preview = QWidget()
+    main_window.color_harmony_preview_layout = QHBoxLayout(main_window.color_harmony_preview)
+    main_window.color_harmony_preview_layout.setContentsMargins(0, 0, 0, 0)
+    main_window.color_harmony_preview_layout.setSpacing(6)
+    main_window.color_harmony_preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    main_window.lbl_color_complement_info = QLabel("補色")
+    main_window.lbl_color_complement_info.setStyleSheet("color:#111; font-size:12px;")
+    main_window.lbl_color_complement_info.setWordWrap(True)
+    main_window.lbl_color_complement_info.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    main_window.color_complement_preview = QWidget()
+    main_window.color_complement_preview_layout = QHBoxLayout(main_window.color_complement_preview)
+    main_window.color_complement_preview_layout.setContentsMargins(0, 0, 0, 0)
+    main_window.color_complement_preview_layout.setSpacing(6)
+    main_window.color_complement_preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    main_window.lbl_color_methods_info = QLabel("配色手法")
+    main_window.lbl_color_methods_info.setStyleSheet("color:#111; font-size:12px;")
+    main_window.lbl_color_methods_info.setWordWrap(True)
+    main_window.lbl_color_methods_info.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    main_window.color_methods_preview = QWidget()
+    main_window.color_methods_preview_layout = QVBoxLayout(main_window.color_methods_preview)
+    main_window.color_methods_preview_layout.setContentsMargins(0, 0, 0, 0)
+    main_window.color_methods_preview_layout.setSpacing(6)
+    main_window.color_methods_preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    detail_panel = QWidget()
+    detail_l = QVBoxLayout(detail_panel)
+    detail_l.setContentsMargins(0, 0, 0, 0)
+    detail_l.setSpacing(4)
+    detail_l.addWidget(main_window.lbl_color_detail_title)
+    detail_l.addWidget(main_window.lbl_color_detail_info)
+    detail_l.addWidget(main_window.lbl_color_harmony_info)
+    detail_l.addWidget(main_window.color_harmony_preview)
+    detail_l.addWidget(main_window.lbl_color_complement_info)
+    detail_l.addWidget(main_window.color_complement_preview)
+    detail_l.addWidget(main_window.lbl_color_methods_info)
+    detail_l.addWidget(main_window.color_methods_preview)
+    detail_l.addStretch(1)
+
+    main_window.color_detail_scroll = QScrollArea()
+    main_window.color_detail_scroll.setWidgetResizable(True)
+    main_window.color_detail_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+    main_window.color_detail_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+    main_window.color_detail_scroll.setWidget(detail_panel)
+    main_window.color_detail_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
+    main_window.color_detail_scroll.setMinimumHeight(0)
+    main_window.color_detail_scroll.setVisible(False)
+
+    main_window.color_band_splitter = QSplitter(Qt.Vertical)
+    main_window.color_band_splitter.setChildrenCollapsible(True)
+    main_window.color_band_splitter.addWidget(main_window.list_color_chips)
+    main_window.color_band_splitter.addWidget(main_window.color_detail_scroll)
+    main_window.color_band_splitter.setStretchFactor(0, 3)
+    main_window.color_band_splitter.setStretchFactor(1, 2)
+    main_window.color_band_splitter.setSizes([220, 180])
+    main_window.color_band_splitter.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
 
     color_widget = QWidget()
     cw_l = QVBoxLayout(color_widget)
@@ -233,7 +327,7 @@ def setup_view_docks(main_window) -> None:
     cb_l.addWidget(main_window.lbl_color_band_title)
     cb_l.addWidget(main_window.top_colors_bar)
     cb_l.addWidget(main_window.lbl_warmcool)
-    cb_l.addStretch(1)
+    cb_l.addWidget(main_window.color_band_splitter, 1)
     color_band_dock = _create_dock(
         main_window,
         "カラー割合",
@@ -241,6 +335,8 @@ def setup_view_docks(main_window) -> None:
         color_band_widget,
         area=Qt.LeftDockWidgetArea,
     )
+    # 再表示時は色相環ドックへ優先的にタブ合流させる。
+    color_band_dock._preferred_tab_anchor_name = "dock_color"
 
     scatter_container = QWidget()
     sc_l = QHBoxLayout(scatter_container)
@@ -403,7 +499,9 @@ def setup_view_docks(main_window) -> None:
     # 初期配置: 左にカラー、右側にビュー群、下にヒストグラム。
     # タブ固定を避け、自由な多段再配置を優先する。
     main_window.addDockWidget(Qt.LeftDockWidgetArea, color_dock)
-    main_window.splitDockWidget(color_dock, color_band_dock, Qt.Vertical)
+    # カラー割合は色相環と同一グループで開き、単独枠として分離しない。
+    main_window.tabifyDockWidget(color_dock, color_band_dock)
+    color_dock.raise_()
     main_window.addDockWidget(Qt.RightDockWidgetArea, scatter_dock)
     main_window.splitDockWidget(scatter_dock, edge_dock, Qt.Vertical)
     main_window.splitDockWidget(edge_dock, gray_dock, Qt.Vertical)

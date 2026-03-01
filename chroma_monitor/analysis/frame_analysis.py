@@ -8,9 +8,12 @@ import numpy as np
 from ..util import constants as C
 from ..util.functions import clamp_int, resize_by_long_edge
 
-_WHEEL_SMOOTH_KERNEL = np.array([1, 2, 3, 2, 1], dtype=np.float32) / 9.0
 _TOP_COLOR_SEGMENT_SIZE = 10  # 2度/ビン *10 = 20度
 _TOP_COLOR_SEGMENT_COUNT = 18
+_WARM_HUE_LOW_END = 45
+_WARM_HUE_HIGH_START = 150
+_COOL_HUE_START = 60
+_COOL_HUE_END = 135
 
 
 def _normalize_bgr_to_float01(bgr: np.ndarray) -> np.ndarray:
@@ -74,19 +77,23 @@ def _compute_hsv_histograms(
 
 def _compute_wheel_stats(h_wheel: np.ndarray) -> tuple[np.ndarray, float, float, float]:
     # 色相環ヒストグラムと暖寒比率を同じ raw ヒストグラムから計算して走査回数を減らす。
+    # 色相の広がりを抑えるため、色相環表示には平滑化を入れない。
     if h_wheel.size == 0:
         return np.zeros(180, dtype=np.int64), 0.0, 0.0, 0.0
 
-    hist_raw = np.bincount(h_wheel.reshape(-1), minlength=180)
-    hist_pad = np.concatenate([hist_raw[-2:], hist_raw, hist_raw[:2]]).astype(np.float32)
-    hist_smooth = np.convolve(hist_pad, _WHEEL_SMOOTH_KERNEL, mode="valid").astype(np.int64)
+    hist_raw = np.bincount(h_wheel.reshape(-1), minlength=180).astype(np.int64)
 
     total_color = float(h_wheel.size)
-    warm_count = float(hist_raw[:30].sum() + hist_raw[150:180].sum())
-    cool_count = float(hist_raw[75:135].sum())
+    # OpenCV Hue(0..179)基準:
+    # 暖色 = 0..44 (0..88deg) + 150..179 (300..358deg)
+    # 寒色 = 60..134 (120..268deg)
+    warm_count = float(
+        hist_raw[:_WARM_HUE_LOW_END].sum() + hist_raw[_WARM_HUE_HIGH_START:180].sum()
+    )
+    cool_count = float(hist_raw[_COOL_HUE_START:_COOL_HUE_END].sum())
     other_count = max(0.0, total_color - warm_count - cool_count)
     return (
-        hist_smooth,
+        hist_raw,
         warm_count / total_color,
         cool_count / total_color,
         other_count / total_color,
