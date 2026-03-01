@@ -208,11 +208,6 @@ def setup_view_docks(main_window) -> None:
     main_window._color_detail_has_selection = False
     main_window._color_detail_merge_complement = False
     main_window._color_detail_show_info = True
-    main_window.lbl_color_band_title = QLabel(C.TOP_COLORS_TITLE)
-    main_window.lbl_color_band_title.setStyleSheet("color:#111; font-size:12px; font-weight:600;")
-    main_window.lbl_color_band_title.setMinimumHeight(0)
-    main_window.lbl_color_band_title.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Ignored)
-
     main_window.top_colors_bar = QLabel()
     # バーは常に見えるよう、固定高さ + 横方向のみ伸縮にする。
     main_window.top_colors_bar.setMinimumHeight(C.TOP_COLOR_BAR_HEIGHT)
@@ -349,7 +344,6 @@ def setup_view_docks(main_window) -> None:
     cb_l = QVBoxLayout(color_band_widget)
     cb_l.setContentsMargins(6, 6, 6, 6)
     cb_l.setSpacing(4)
-    cb_l.addWidget(main_window.lbl_color_band_title)
     cb_l.addWidget(main_window.top_colors_bar)
     cb_l.addWidget(main_window.lbl_warmcool)
     cb_l.addWidget(main_window.color_band_splitter, 1)

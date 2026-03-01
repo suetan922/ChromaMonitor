@@ -39,6 +39,7 @@ _DOCK_DROP_ACTIVATION_MARGIN_RATIO = 0.16
 _DOCK_DROP_ACTIVATION_MARGIN_MIN_PX = 96
 _DOCK_DROP_ACTIVATION_MARGIN_MAX_PX = 360
 _FLOATING_SIZE_REMEMBER_RESUME_MS = 160
+_TAB_DETACH_FORCE_DOCK_DROP_MS = 2800
 
 
 def _dock_window_handle(dock: QDockWidget):
@@ -187,12 +188,10 @@ def _is_dock_drop_active_near_main_window(main_window) -> bool:
     app = QApplication.instance()
     if app is None:
         return False
-    if not (app.mouseButtons() & Qt.LeftButton):
-        if bool(getattr(main_window, "_force_dock_drop_active", False)):
-            main_window._force_dock_drop_active = False
-        return False
     if bool(getattr(main_window, "_force_dock_drop_active", False)):
         return True
+    if not (app.mouseButtons() & Qt.LeftButton):
+        return False
     if not main_window.isVisible():
         return False
     frame = _dock_drop_zone_rect(main_window)
@@ -200,6 +199,28 @@ def _is_dock_drop_active_near_main_window(main_window) -> bool:
     if frame.contains(cursor_pos):
         return True
     return _floating_dock_intersects_drop_zone(main_window, frame)
+
+
+def _set_force_dock_drop_active(main_window, active: bool) -> None:
+    enabled = bool(active)
+    main_window._force_dock_drop_active = enabled
+
+    timer = getattr(main_window, "_force_dock_drop_timer", None)
+    if timer is None:
+        def _clear_force_drop_flag(mw=main_window):
+            mw._force_dock_drop_active = False
+            _sync_dock_options_by_floating_state(mw)
+
+        timer = QTimer(main_window)
+        timer.setSingleShot(True)
+        timer.timeout.connect(_clear_force_drop_flag)
+        main_window._force_dock_drop_timer = timer
+
+    if enabled:
+        timer.start(_TAB_DETACH_FORCE_DOCK_DROP_MS)
+    else:
+        timer.stop()
+        _sync_dock_options_by_floating_state(main_window)
 
 
 def _dock_title_set(main_window) -> set[str]:
@@ -458,8 +479,8 @@ def handle_dock_tab_bar_event(main_window, bar: QTabBar, event) -> bool:
         if dock is None:
             return False
         state["triggered"] = True
-        # 切り離し直後の同一ドラッグ中はドロップ判定を強制有効化する。
-        main_window._force_dock_drop_active = True
+        # 切り離し直後の同一ドラッグ中はドロップ判定を一定時間強制有効化する。
+        _set_force_dock_drop_active(main_window, True)
         _float_dock_from_tab_drag(main_window, dock, current)
         _start_system_move_for_dock(dock)
         main_window._dock_tab_drag_state = None
@@ -472,8 +493,7 @@ def handle_dock_tab_bar_event(main_window, bar: QTabBar, event) -> bool:
         if et == QEvent.MouseButtonRelease and bool(
             getattr(main_window, "_force_dock_drop_active", False)
         ):
-            main_window._force_dock_drop_active = False
-            _sync_dock_options_by_floating_state(main_window)
+            _set_force_dock_drop_active(main_window, False)
     return False
 
 
@@ -516,6 +536,8 @@ def sync_all_floating_dock_dockability(main_window) -> None:
 
 def on_dock_top_level_changed(main_window, dock: QDockWidget, floating: bool):
     # フローティング切替時に制約を同期する。
+    if not floating and bool(getattr(main_window, "_force_dock_drop_active", False)):
+        _set_force_dock_drop_active(main_window, False)
     update_floating_dock_dockability(main_window, dock)
     _sync_dock_options_by_floating_state(main_window)
     sync_tabbed_dock_title_bars(main_window)
