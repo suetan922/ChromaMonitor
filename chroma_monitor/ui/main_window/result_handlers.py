@@ -731,6 +731,7 @@ def on_color_chip_selected(main_window, row: int) -> None:
         main_window._color_detail_has_selection = False
         main_window._color_detail_achromatic = False
         main_window._color_detail_merge_complement = False
+        main_window._color_detail_show_info = True
         _set_preview_row(harmony_layout, [])
         _set_preview_row(complement_layout, [])
         _set_methods_preview(methods_layout, [])
@@ -756,6 +757,7 @@ def on_color_chip_selected(main_window, row: int) -> None:
     main_window._color_detail_has_selection = True
     main_window._color_detail_achromatic = bool(is_achromatic)
     main_window._color_detail_merge_complement = False
+    main_window._color_detail_show_info = bool(is_achromatic)
     _set_preview_row(harmony_layout, [])
     _set_preview_row(complement_layout, [])
     _set_methods_preview(methods_layout, [])
@@ -771,6 +773,7 @@ def on_color_chip_selected(main_window, row: int) -> None:
     guide_name = C.WHEEL_HARMONY_GUIDE_LABELS.get(guide_type, "色彩調和")
     merge_complement = bool(harmony_enabled and guide_type == C.WHEEL_HARMONY_GUIDE_COMPLEMENTARY)
     detail_label.setText("")
+    main_window._color_detail_show_info = False
     harmony_label.setText(
         f"色彩調和（{guide_name} / 補色）"
         if merge_complement
@@ -818,6 +821,7 @@ def update_color_band_compact_visibility(main_window) -> None:
     show_chip_list = body_h >= _COLOR_BAND_MIN_H_SHOW_CHIP_LIST
     has_selection = bool(getattr(main_window, "_color_detail_has_selection", False))
     show_detail = bool(body_h >= _COLOR_BAND_MIN_H_SHOW_DETAIL and has_selection)
+    show_info = bool(show_detail and getattr(main_window, "_color_detail_show_info", True))
     hide_color_models = bool(getattr(main_window, "_color_detail_achromatic", False))
     merge_complement = bool(getattr(main_window, "_color_detail_merge_complement", False))
     show_color_models = bool(show_detail and not hide_color_models)
@@ -832,21 +836,33 @@ def update_color_band_compact_visibility(main_window) -> None:
         getattr(main_window, "color_detail_scroll", None), show_detail and show_chip_list
     )
     _set_visible_if_changed(getattr(main_window, "lbl_color_detail_title", None), show_detail)
-    _set_visible_if_changed(getattr(main_window, "lbl_color_detail_info", None), show_detail)
-    _set_visible_if_changed(getattr(main_window, "lbl_color_harmony_info", None), show_harmony)
-    _set_visible_if_changed(getattr(main_window, "color_harmony_preview", None), show_harmony)
-    _set_visible_if_changed(
-        getattr(main_window, "lbl_color_complement_info", None), show_complement
-    )
-    _set_visible_if_changed(
-        getattr(main_window, "color_complement_preview", None), show_complement
-    )
-    _set_visible_if_changed(
-        getattr(main_window, "lbl_color_methods_info", None), show_color_models
-    )
-    _set_visible_if_changed(
-        getattr(main_window, "color_methods_preview", None), show_color_models
-    )
+    _set_visible_if_changed(getattr(main_window, "lbl_color_detail_info", None), show_info)
+    harmony_section = getattr(main_window, "color_harmony_section", None)
+    complement_section = getattr(main_window, "color_complement_section", None)
+    methods_section = getattr(main_window, "color_methods_section", None)
+    if harmony_section is not None:
+        _set_visible_if_changed(harmony_section, show_harmony)
+    else:
+        _set_visible_if_changed(getattr(main_window, "lbl_color_harmony_info", None), show_harmony)
+        _set_visible_if_changed(getattr(main_window, "color_harmony_preview", None), show_harmony)
+    if complement_section is not None:
+        _set_visible_if_changed(complement_section, show_complement)
+    else:
+        _set_visible_if_changed(
+            getattr(main_window, "lbl_color_complement_info", None), show_complement
+        )
+        _set_visible_if_changed(
+            getattr(main_window, "color_complement_preview", None), show_complement
+        )
+    if methods_section is not None:
+        _set_visible_if_changed(methods_section, show_color_models)
+    else:
+        _set_visible_if_changed(
+            getattr(main_window, "lbl_color_methods_info", None), show_color_models
+        )
+        _set_visible_if_changed(
+            getattr(main_window, "color_methods_preview", None), show_color_models
+        )
 
 
 def _new_empty_result_snapshot() -> dict:

@@ -138,7 +138,7 @@ class ColorWheelWidget(QWidget):
     def __init__(self):
         super().__init__()
         # 最小幅のみ固定し、最小高はドック共通値で制御する。
-        self.setMinimumWidth(C.VIEW_MIN_SIZE)
+        self.setMinimumWidth(C.VIEW_MIN_WIDTH)
         self.setMinimumHeight(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self._hist = np.zeros(180, dtype=np.float32)
@@ -444,7 +444,7 @@ class ScatterRasterWidget(QLabel):
         super().__init__()
         self.setAlignment(Qt.AlignCenter)
         # 最小幅のみ固定し、最小高はドック共通値で制御する。
-        self.setMinimumWidth(C.VIEW_MIN_SIZE)
+        self.setMinimumWidth(C.VIEW_MIN_WIDTH)
         self.setMinimumHeight(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setStyleSheet("background:#FFFFFF; border:none; color:#222;")
@@ -492,7 +492,7 @@ class ScatterRasterWidget(QLabel):
             self._show_scatter_frame_only()
 
     def minimumSizeHint(self):
-        return QSize(C.VIEW_MIN_SIZE, 0)
+        return QSize(C.VIEW_MIN_WIDTH, 0)
 
     def sizeHint(self):
         return QSize(300, 300)

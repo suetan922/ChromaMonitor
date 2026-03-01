@@ -285,8 +285,12 @@ DEFAULT_DIFF_THRESHOLD = 4.0
 DEFAULT_STABLE_FRAMES = 3
 
 # UI behavior defaults
-VIEW_MIN_SIZE = 48
-"""ドック/ビューの共通最小サイズ(px)。"""
+VIEW_MIN_WIDTH = 48
+"""ドック/ビューの共通最小幅(px)。"""
+VIEW_MIN_HEIGHT = 48
+"""ドック/ビューの共通最小高さ(px)。"""
+VIEW_MIN_SIZE = VIEW_MIN_WIDTH
+"""後方互換用の共通最小サイズ(px)。"""
 
 # Settings page indices
 SETTINGS_PAGE_CAPTURE = 0

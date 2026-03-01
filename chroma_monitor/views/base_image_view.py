@@ -17,7 +17,7 @@ class BaseImageLabelView(QLabel):
         super().__init__()
         self.setAlignment(Qt.AlignCenter)
         # 最小幅のみ固定し、最小高はドック共通値で制御する。
-        self.setMinimumWidth(C.VIEW_MIN_SIZE)
+        self.setMinimumWidth(C.VIEW_MIN_WIDTH)
         self.setMinimumHeight(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
         self.setStyleSheet(style)
@@ -27,7 +27,7 @@ class BaseImageLabelView(QLabel):
         self._resize_renderer: Optional[Callable[[np.ndarray], None]] = None
 
     def minimumSizeHint(self):
-        return QSize(C.VIEW_MIN_SIZE, 0)
+        return QSize(C.VIEW_MIN_WIDTH, 0)
 
     def sizeHint(self):
         return QSize(240, 240)

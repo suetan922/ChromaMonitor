@@ -188,7 +188,11 @@ def _is_dock_drop_active_near_main_window(main_window) -> bool:
     if app is None:
         return False
     if not (app.mouseButtons() & Qt.LeftButton):
+        if bool(getattr(main_window, "_force_dock_drop_active", False)):
+            main_window._force_dock_drop_active = False
         return False
+    if bool(getattr(main_window, "_force_dock_drop_active", False)):
+        return True
     if not main_window.isVisible():
         return False
     frame = _dock_drop_zone_rect(main_window)
@@ -454,6 +458,8 @@ def handle_dock_tab_bar_event(main_window, bar: QTabBar, event) -> bool:
         if dock is None:
             return False
         state["triggered"] = True
+        # 切り離し直後の同一ドラッグ中はドロップ判定を強制有効化する。
+        main_window._force_dock_drop_active = True
         _float_dock_from_tab_drag(main_window, dock, current)
         _start_system_move_for_dock(dock)
         main_window._dock_tab_drag_state = None
@@ -463,6 +469,11 @@ def handle_dock_tab_bar_event(main_window, bar: QTabBar, event) -> bool:
         state = getattr(main_window, "_dock_tab_drag_state", None)
         if isinstance(state, dict) and not state.get("triggered"):
             main_window._dock_tab_drag_state = None
+        if et == QEvent.MouseButtonRelease and bool(
+            getattr(main_window, "_force_dock_drop_active", False)
+        ):
+            main_window._force_dock_drop_active = False
+            _sync_dock_options_by_floating_state(main_window)
     return False
 
 

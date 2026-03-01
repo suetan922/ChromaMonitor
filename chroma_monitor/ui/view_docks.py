@@ -43,7 +43,7 @@ _V_COLOR = QColor(80, 140, 240)
 class UniformMinDockWidget(QDockWidget):
 
     def minimumSizeHint(self):
-        return QSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
+        return QSize(C.VIEW_MIN_WIDTH, C.VIEW_MIN_HEIGHT)
 
 
 class ZeroMinContainer(QWidget):
@@ -95,7 +95,7 @@ def _configure_view_dock(main_window, dock: QDockWidget) -> None:
         | QDockWidget.DockWidgetClosable
     )
     dock.setAllowedAreas(Qt.AllDockWidgetAreas)
-    dock.setMinimumSize(C.VIEW_MIN_SIZE, C.VIEW_MIN_SIZE)
+    dock.setMinimumSize(C.VIEW_MIN_WIDTH, C.VIEW_MIN_HEIGHT)
 
     dock.visibilityChanged.connect(main_window.update_placeholder)
     dock.visibilityChanged.connect(main_window.sync_window_menu_checks)
@@ -207,6 +207,7 @@ def setup_view_docks(main_window) -> None:
     main_window._top_bar_render_key = None
     main_window._color_detail_has_selection = False
     main_window._color_detail_merge_complement = False
+    main_window._color_detail_show_info = True
     main_window.lbl_color_band_title = QLabel(C.TOP_COLORS_TITLE)
     main_window.lbl_color_band_title.setStyleSheet("color:#111; font-size:12px; font-weight:600;")
     main_window.lbl_color_band_title.setMinimumHeight(0)
@@ -228,6 +229,7 @@ def setup_view_docks(main_window) -> None:
 
     main_window.list_color_chips = QListWidget()
     main_window.list_color_chips.setMinimumHeight(0)
+    main_window.list_color_chips.setMinimumWidth(0)
     main_window.list_color_chips.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
     main_window.list_color_chips.setSelectionMode(QAbstractItemView.SingleSelection)
     main_window.list_color_chips.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
@@ -281,18 +283,37 @@ def setup_view_docks(main_window) -> None:
     main_window.color_methods_preview_layout.setSpacing(6)
     main_window.color_methods_preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
+    # 詳細表示はカテゴリごとにグルーピングして、視認しやすい間隔を確保する。
+    main_window.color_harmony_section = QWidget()
+    harmony_section_l = QVBoxLayout(main_window.color_harmony_section)
+    harmony_section_l.setContentsMargins(0, 8, 0, 0)
+    harmony_section_l.setSpacing(3)
+    harmony_section_l.addWidget(main_window.lbl_color_harmony_info)
+    harmony_section_l.addWidget(main_window.color_harmony_preview)
+
+    main_window.color_complement_section = QWidget()
+    complement_section_l = QVBoxLayout(main_window.color_complement_section)
+    complement_section_l.setContentsMargins(0, 8, 0, 0)
+    complement_section_l.setSpacing(3)
+    complement_section_l.addWidget(main_window.lbl_color_complement_info)
+    complement_section_l.addWidget(main_window.color_complement_preview)
+
+    main_window.color_methods_section = QWidget()
+    methods_section_l = QVBoxLayout(main_window.color_methods_section)
+    methods_section_l.setContentsMargins(0, 8, 0, 0)
+    methods_section_l.setSpacing(3)
+    methods_section_l.addWidget(main_window.lbl_color_methods_info)
+    methods_section_l.addWidget(main_window.color_methods_preview)
+
     detail_panel = QWidget()
     detail_l = QVBoxLayout(detail_panel)
     detail_l.setContentsMargins(0, 0, 0, 0)
     detail_l.setSpacing(4)
     detail_l.addWidget(main_window.lbl_color_detail_title)
     detail_l.addWidget(main_window.lbl_color_detail_info)
-    detail_l.addWidget(main_window.lbl_color_harmony_info)
-    detail_l.addWidget(main_window.color_harmony_preview)
-    detail_l.addWidget(main_window.lbl_color_complement_info)
-    detail_l.addWidget(main_window.color_complement_preview)
-    detail_l.addWidget(main_window.lbl_color_methods_info)
-    detail_l.addWidget(main_window.color_methods_preview)
+    detail_l.addWidget(main_window.color_harmony_section)
+    detail_l.addWidget(main_window.color_complement_section)
+    detail_l.addWidget(main_window.color_methods_section)
     detail_l.addStretch(1)
 
     main_window.color_detail_scroll = QScrollArea()
@@ -302,10 +323,12 @@ def setup_view_docks(main_window) -> None:
     main_window.color_detail_scroll.setWidget(detail_panel)
     main_window.color_detail_scroll.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
     main_window.color_detail_scroll.setMinimumHeight(0)
+    main_window.color_detail_scroll.setMinimumWidth(0)
     main_window.color_detail_scroll.setVisible(False)
 
     main_window.color_band_splitter = QSplitter(Qt.Vertical)
     main_window.color_band_splitter.setChildrenCollapsible(True)
+    main_window.color_band_splitter.setMinimumSize(0, 0)
     main_window.color_band_splitter.addWidget(main_window.list_color_chips)
     main_window.color_band_splitter.addWidget(main_window.color_detail_scroll)
     main_window.color_band_splitter.setStretchFactor(0, 3)
@@ -320,7 +343,9 @@ def setup_view_docks(main_window) -> None:
     cw_l.addWidget(main_window.wheel, 1)
     color_dock = _create_dock(main_window, "色相環", "dock_color", color_widget)
 
-    color_band_widget = QWidget()
+    # カラー割合は内部要素が多いため、コンテナの最小ヒントを 0 にして
+    # ドック共通最小サイズ定数でのみ下限を管理する。
+    color_band_widget = ZeroMinContainer()
     cb_l = QVBoxLayout(color_band_widget)
     cb_l.setContentsMargins(6, 6, 6, 6)
     cb_l.setSpacing(4)
@@ -328,6 +353,7 @@ def setup_view_docks(main_window) -> None:
     cb_l.addWidget(main_window.top_colors_bar)
     cb_l.addWidget(main_window.lbl_warmcool)
     cb_l.addWidget(main_window.color_band_splitter, 1)
+    color_band_widget.setMinimumSize(0, 0)
     color_band_dock = _create_dock(
         main_window,
         "カラー割合",
