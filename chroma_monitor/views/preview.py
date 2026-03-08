@@ -1,4 +1,4 @@
-"""ビュー描画に関する処理。"""
+"""領域プレビューウィンドウ。"""
 
 from typing import Optional
 
@@ -6,14 +6,16 @@ import numpy as np
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
-from ..util.functions import bgr_to_qpixmap
+from ..util.image_ops import bgr_to_qpixmap
 
 
 class PreviewWindow(QWidget):
+    """選択ROIのプレビュー表示専用ウィンドウ。"""
 
     closed = Signal()
 
     def __init__(self):
+        """プレビュー表示UIと内部キャッシュを初期化する。"""
         super().__init__()
         self.setWindowTitle("領域プレビュー")
         self.resize(640, 420)
@@ -24,11 +26,12 @@ class PreviewWindow(QWidget):
         self.lbl.setAlignment(Qt.AlignCenter)
         self.lbl.setStyleSheet("background:#111; border:1px solid #333; color:#AAA;")
 
-        l = QVBoxLayout(self)
-        l.setContentsMargins(8, 8, 8, 8)
-        l.addWidget(self.lbl)
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.addWidget(self.lbl)
 
     def update_preview(self, bgr: np.ndarray):
+        """現在のROI画像をラベルサイズに合わせて表示更新する。"""
         self._last_bgr = bgr
         max_w = max(1, int(self.lbl.width() - 10))
         max_h = max(1, int(self.lbl.height() - 10))
@@ -40,10 +43,12 @@ class PreviewWindow(QWidget):
         self.lbl.setPixmap(pm)
 
     def set_composition_guide(self, _guide: str):
+        """プレビューでは構図ガイドを無効化する。"""
         # 領域プレビューにはガイドを重ねない方針
         return
 
     def resizeEvent(self, event):
+        """リサイズ時に保持画像の再スケール表示を行う。"""
         super().resizeEvent(event)
         if event.size() == event.oldSize():
             return
@@ -52,5 +57,6 @@ class PreviewWindow(QWidget):
             self.update_preview(self._last_bgr)
 
     def closeEvent(self, e):
+        """閉じられたことを通知して通常クローズ処理へ委譲する。"""
         self.closed.emit()
         super().closeEvent(e)

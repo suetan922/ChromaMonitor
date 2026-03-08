@@ -1,4 +1,4 @@
-"""ビュー描画に関する処理。"""
+"""ROI選択オーバーレイ。"""
 
 from typing import Optional
 
@@ -6,19 +6,21 @@ from PySide6.QtCore import QPoint, QRect, Qt, Signal
 from PySide6.QtGui import QColor, QPainter, QPen
 from PySide6.QtWidgets import QWidget
 
-from ..util.functions import screen_union_geometry
+from ..util.qt_helpers import screen_union_geometry
 
 _MIN_SELECTION_SIZE = 10
 
 
 class RoiSelector(QWidget):
+    """画面上でドラッグ選択したROI矩形を返すオーバーレイ。"""
 
-    roiSelected = Signal(QRect)  # screen coords
+    roiSelected = Signal(QRect)  # 画面座標
     selectionCanceled = Signal()
 
     def __init__(
         self, bounds: Optional[QRect] = None, help_text: str = "", as_window: bool = False
     ):
+        """描画範囲と説明文を受け取り選択オーバーレイを初期化する。"""
         super().__init__(None)
         flags = Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint
         # 全画面選択時は Window として出し、マルチモニタ全域を覆えるようにする
@@ -37,11 +39,13 @@ class RoiSelector(QWidget):
         self._end_local = QPoint()
 
     def _all_screens_geometry(self) -> QRect:
+        """全画面を覆う矩形を返す。"""
         return screen_union_geometry(available=False)
 
     def _event_local_point(self, event) -> QPoint:
-        # Pen displays may report globalPosition with a different scale.
-        # Use widget-local coordinates and map to global only when emitting ROI.
+        """入力イベント座標をウィジェット内ローカル座標へ正規化する。"""
+        # ペン入力環境ではグローバル座標のスケールがずれることがあるため、
+        # ローカル座標を使い、ROI通知時だけグローバル座標へ変換する。
         if hasattr(event, "position"):
             p = event.position().toPoint()
         elif hasattr(event, "pos"):
@@ -51,12 +55,14 @@ class RoiSelector(QWidget):
         return self._clamp_local(p)
 
     def _clamp_local(self, p: QPoint) -> QPoint:
+        """点座標をウィジェット矩形内へクリップする。"""
         r = self.rect()
         x = min(max(p.x(), r.left()), r.right())
         y = min(max(p.y(), r.top()), r.bottom())
         return QPoint(x, y)
 
     def _begin_selection(self, event) -> None:
+        """ドラッグ選択の開始位置を記録する。"""
         self._dragging = True
         self._start_local = self._event_local_point(event)
         self._end_local = self._start_local
@@ -64,6 +70,7 @@ class RoiSelector(QWidget):
         self.setWindowOpacity(1.0)
 
     def _update_selection(self, event) -> bool:
+        """ドラッグ中の終点を更新する。"""
         if not self._dragging:
             return False
         self._end_local = self._event_local_point(event)
@@ -71,6 +78,7 @@ class RoiSelector(QWidget):
         return True
 
     def _finish_selection(self, event) -> bool:
+        """ドラッグ終了時にROIを確定またはキャンセルする。"""
         if not self._dragging or event.button() != Qt.LeftButton:
             return False
         self._dragging = False
@@ -86,16 +94,20 @@ class RoiSelector(QWidget):
         return True
 
     def mousePressEvent(self, e):
+        """マウス左押下で選択開始する。"""
         if e.button() == Qt.LeftButton:
             self._begin_selection(e)
 
     def mouseMoveEvent(self, e):
+        """マウス移動で選択矩形を更新する。"""
         self._update_selection(e)
 
     def mouseReleaseEvent(self, e):
+        """マウス左解放で選択を確定する。"""
         self._finish_selection(e)
 
     def tabletPressEvent(self, e):
+        """タブレット左押下で選択開始する。"""
         if e.button() == Qt.LeftButton:
             self._begin_selection(e)
             e.accept()
@@ -103,23 +115,27 @@ class RoiSelector(QWidget):
         super().tabletPressEvent(e)
 
     def tabletMoveEvent(self, e):
+        """タブレット移動で選択矩形を更新する。"""
         if self._update_selection(e):
             e.accept()
             return
         super().tabletMoveEvent(e)
 
     def tabletReleaseEvent(self, e):
+        """タブレット左解放で選択を確定する。"""
         if self._finish_selection(e):
             e.accept()
             return
         super().tabletReleaseEvent(e)
 
     def keyPressEvent(self, e):
+        """Esc入力で選択をキャンセルする。"""
         if e.key() == Qt.Key_Escape:
             self.selectionCanceled.emit()
             self.close()
 
     def paintEvent(self, _):
+        """オーバーレイ背景と選択矩形を描画する。"""
         p = QPainter(self)
         try:
             p.setRenderHint(QPainter.Antialiasing, True)

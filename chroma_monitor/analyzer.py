@@ -13,15 +13,17 @@ from PySide6.QtGui import QGuiApplication
 
 from .analysis.frame_analysis import (
     _compute_hsv_histograms,
-    _compute_top_colors,
     _compute_wheel_stats,
+    compute_top_bars_chromatic_medoid,
     _sample_sv_and_rgb,
 )
 from .capture.win32_windows import HAS_WIN32, ctypes_win_api, win32gui
 from .util import constants as C
-from .util.functions import clamp_int, resize_by_long_edge
+from .util.image_ops import resize_by_long_edge
+from .util.value_utils import clamp_int
 
 _ctypes_win = ctypes_win_api
+_CAPTURE_SELECTION_KEEP = object()
 _EMPTY_GRAPH_DATA = {
     "hist": None,
     "sv": None,
@@ -44,16 +46,19 @@ _ANALYZER_CHANGE_DETECT_DIM = 120
 
 @dataclass
 class AnalyzerConfig:
+    """ライブ解析ループで利用する設定値の保持クラス。"""
 
     interval_sec: float = C.DEFAULT_INTERVAL_SEC
     sample_points: int = C.DEFAULT_SAMPLE_POINTS
     max_dim: int = C.ANALYZER_MAX_DIM
     wheel_sat_threshold: int = C.DEFAULT_WHEEL_SAT_THRESHOLD
+    color_band_sat_threshold: int = C.DEFAULT_COLOR_BAND_SAT_THRESHOLD
     graph_every: int = _ANALYZER_MIN_GRAPH_EVERY
     mode: str = C.DEFAULT_MODE
     diff_threshold: float = C.DEFAULT_DIFF_THRESHOLD
     stable_frames: int = C.DEFAULT_STABLE_FRAMES
     view_color: bool = True
+    view_color_band: bool = True
     view_scatter: bool = True
     view_hsv_hist: bool = True
     view_image: bool = True
@@ -61,11 +66,13 @@ class AnalyzerConfig:
 
 
 class AnalyzerWorker(QObject):
+    """キャプチャと解析をバックグラウンドで実行するワーカー。"""
 
     resultReady = Signal(dict)
     status = Signal(str)
 
     def __init__(self):
+        """解析設定・状態・内部キャッシュを初期化する。"""
         super().__init__()
         self.cfg = AnalyzerConfig()
         self._stop = threading.Event()
@@ -86,8 +93,12 @@ class AnalyzerWorker(QObject):
         self._was_stable: bool = False
         self._cooldown_until: float = 0.0
         self._force_emit_once: bool = False
+        # 複数画面の論理<->物理座標対応は画面構成が変わるまで再利用する。
+        self._screen_monitor_map_cache: Optional[dict] = None
+        self._screen_monitor_map_signature: tuple = ()
 
     def _reset_change_state(self, emit_once: bool = False):
+        """差分更新モードで使う履歴状態を初期化する。"""
         # changeモードの履歴を初期化する。
         self._prev_h = None
         self._prev_s = None
@@ -99,6 +110,7 @@ class AnalyzerWorker(QObject):
             self._force_emit_once = True
 
     def start(self):
+        """解析スレッドを開始する。"""
         # 既に稼働中なら二重起動しない。
         if self._thread and self._thread.is_alive():
             return
@@ -109,23 +121,28 @@ class AnalyzerWorker(QObject):
         self.status.emit("計測開始")
 
     def stop(self):
+        """解析スレッドへ停止要求を出す。"""
         # 停止要求は次ループで反映される。
         self._stop.set()
         self._result_inflight.clear()
         self.status.emit("停止")
 
     def mark_result_consumed(self):
+        """UI側で結果消費完了したことをワーカーへ通知する。"""
         self._result_inflight.clear()
 
     def set_interval(self, sec: float):
+        """更新間隔を設定する。"""
         self.cfg.interval_sec = max(_ANALYZER_MIN_INTERVAL_SEC, float(sec))
 
     def set_sample_points(self, n: int):
+        """散布図のサンプル点数を設定する。"""
         self.cfg.sample_points = clamp_int(
             n, C.ANALYZER_MIN_SAMPLE_POINTS, C.ANALYZER_MAX_SAMPLE_POINTS
         )
 
     def set_max_dim(self, n: int):
+        """解析用の最大辺サイズを設定する。"""
         n = int(n)
         if n <= 0:
             # 0 はオリジナル解像度（縮小なし）として扱う
@@ -134,34 +151,49 @@ class AnalyzerWorker(QObject):
         self.cfg.max_dim = clamp_int(n, C.ANALYZER_MAX_DIM_MIN, C.ANALYZER_MAX_DIM_MAX)
 
     def set_wheel_sat_threshold(self, n: int):
+        """色相環用の彩度しきい値を設定する。"""
         self.cfg.wheel_sat_threshold = clamp_int(
             n, C.WHEEL_SAT_THRESHOLD_MIN, C.WHEEL_SAT_THRESHOLD_MAX
         )
 
+    def set_color_band_sat_threshold(self, n: int):
+        """配色比率用の彩度しきい値を設定する。"""
+        self.cfg.color_band_sat_threshold = clamp_int(
+            n, C.WHEEL_SAT_THRESHOLD_MIN, C.WHEEL_SAT_THRESHOLD_MAX
+        )
+
     def set_graph_every(self, n: int):
+        """グラフ更新間引き間隔を設定する。"""
         self.cfg.graph_every = max(_ANALYZER_MIN_GRAPH_EVERY, int(n))
 
     def set_mode(self, mode: str):
+        """更新モードを設定する。"""
         self.cfg.mode = mode if mode in C.UPDATE_MODES else C.DEFAULT_MODE
         # モード切替時は差分検知用の状態をリセット
         self._reset_change_state()
 
     def set_diff_threshold(self, th: float):
+        """差分更新モードの変化量しきい値を設定する。"""
         self.cfg.diff_threshold = max(C.ANALYZER_MIN_DIFF_THRESHOLD, float(th))
 
     def set_stable_frames(self, n: int):
+        """差分更新モードの安定判定フレーム数を設定する。"""
         self.cfg.stable_frames = max(C.ANALYZER_MIN_STABLE_FRAMES, int(n))
 
     def set_view_flags(
         self,
         color: Optional[bool] = None,
+        color_band: Optional[bool] = None,
         scatter: Optional[bool] = None,
         hsv_hist: Optional[bool] = None,
         image: Optional[bool] = None,
         preview: Optional[bool] = None,
     ):
+        """可視ビューに応じた解析有効フラグを更新する。"""
         if color is not None:
             self.cfg.view_color = bool(color)
+        if color_band is not None:
+            self.cfg.view_color_band = bool(color_band)
         if scatter is not None:
             self.cfg.view_scatter = bool(scatter)
         if hsv_hist is not None:
@@ -171,25 +203,32 @@ class AnalyzerWorker(QObject):
         if preview is not None:
             self.cfg.want_preview = bool(preview)
 
-    def set_target_window(self, hwnd: Optional[int]):
-        # 取得対象切替時は差分履歴を捨てて誤判定を避ける。
-        self.target_hwnd = hwnd
-        self._reset_change_state(emit_once=True)
-
-    def set_roi_in_window(self, roi_rel: Optional[QRect]):
-        self.roi_rel = roi_rel
-        self._reset_change_state(emit_once=True)
-
-    def set_roi_on_screen(self, roi_abs: Optional[QRect]):
-        if roi_abs is None:
-            self.roi_abs = None
-            self._reset_change_state(emit_once=True)
+    def set_capture_selection(
+        self,
+        *,
+        target_hwnd: Optional[int] | object = _CAPTURE_SELECTION_KEEP,
+        roi_rel: Optional[QRect] | object = _CAPTURE_SELECTION_KEEP,
+        roi_abs: Optional[QRect] | object = _CAPTURE_SELECTION_KEEP,
+    ):
+        """キャプチャ対象とROIをまとめて更新し、差分履歴を1回だけリセットする。"""
+        if (
+            target_hwnd is _CAPTURE_SELECTION_KEEP
+            and roi_rel is _CAPTURE_SELECTION_KEEP
+            and roi_abs is _CAPTURE_SELECTION_KEEP
+        ):
             return
-        # Qtの論理座標からmssが扱う物理座標へ変換して保持する
-        self.roi_abs = self._logical_rect_to_native(roi_abs)
+        # 取得対象切替時は差分履歴を捨てて誤判定を避ける。
+        if target_hwnd is not _CAPTURE_SELECTION_KEEP:
+            self.target_hwnd = target_hwnd
+        if roi_rel is not _CAPTURE_SELECTION_KEEP:
+            self.roi_rel = roi_rel
+        if roi_abs is not _CAPTURE_SELECTION_KEEP:
+            # Qtの論理座標からmssが扱う物理座標へ変換して保持する。
+            self.roi_abs = None if roi_abs is None else self._logical_rect_to_native(roi_abs)
         self._reset_change_state(emit_once=True)
 
     def _get_window_rect(self, hwnd: int) -> Optional[QRect]:
+        """対象ウィンドウ矩形を取得する。"""
         if not HAS_WIN32:
             return None
         try:
@@ -216,6 +255,7 @@ class AnalyzerWorker(QObject):
             return None
 
     def _is_window_minimized(self, hwnd: int) -> bool:
+        """対象ウィンドウが最小化中か判定する。"""
         if not HAS_WIN32:
             return False
         try:
@@ -228,10 +268,29 @@ class AnalyzerWorker(QObject):
             return False
 
     def _build_screen_monitor_map(self):
+        """Qt画面とmssモニタの対応表を構築/再利用する。"""
         # Qt画面情報（論理座標）と mss 画面情報（物理座標）を近似マッチングする。
         qt_screens = QGuiApplication.screens()
         if not qt_screens:
             return {}
+        screen_sig = tuple(
+            (
+                int(id(screen)),
+                str(screen.name()),
+                int(screen.geometry().left()),
+                int(screen.geometry().top()),
+                int(screen.geometry().width()),
+                int(screen.geometry().height()),
+                round(float(screen.devicePixelRatio()), 3),
+            )
+            for screen in qt_screens
+        )
+        if (
+            isinstance(self._screen_monitor_map_cache, dict)
+            and self._screen_monitor_map_cache
+            and self._screen_monitor_map_signature == screen_sig
+        ):
+            return self._screen_monitor_map_cache
 
         try:
             with mss.mss() as sct:
@@ -310,9 +369,12 @@ class AnalyzerWorker(QObject):
                 continue
             fallback = native_monitors[min(i, len(native_monitors) - 1)]
             mapping[info["screen"]] = fallback
+        self._screen_monitor_map_cache = mapping
+        self._screen_monitor_map_signature = screen_sig
         return mapping
 
     def _logical_point_to_native(self, x: float, y: float, mapping) -> tuple[float, float]:
+        """Qt論理座標の点を物理座標へ変換する。"""
         # 入力点がどの screen に属するかを判定して物理座標へ変換する。
         screen = QGuiApplication.screenAt(QPoint(int(round(x)), int(round(y))))
         if screen is None:
@@ -332,6 +394,7 @@ class AnalyzerWorker(QObject):
         return nx, ny
 
     def _native_point_to_logical(self, x: float, y: float, mapping) -> tuple[float, float]:
+        """物理座標の点をQt論理座標へ変換する。"""
         # 物理座標点を、対応するQt画面の論理座標へ逆変換する。
         target_screen = None
         target_mon = None
@@ -368,6 +431,7 @@ class AnalyzerWorker(QObject):
         return lx, ly
 
     def _logical_rect_to_native(self, rect: QRect) -> QRect:
+        """Qt論理座標の矩形を物理座標矩形へ変換する。"""
         # 論理矩形の四隅を物理座標へ写像して新しい矩形を作る。
         mapping = self._build_screen_monitor_map()
         if not mapping:
@@ -386,6 +450,7 @@ class AnalyzerWorker(QObject):
         return QRect(left, top, width, height)
 
     def _native_rect_to_logical(self, rect: QRect) -> QRect:
+        """物理座標の矩形をQt論理座標矩形へ変換する。"""
         # 物理矩形の四隅を論理座標へ写像する（ROI選択UI境界の表示用途）。
         mapping = self._build_screen_monitor_map()
         if not mapping:
@@ -404,6 +469,7 @@ class AnalyzerWorker(QObject):
         return QRect(left, top, width, height)
 
     def _compute_capture_rect(self) -> Optional[QRect]:
+        """現在設定から実キャプチャに使う矩形を解決する。"""
         # window モードでは roi_rel を window 座標系として解決する。
         if self.target_hwnd is not None:
             wrect = self._get_window_rect(self.target_hwnd)
@@ -421,6 +487,7 @@ class AnalyzerWorker(QObject):
         return self.roi_abs
 
     def _capture_window_bgr(self, hwnd: int) -> Optional[np.ndarray]:
+        """Win32 APIで対象ウィンドウ全体を BGR 画像として取得する。"""
         if not HAS_WIN32:
             return None
         try:
@@ -508,6 +575,7 @@ class AnalyzerWorker(QObject):
             return None
 
     def _capture_target_window_region(self) -> tuple[Optional[np.ndarray], Optional[QRect]]:
+        """対象ウィンドウ画像から ROI 相当領域を切り出して返す。"""
         if not HAS_WIN32 or self.target_hwnd is None:
             return None, None
         wrect = self._get_window_rect(self.target_hwnd)
@@ -548,6 +616,7 @@ class AnalyzerWorker(QObject):
     def _capture_screen_region(
         self, sct, cap: Optional[QRect]
     ) -> tuple[Optional[np.ndarray], Optional[QRect], Optional[str]]:
+        """画面領域キャプチャを実行し、画像と実キャプチャ矩形を返す。"""
         vmon = sct.monitors[0]
         if cap is None:
             # 初回は画面中央に既定ROIを自動生成する。
@@ -580,6 +649,7 @@ class AnalyzerWorker(QObject):
         return bgr, QRect(int(left), int(top), int(width), int(height)), None
 
     def capture_once(self) -> tuple[Optional[np.ndarray], Optional[QRect], Optional[str]]:
+        """現在設定で1回だけキャプチャを実行する。"""
         try:
             if self.target_hwnd is not None and HAS_WIN32:
                 if self._is_window_minimized(self.target_hwnd):
@@ -599,6 +669,7 @@ class AnalyzerWorker(QObject):
             return None, None, "プレビュー取得に失敗しました"
 
     def _compute_change_metric(self, dh: np.ndarray, ds: np.ndarray, dv: np.ndarray) -> float:
+        """前回との差分量を1つのスカラー値へ集約する。"""
         # 8bit配列同士の差分は cv2.absdiff で計算して一時配列の型変換を減らす。
         prev_h = self._prev_h
         prev_s = self._prev_s
@@ -617,6 +688,7 @@ class AnalyzerWorker(QObject):
         )
 
     def _should_emit_in_change_mode(self, bgr: np.ndarray, now: float) -> bool:
+        """差分更新モードで今回フレームを通知すべきか判定する。"""
         # 差分判定は軽量化のため専用縮小サイズで行う。
         detect_bgr = resize_by_long_edge(bgr, _ANALYZER_CHANGE_DETECT_DIM)
         detect_hsv = cv2.cvtColor(detect_bgr, cv2.COLOR_BGR2HSV)
@@ -660,9 +732,11 @@ class AnalyzerWorker(QObject):
         self,
         bgr: np.ndarray,
         need_color: bool,
+        need_color_band: bool,
         need_scatter: bool,
         need_hsv_hist: bool,
     ) -> dict:
+        """現在フレームから要求されたグラフ項目だけを計算する。"""
         # 設定された解析上限（max_dim）で縮小してから重い集計を行う。
         bgr_small = resize_by_long_edge(bgr, self.cfg.max_dim)
         hsv = cv2.cvtColor(bgr_small, cv2.COLOR_BGR2HSV)
@@ -678,7 +752,6 @@ class AnalyzerWorker(QObject):
             h_hist, s_hist, v_hist = _compute_hsv_histograms(h, s, v)
 
         hist = None
-        top_colors = None
         warm_ratio = 0.0
         cool_ratio = 0.0
         other_ratio = 0.0
@@ -691,12 +764,20 @@ class AnalyzerWorker(QObject):
             wheel_mask = s >= sat_th
             h_wheel = h[wheel_mask]
             hist, warm_ratio, cool_ratio, other_ratio = _compute_wheel_stats(h_wheel)
-            top_colors = _compute_top_colors(bgr_small, h_wheel, wheel_mask)
 
         sv = None
         rgb = None
         if need_scatter:
             sv, rgb = _sample_sv_and_rgb(h, s, v, bgr_small, self.cfg.sample_points)
+
+        top_colors = None
+        if need_color_band:
+            # 配色比率の代表色計算は解析解像度(max_dim適用後)で行い、負荷を抑える。
+            top_colors = compute_top_bars_chromatic_medoid(
+                bgr_small,
+                sat_threshold=int(self.cfg.color_band_sat_threshold),
+                top_count=int(C.TOP_COLORS_COUNT),
+            )
 
         return {
             "hist": hist,
@@ -712,6 +793,7 @@ class AnalyzerWorker(QObject):
         }
 
     def _run(self):
+        """キャプチャ/解析/通知を繰り返すメインループ。"""
         # mss は with 内で使い回し、毎フレーム初期化コストを避ける。
         with mss.mss() as sct:
             while not self._stop.is_set():
@@ -721,9 +803,10 @@ class AnalyzerWorker(QObject):
 
                 cfg = self.cfg
                 need_color = bool(cfg.view_color)
+                need_color_band = bool(cfg.view_color_band)
                 need_scatter = bool(cfg.view_scatter)
                 need_hsv_hist = bool(cfg.view_hsv_hist)
-                need_graph_data = need_color or need_scatter or need_hsv_hist
+                need_graph_data = need_color or need_color_band or need_scatter or need_hsv_hist
                 need_image = bool(cfg.view_image)
                 need_preview = bool(cfg.want_preview)
                 need_bgr_emit = need_image or need_preview
@@ -783,6 +866,7 @@ class AnalyzerWorker(QObject):
                     graph_data = self._collect_graph_data(
                         bgr,
                         need_color=need_color,
+                        need_color_band=need_color_band,
                         need_scatter=need_scatter,
                         need_hsv_hist=need_hsv_hist,
                     )

@@ -46,6 +46,7 @@ else:
 
 
 def list_windows():
+    """表示中のトップレベルウィンドウ一覧 `(hwnd, title)` を返す。"""
     if not HAS_WIN32:
         return []
 

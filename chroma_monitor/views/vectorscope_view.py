@@ -1,4 +1,4 @@
-"""ビュー描画に関する処理。"""
+"""ベクトルスコープ表示ビュー。"""
 
 import math
 
@@ -6,7 +6,8 @@ import cv2
 import numpy as np
 
 from ..util import constants as C
-from ..util.functions import bgr_to_qpixmap, clamp_int, resize_by_long_edge
+from ..util.image_ops import bgr_to_qpixmap, resize_by_long_edge
+from ..util.value_utils import clamp_int
 from .base_image_view import BaseImageLabelView
 from .image_math import normalize_map
 
@@ -18,8 +19,10 @@ _VECTORSCOPE_WARN_COLOR_BGR = (32, 64, 250)
 
 
 class VectorScopeView(BaseImageLabelView):
+    """YUVベースのベクトルスコープ表示ビュー。"""
 
     def __init__(self):
+        """表示設定と描画キャッシュを初期化する。"""
         super().__init__(
             "ベクトルスコープなし",
             style="background:#0d1015; border:1px solid #2c3440; color:#9aa7ba;",
@@ -35,12 +38,14 @@ class VectorScopeView(BaseImageLabelView):
         self.set_resize_renderer(self.update_scope)
 
     def _display_angle_from_raw(self, raw_angle_deg: float) -> float:
+        """生のU/V角度を表示系の角度へ変換する。"""
         return (
             float(C.HUE_RED_REFERENCE_DEG)
             + float(C.HUE_DIRECTION_SIGN) * (float(raw_angle_deg) - self._red_raw_angle_deg)
         ) % 360.0
 
     def _build_uv_transform(self) -> tuple[float, float, float, float]:
+        """赤基準・回転方向を反映したU/V変換行列を作る。"""
         ref = math.radians(float(C.HUE_RED_REFERENCE_DEG))
         raw = math.radians(float(self._red_raw_angle_deg))
         r_ref = np.array(
@@ -58,11 +63,13 @@ class VectorScopeView(BaseImageLabelView):
         return float(m[0, 0]), float(m[0, 1]), float(m[1, 0]), float(m[1, 1])
 
     def set_show_skin_tone_line(self, enabled: bool):
+        """スキントーンライン表示の有効/無効を切り替える。"""
         self._show_skin_tone_line = bool(enabled)
         if self._last_bgr is not None:
             self.update_scope(self._last_bgr)
 
     def set_warn_threshold(self, value: int):
+        """高彩度警告しきい値(%)を更新する。"""
         self._warn_threshold = clamp_int(
             value, C.VECTORSCOPE_WARN_THRESHOLD_MIN, C.VECTORSCOPE_WARN_THRESHOLD_MAX
         )
@@ -70,15 +77,18 @@ class VectorScopeView(BaseImageLabelView):
             self.update_scope(self._last_bgr)
 
     def high_saturation_ratio(self) -> float:
+        """直近フレームでしきい値超過した画素比率(%)を返す。"""
         return float(self._last_high_sat_ratio)
 
     def _render_size(self) -> int:
+        """現在表示サイズに基づく描画解像度を返す。"""
         # 表示サイズに追従して描画解像度を上げ、拡大ぼけを抑える
         target = min(self.width(), self.height())
         target = clamp_int(target, max(160, _VECTORSCOPE_SIZE), 640)
         return int(target)
 
     def _scope_geometry(self, size: int):
+        """描画サイズに対する中心座標・半径・スケールを返す。"""
         # U/V 平面を中心原点へ投影するための幾何パラメータ。
         cx = (size - 1) // 2
         cy = (size - 1) // 2
@@ -88,6 +98,7 @@ class VectorScopeView(BaseImageLabelView):
         return cx, cy, radius, scale
 
     def _scope_mask(self, size: int) -> np.ndarray:
+        """スコープ円内判定マスクをサイズ別キャッシュ付きで返す。"""
         cached = self._mask_cache.get(int(size))
         if cached is not None:
             return cached
@@ -100,6 +111,7 @@ class VectorScopeView(BaseImageLabelView):
     def _angle_point(
         self, size: int, angle_deg: float, radius_ratio: float = 1.0
     ) -> tuple[int, int]:
+        """角度と半径比から描画座標を求める。"""
         cx, cy, radius, _ = self._scope_geometry(size)
         angle = math.radians(float(angle_deg) % 360.0)
         rr = radius * float(radius_ratio)
@@ -108,6 +120,7 @@ class VectorScopeView(BaseImageLabelView):
         return x, y
 
     def _ref_angle_from_bgr(self, bgr_color: tuple[int, int, int]) -> float:
+        """基準BGR色のU/V角度を算出する。"""
         ref = np.array([[bgr_color]], dtype=np.uint8)
         yuv = cv2.cvtColor(ref, cv2.COLOR_BGR2YUV)[0, 0]
         u = float(yuv[1]) - 128.0
@@ -115,6 +128,7 @@ class VectorScopeView(BaseImageLabelView):
         return (math.degrees(math.atan2(v, u)) + 360.0) % 360.0
 
     def _reference_vectors(self):
+        """色方向ラベル用の基準角度セットを返す。"""
         # 色方位ラベル（R/Y/G/C/B/M）の参照ベクトルを返す。
         if self._ref_vectors_cache is not None:
             return self._ref_vectors_cache
@@ -133,6 +147,7 @@ class VectorScopeView(BaseImageLabelView):
         return self._ref_vectors_cache
 
     def _background(self, size: int) -> np.ndarray:
+        """スコープ背景グリッドをサイズ別キャッシュ付きで返す。"""
         # グリッドは主信号を邪魔しないよう薄めに描く。
         cached = self._bg_cache.get(int(size))
         if cached is not None:
@@ -158,6 +173,7 @@ class VectorScopeView(BaseImageLabelView):
         return bg
 
     def _draw_saturation_guide(self, view: np.ndarray):
+        """高彩度しきい値リングを描画する。"""
         # 現在しきい値の彩度リングを描画する。
         size = view.shape[0]
         cx, cy, radius, _ = self._scope_geometry(size)
@@ -166,6 +182,7 @@ class VectorScopeView(BaseImageLabelView):
         cv2.circle(view, (cx, cy), rr, (124, 142, 166), 1, cv2.LINE_AA)
 
     def _draw_color_direction_legend(self, view: np.ndarray):
+        """色方向ラベルと方位マーカーを描画する。"""
         # R/Y/G/C/B/M の方位ラベルを外周に表示する。
         size = view.shape[0]
         for label, angle, color in self._reference_vectors():
@@ -182,6 +199,7 @@ class VectorScopeView(BaseImageLabelView):
             )
 
     def _draw_skin_tone_line(self, view: np.ndarray):
+        """スキントーン方向ガイド線を描画する。"""
         if not self._show_skin_tone_line:
             return
         size = view.shape[0]
@@ -193,6 +211,7 @@ class VectorScopeView(BaseImageLabelView):
         cv2.line(view, p1, p2, (132, 166, 202), 1, cv2.LINE_AA)
 
     def update_scope(self, bgr: np.ndarray):
+        """入力フレームをベクトルスコープ表示へ変換して描画する。"""
         if not self._set_last_bgr(bgr):
             self._last_high_sat_ratio = 0.0
             return

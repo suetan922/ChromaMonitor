@@ -21,25 +21,37 @@ class ImageFileAnalyzeWorker(QObject):
     failed = Signal(str)
     canceled = Signal()
 
-    def __init__(self, path: str, sample_points: int, wheel_sat_threshold: int):
+    def __init__(
+        self,
+        path: str,
+        sample_points: int,
+        wheel_sat_threshold: int,
+        color_band_sat_threshold: int,
+    ):
+        """解析対象画像と解析パラメータを保持してワーカーを初期化する。"""
         super().__init__()
         self.path = str(path)
         self.sample_points = int(sample_points)
         self.wheel_sat_threshold = int(wheel_sat_threshold)
+        self.color_band_sat_threshold = int(color_band_sat_threshold)
         self._cancel = threading.Event()
 
     def request_cancel(self):
+        """実行中ジョブへキャンセル要求を通知する。"""
         # キャンセルは排他不要のイベントフラグで通知する。
         self._cancel.set()
 
     def _is_canceled(self) -> bool:
+        """キャンセル要求が入っているかを返す。"""
         return self._cancel.is_set()
 
     def _emit_progress(self, percent: int, text: str):
+        """進捗通知シグナルを送出する。"""
         self.progress.emit(int(percent), text)
 
     @staticmethod
     def _decode_to_bgr_preserve_depth(buf: np.ndarray) -> Optional[np.ndarray]:
+        """デコード結果をBGR 3chへ正規化して返す。"""
         img = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
         if img is None or img.size == 0:
             return None
@@ -58,6 +70,7 @@ class ImageFileAnalyzeWorker(QObject):
 
     @staticmethod
     def _auto_analysis_max_dim(bgr: np.ndarray) -> int:
+        """画像サイズに応じて自動縮小の長辺上限を決定する。"""
         # 画像読み込み時は高解像度を優先しつつ、極端な大画像のみ内部で上限を掛ける。
         if bgr is None or bgr.size == 0:
             return 0
@@ -68,6 +81,7 @@ class ImageFileAnalyzeWorker(QObject):
         return int(_IMAGE_FILE_ANALYSIS_AUTO_MAX_DIM)
 
     def run(self):
+        """画像読み込みから解析実行までの単発ジョブを処理する。"""
         try:
             # OpenCVの日本語パス対応のため、imdecode経路で読み込む。
             self._emit_progress(1, "画像を読み込み中…")
@@ -109,6 +123,7 @@ class ImageFileAnalyzeWorker(QObject):
                 bgr=bgr,
                 sample_points=self.sample_points,
                 wheel_sat_threshold=self.wheel_sat_threshold,
+                color_band_sat_threshold=self.color_band_sat_threshold,
                 max_dim=auto_max_dim,
                 progress_cb=self._emit_progress,
                 cancel_cb=self._is_canceled,

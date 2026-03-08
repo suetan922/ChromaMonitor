@@ -48,6 +48,7 @@ _CONFIG_PATH_CACHE: Path | None = None
 
 
 def _legacy_user_config_dir() -> Path:
+    """OS標準のユーザー設定ディレクトリ配下パスを返す。"""
     # 旧来の保存先（AppData / XDG_CONFIG_HOME など）を返す。
     if sys.platform == "win32":
         base = Path(os.environ.get("APPDATA", Path.home() / "AppData" / "Roaming"))
@@ -59,6 +60,7 @@ def _legacy_user_config_dir() -> Path:
 
 
 def _portable_config_dir() -> Path:
+    """実行ファイル近傍のポータブル設定ディレクトリを返す。"""
     # 「見える場所」に置くため、実行ファイル(開発時は起動スクリプト)の隣を優先する。
     if getattr(sys, "frozen", False):
         base = Path(sys.executable).resolve().parent
@@ -72,6 +74,7 @@ def _portable_config_dir() -> Path:
 
 
 def _iter_candidate_config_dirs() -> Iterator[Path]:
+    """設定保存先候補を優先順で列挙する。"""
     # 環境変数で上書き指定があれば最優先。
     override = os.environ.get("CHROMA_MONITOR_CONFIG_DIR")
     candidates = []
@@ -91,6 +94,7 @@ def _iter_candidate_config_dirs() -> Iterator[Path]:
 
 
 def _is_dir_writable(path: Path) -> bool:
+    """指定ディレクトリへ書き込み可能かを判定する。"""
     try:
         path.mkdir(parents=True, exist_ok=True)
         probe = path / ".chroma_monitor_write_test"
@@ -105,6 +109,7 @@ def _is_dir_writable(path: Path) -> bool:
 
 
 def config_path() -> Path:
+    """利用可能な設定ファイルパスを返す。"""
     global _CONFIG_PATH_CACHE
     # 候補探索はI/Oを伴うため初回結果をキャッシュして再利用する。
     if _CONFIG_PATH_CACHE is not None:
@@ -120,6 +125,7 @@ def config_path() -> Path:
 
 
 def load_config() -> Dict[str, Any]:
+    """設定ファイルを読み込み、既定値を補完して返す。"""
     path = config_path()
     if not path.exists():
         return DEFAULT_CONFIG.copy()
@@ -136,6 +142,7 @@ def load_config() -> Dict[str, Any]:
 
 
 def save_config(cfg: Dict[str, Any]) -> None:
+    """設定辞書をJSONとして保存する。"""
     path = config_path()
     try:
         path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")

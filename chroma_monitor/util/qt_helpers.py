@@ -51,6 +51,33 @@ def set_checked_blocked(widget: QObject, checked: bool) -> None:
         widget.setChecked(bool(checked))
 
 
+def set_visible_if(widget: QObject | None, visible: bool) -> None:
+    """`widget` が存在するときだけ `setVisible` を呼ぶ。"""
+    if widget is None:
+        return
+    widget.setVisible(bool(visible))
+
+
+def set_visible_if_changed(widget: QObject | None, visible: bool) -> None:
+    """可視状態が変わるときだけ `setVisible` を呼ぶ。"""
+    if widget is None:
+        return
+    show = bool(visible)
+    try:
+        if widget.isHidden() == (not show):
+            return
+    except Exception:
+        pass
+    widget.setVisible(show)
+
+
+def set_enabled_if(widget: QObject | None, enabled: bool) -> None:
+    """`widget` が存在するときだけ `setEnabled` を呼ぶ。"""
+    if widget is None:
+        return
+    widget.setEnabled(bool(enabled))
+
+
 def is_widget_renderable(widget: QObject) -> bool:
     """ウィジェットが実描画対象として更新可能かを返す。"""
     if widget is None:

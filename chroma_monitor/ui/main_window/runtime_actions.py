@@ -8,18 +8,62 @@ from PySide6.QtWidgets import QFileDialog, QMainWindow, QMessageBox, QProgressDi
 from ...analysis.image_file_worker import ImageFileAnalyzeWorker
 from ...capture.win32_windows import HAS_WIN32, list_windows
 from ...util import constants as C
-from ...util.functions import (
+from ...util.qt_helpers import (
     blocked_signals,
     is_widget_renderable,
-    safe_choice,
+    set_enabled_if,
     set_checked_blocked,
     set_current_index_blocked,
+    set_visible_if_changed,
 )
+from ...util.value_utils import safe_choice
+from .settings_logic import selected_effective_color_band_sat_threshold
 
 _WINDOW_LIST_MAX_ITEMS = 500
+_WORKER_VIEW_FLAGS_DISABLED = {
+    "color": False,
+    "color_band": False,
+    "scatter": False,
+    "hsv_hist": False,
+    "image": False,
+    "preview": False,
+}
+
+
+def _set_worker_view_flags_if_changed(
+    main_window,
+    *,
+    color: bool,
+    color_band: bool,
+    scatter: bool,
+    hsv_hist: bool,
+    image: bool,
+    preview: bool,
+) -> None:
+    """ビュー可視状態が変わったときだけ worker の解析フラグを更新する。"""
+    state = (
+        bool(color),
+        bool(color_band),
+        bool(scatter),
+        bool(hsv_hist),
+        bool(image),
+        bool(preview),
+    )
+    if state == getattr(main_window, "_worker_view_flags_state", None):
+        return
+    main_window._worker_view_flags_state = state
+    main_window.worker.set_view_flags(
+        color=state[0],
+        color_band=state[1],
+        scatter=state[2],
+        hsv_hist=state[3],
+        image=state[4],
+        preview=state[5],
+    )
 
 
 def _safe_close_widget(widget, *, only_if_visible: bool = False) -> None:
+    """例外を握りつぶして安全にウィジェットを閉じる。"""
     if widget is None:
         return
     try:
@@ -31,25 +75,36 @@ def _safe_close_widget(widget, *, only_if_visible: bool = False) -> None:
 
 
 def _is_window_capture_source(main_window) -> bool:
+    """取得元がウィンドウモードかを返す。"""
     return selected_capture_source(main_window) == C.CAPTURE_SOURCE_WINDOW and HAS_WIN32
 
 
+def _set_run_toggle_state(main_window, running: bool) -> None:
+    """Start/Stop のトグル表示状態を同期する。"""
+    main_window.btn_start_bar.setChecked(bool(running))
+    main_window.btn_stop_bar.setChecked(not bool(running))
+
+
 def on_status(main_window, text: str):
+    """ステータスラベルを更新する。"""
     # ステータス表示更新はこの関数経由に寄せる。
     main_window.lbl_status.setText(text)
 
 
 def is_image_analysis_running(main_window) -> bool:
+    """画像ファイル解析スレッドの実行状態を返す。"""
     # 画像ファイル解析は別スレッドで動くため、スレッド状態で判定する。
     return main_window._image_thread is not None and main_window._image_thread.isRunning()
 
 
 def set_image_analysis_busy(main_window, busy: bool):
+    """画像解析中のUIボタン有効/無効を切り替える。"""
     # 実行中は二重起動を避けるためボタンを無効化。
     main_window.btn_load_image_bar.setEnabled(not busy)
 
 
 def cleanup_image_analysis(main_window):
+    """画像解析用スレッド/ワーカー/進捗UIを後始末する。"""
     # 進捗ダイアログ／スレッド／ワーカー参照をまとめて解放する。
     if main_window._image_progress is not None:
         try:
@@ -69,6 +124,7 @@ def cleanup_image_analysis(main_window):
 
 
 def cancel_image_analysis(main_window):
+    """画像解析ワーカーへキャンセル要求を出す。"""
     # 実処理はワーカー側フラグで安全停止させる。
     if main_window._image_worker is not None:
         try:
@@ -78,6 +134,7 @@ def cancel_image_analysis(main_window):
 
 
 def on_load_image(main_window):
+    """画像ファイル解析を開始する。"""
     # ライブ計測中に画像解析へ切り替えるため、先に worker を停止する。
     if is_image_analysis_running(main_window):
         on_status(main_window, "画像解析を実行中です。キャンセルしてから再実行してください。")
@@ -93,13 +150,13 @@ def on_load_image(main_window):
         return
 
     main_window.worker.stop()
-    main_window.btn_stop_bar.setChecked(True)
-    main_window.btn_start_bar.setChecked(False)
+    _set_run_toggle_state(main_window, False)
 
     worker = ImageFileAnalyzeWorker(
         path=file_path,
         sample_points=int(main_window.spin_points.value()),
         wheel_sat_threshold=main_window._selected_wheel_sat_threshold(),
+        color_band_sat_threshold=selected_effective_color_band_sat_threshold(main_window),
     )
     # 重い解析は QThread 上で実行し、UI スレッドはブロックしない。
     thread = QThread(main_window)
@@ -129,6 +186,7 @@ def on_load_image(main_window):
 
 
 def on_image_analysis_progress(main_window, percent: int, text: str):
+    """画像解析進捗をダイアログへ反映する。"""
     # 異常値が来ても表示が壊れないよう 0..100 に丸める。
     if main_window._image_progress is not None:
         main_window._image_progress.setLabelText(text)
@@ -136,16 +194,16 @@ def on_image_analysis_progress(main_window, percent: int, text: str):
 
 
 def on_image_analysis_finished(main_window, res: dict):
+    """画像解析完了時に結果反映と後処理を行う。"""
     cleanup_image_analysis(main_window)
     main_window.on_result(res)
     _restore_visible_docks_from_snapshot(main_window)
-    # 画像解析結果は単発更新のため、レイアウト確定後にも再適用して描画取りこぼしを防ぐ。
-    QTimer.singleShot(0, lambda mw=main_window: _restore_visible_docks_from_snapshot(mw))
-    QTimer.singleShot(80, lambda mw=main_window: _restore_visible_docks_from_snapshot(mw))
+    _schedule_snapshot_restore(main_window, 0, 80)
     on_status(main_window, f"画像解析完了 ({res.get('dt_ms', 0.0):.1f} ms)")
 
 
 def _restore_visible_docks_from_snapshot(main_window) -> None:
+    """可視ドックを最新スナップショットで再描画する。"""
     for dock in getattr(main_window, "_dock_map", {}).values():
         if dock is None:
             continue
@@ -160,18 +218,31 @@ def _restore_visible_docks_from_snapshot(main_window) -> None:
             pass
 
 
+def _schedule_snapshot_restore(main_window, *delays_ms: int) -> None:
+    """遅延タイミングを指定してスナップショット復元を予約する。"""
+    # レイアウト確定後にも再適用して描画取りこぼしを防ぐ。
+    for delay in delays_ms:
+        QTimer.singleShot(
+            int(delay),
+            lambda mw=main_window: _restore_visible_docks_from_snapshot(mw),
+        )
+
+
 def on_image_analysis_failed(main_window, message: str):
+    """画像解析失敗時の共通エラーハンドリング。"""
     cleanup_image_analysis(main_window)
     on_status(main_window, message)
     QMessageBox.warning(main_window, "画像解析", message)
 
 
 def on_image_analysis_canceled(main_window):
+    """画像解析キャンセル完了時の後処理。"""
     cleanup_image_analysis(main_window)
     on_status(main_window, "画像解析をキャンセルしました")
 
 
 def on_start(main_window):
+    """ライブ解析を開始する。"""
     # 画像解析中はキャプチャループを開始しない。
     if is_image_analysis_running(main_window):
         on_status(main_window, "画像解析中です。キャンセル完了後にStartしてください。")
@@ -179,22 +250,22 @@ def on_start(main_window):
     # Start時点の表示状態を再同期して、必要ビューの計算漏れを防ぐ。
     sync_worker_view_flags(main_window)
     main_window.worker.start()
-    main_window.btn_start_bar.setChecked(True)
-    main_window.btn_stop_bar.setChecked(False)
+    _set_run_toggle_state(main_window, True)
 
 
 def on_stop(main_window):
+    """ライブ解析停止または画像解析キャンセルを行う。"""
     # 画像解析中ならまずキャンセル要求、通常時は計測ループ停止。
     if is_image_analysis_running(main_window):
         cancel_image_analysis(main_window)
         on_status(main_window, "画像解析のキャンセルを要求しました")
         return
     main_window.worker.stop()
-    main_window.btn_stop_bar.setChecked(True)
-    main_window.btn_start_bar.setChecked(False)
+    _set_run_toggle_state(main_window, False)
 
 
 def close_event(main_window, event):
+    """メインウィンドウ終了時のクリーンアップ処理。"""
     # メイン終了時に補助ウィンドウも確実に閉じる
     main_window._flush_settings_save()
     main_window.save_settings(silent=True)
@@ -211,69 +282,83 @@ def close_event(main_window, event):
     QMainWindow.closeEvent(main_window, event)
 
 
-def refresh_windows(main_window):
+def refresh_windows(main_window, announce: bool = True):
+    """ウィンドウ候補一覧を再取得してコンボへ反映する。"""
     # Win32 環境ではウィンドウ一覧を再取得し、可能なら既存選択を維持する。
+    combo = main_window.combo_win
+    editor = combo.lineEdit()
     wins = list_windows() if HAS_WIN32 else []
-    prev_hwnd = main_window.combo_win.currentData()
-    with blocked_signals(main_window.combo_win):
-        main_window.combo_win.clear()
+    prev_hwnd = combo.currentData()
+    preserved_text = ""
+    if editor is not None and (editor.hasFocus() or combo.hasFocus()):
+        preserved_text = editor.text()
+    with blocked_signals(combo):
+        combo.clear()
         for hwnd, title in wins[: _WINDOW_LIST_MAX_ITEMS]:
-            main_window.combo_win.addItem(title, hwnd)
+            combo.addItem(title, hwnd)
         selected_idx = -1
         if prev_hwnd is not None:
-            for i in range(main_window.combo_win.count()):
-                if main_window.combo_win.itemData(i) == prev_hwnd:
+            for i in range(combo.count()):
+                if combo.itemData(i) == prev_hwnd:
                     selected_idx = i
                     break
-        main_window.combo_win.setCurrentIndex(selected_idx)
-        if selected_idx < 0 and main_window.combo_win.lineEdit() is not None:
-            main_window.combo_win.clearEditText()
-    if not HAS_WIN32:
+        combo.setCurrentIndex(selected_idx)
+        if editor is not None:
+            if preserved_text:
+                combo.setEditText(preserved_text)
+            elif selected_idx < 0:
+                combo.clearEditText()
+    new_hwnd = combo.itemData(selected_idx) if selected_idx >= 0 else None
+    if announce and not HAS_WIN32:
         on_status(main_window, "この環境ではウィンドウ選択は使えません（画面の領域選択を使用）")
-    else:
+    elif announce:
         on_status(main_window, f"ウィンドウ {len(wins)} 件")
     sync_capture_source_ui(main_window)
-    if _is_window_capture_source(main_window):
-        on_window_changed(main_window, int(main_window.combo_win.currentIndex()))
+    if _is_window_capture_source(main_window) and new_hwnd != prev_hwnd:
+        on_window_changed(main_window, int(selected_idx))
 
 
 def selected_capture_source(main_window) -> str:
+    """UI選択から取得元種別を安全な値で返す。"""
     # UIが不正状態でも安全なソース値へ正規化する。
     source = main_window.combo_capture_source.currentData()
     return safe_choice(source, C.CAPTURE_SOURCES, C.DEFAULT_CAPTURE_SOURCE)
 
 
 def sync_capture_source_ui(main_window):
+    """取得元に応じて関連UIの表示/有効状態を切り替える。"""
     # 取得元に応じて、表示すべき操作ボタンと入力欄を切り替える。
     is_window = selected_capture_source(main_window) == C.CAPTURE_SOURCE_WINDOW
+    window_widgets = (main_window.btn_pick_roi_win,)
+    screen_widgets = (main_window.btn_pick_roi_screen,)
 
     # 設定ダイアログ生成前はこれらのウィジェットが親なし(top-level)のため、
     # setVisible(True) を呼ぶと単独ウィンドウとして出てしまう。
     has_settings_window = hasattr(main_window, "_settings_window")
     if has_settings_window:
-        if main_window._row_target_settings is not None:
-            main_window._row_target_settings.setVisible(is_window)
-        main_window.btn_refresh.setVisible(is_window)
-        main_window.btn_pick_roi_win.setVisible(is_window)
-        main_window.btn_pick_roi_screen.setVisible(not is_window)
+        set_visible_if_changed(main_window._row_target_settings, is_window)
+        for widget in window_widgets:
+            set_visible_if_changed(widget, is_window)
+        for widget in screen_widgets:
+            set_visible_if_changed(widget, not is_window)
     else:
         # 起動時に誤表示しないよう、親なし状態では明示的に隠す。
-        main_window.btn_refresh.hide()
-        main_window.btn_pick_roi_win.hide()
-        main_window.btn_pick_roi_screen.hide()
+        for widget in (*window_widgets, *screen_widgets):
+            set_visible_if_changed(widget, False)
 
     can_window = is_window and HAS_WIN32
-    main_window.btn_refresh.setEnabled(can_window)
-    main_window.combo_win.setEnabled(can_window)
-    main_window.btn_pick_roi_win.setEnabled(can_window)
-    main_window.btn_pick_roi_screen.setEnabled(not is_window)
+    set_enabled_if(main_window.combo_win, can_window)
+    set_enabled_if(main_window.btn_pick_roi_win, can_window)
+    set_enabled_if(main_window.btn_pick_roi_screen, not is_window)
 
 
 def apply_capture_source(main_window, *_):
+    """取得元切替の公開ハンドラ。"""
     _apply_capture_source(main_window, save=True)
 
 
 def _apply_capture_source(main_window, save: bool):
+    """取得元切替の実処理。"""
     source = selected_capture_source(main_window)
     # 非Win32では window モードを screen モードへ強制フォールバック。
     if source == C.CAPTURE_SOURCE_WINDOW and not HAS_WIN32:
@@ -286,14 +371,15 @@ def _apply_capture_source(main_window, save: bool):
     if source == C.CAPTURE_SOURCE_WINDOW:
         if HAS_WIN32 and main_window.combo_win.count() <= 0:
             refresh_windows(main_window)
-        main_window.worker.set_roi_on_screen(None)
-        # ウィンドウ取得時の初期ROIはウィンドウ全体に戻す
-        main_window.worker.set_roi_in_window(None)
         hwnd = main_window.combo_win.currentData()
-        main_window.worker.set_target_window(int(hwnd) if hwnd is not None else None)
+        # ウィンドウ取得時の初期ROIはウィンドウ全体に戻す。
+        main_window.worker.set_capture_selection(
+            target_hwnd=int(hwnd) if hwnd is not None else None,
+            roi_rel=None,
+            roi_abs=None,
+        )
     else:
-        main_window.worker.set_target_window(None)
-        main_window.worker.set_roi_in_window(None)
+        main_window.worker.set_capture_selection(target_hwnd=None, roi_rel=None)
 
     sync_capture_source_ui(main_window)
     if main_window.chk_preview_window.isChecked():
@@ -303,19 +389,17 @@ def _apply_capture_source(main_window, save: bool):
 
 
 def on_window_changed(main_window, _idx: int):
+    """対象ウィンドウ選択変更を worker と表示へ反映する。"""
     # window モード時のみターゲットウィンドウ変更を worker へ伝える。
     if not _is_window_capture_source(main_window):
         return
     hwnd = main_window.combo_win.currentData()
     if hwnd is None:
-        main_window.worker.set_target_window(None)
-        main_window.worker.set_roi_in_window(None)
+        main_window.worker.set_capture_selection(target_hwnd=None, roi_rel=None)
         on_status(main_window, "ターゲット未選択（画面領域を使います）")
         return
     # ウィンドウターゲットを選んだら、画面領域モードを解除（排他的）
-    main_window.worker.set_target_window(int(hwnd))
-    main_window.worker.set_roi_on_screen(None)
-    main_window.worker.set_roi_in_window(None)
+    main_window.worker.set_capture_selection(target_hwnd=int(hwnd), roi_rel=None, roi_abs=None)
     rect = main_window.worker._get_window_rect(int(hwnd))
     if rect is None:
         on_status(main_window, "ターゲット設定: 取得失敗")
@@ -332,38 +416,48 @@ def on_window_changed(main_window, _idx: int):
 
 
 def on_window_text_committed(main_window):
-    # 編集可能コンボの入力文字列を候補へ寄せて選択確定する。
+    """編集可能コンボ入力を既存候補へ解決して選択確定する。"""
+    # 入力だけでは確定せず、完全一致か明示選択のときだけターゲットを切り替える。
     if not _is_window_capture_source(main_window):
         return
-    text = main_window.combo_win.currentText().strip()
+    combo = main_window.combo_win
+    editor = combo.lineEdit()
+    text = combo.currentText().strip()
     if not text:
-        if main_window.combo_win.currentData() is not None:
-            set_current_index_blocked(main_window.combo_win, -1)
-            if main_window.combo_win.lineEdit() is not None:
-                main_window.combo_win.clearEditText()
+        if combo.currentData() is not None:
+            set_current_index_blocked(combo, -1)
+            if editor is not None:
+                combo.clearEditText()
             on_window_changed(main_window, -1)
         return
 
     needle = text.casefold()
     idx = -1
-    for i in range(main_window.combo_win.count()):
-        if main_window.combo_win.itemText(i).casefold() == needle:
+    for i in range(combo.count()):
+        if combo.itemText(i).casefold() == needle:
             idx = i
             break
+
     if idx < 0:
-        for i in range(main_window.combo_win.count()):
-            if needle in main_window.combo_win.itemText(i).casefold():
-                idx = i
-                break
-    if idx < 0:
+        if combo.currentData() is not None:
+            set_current_index_blocked(combo, -1)
+            if editor is not None:
+                editor.setText(text)
+            on_window_changed(main_window, -1)
         return
 
-    if idx != main_window.combo_win.currentIndex():
-        set_current_index_blocked(main_window.combo_win, idx)
+    current_idx = int(combo.currentIndex())
+    if idx == current_idx and combo.currentData() is not None:
+        if editor is not None and editor.text() != combo.itemText(idx):
+            editor.setText(combo.itemText(idx))
+        return
+
+    set_current_index_blocked(combo, idx)
     on_window_changed(main_window, idx)
 
 
 def has_visible_image_dock(main_window) -> bool:
+    """画像系ドックが1つ以上可視なら True を返す。"""
     # 画像系ドックが1つでも開いていれば image 処理を有効にする。
     targets = getattr(main_window, "_image_update_targets", ())
     return any(
@@ -373,7 +467,12 @@ def has_visible_image_dock(main_window) -> bool:
 
 
 def sync_worker_view_flags(main_window):
+    """現在UI可視状態に応じた worker 側の解析対象を同期する。"""
     # 可視ビューに合わせて worker 側の計算フラグを絞る。
+    if bool(getattr(main_window, "_layout_interaction_pause_active", False)):
+        _set_worker_view_flags_if_changed(main_window, **_WORKER_VIEW_FLAGS_DISABLED)
+        return
+
     color_band_visible = bool(
         getattr(main_window, "dock_color_band", None) is not None
         and main_window.dock_color_band.isVisible()
@@ -382,18 +481,71 @@ def sync_worker_view_flags(main_window):
         main_window.dock_color.isVisible()
         or color_band_visible
     )
-    main_window.worker.set_view_flags(
+    _set_worker_view_flags_if_changed(
+        main_window,
         color=color_visible,
+        color_band=color_band_visible,
         scatter=bool(main_window.dock_scatter.isVisible()),
         hsv_hist=bool(main_window.dock_hist.isVisible()),
-        # カラー割合は無彩色(白/灰/黒)集計で bgr_preview を使うため、
+        # 配色比率は無彩色(白/灰/黒)集計で bgr_preview を使うため、
         # 当該ドック表示中は画像系ドックが無くても bgr を受け取る。
         image=bool(has_visible_image_dock(main_window) or color_band_visible),
         preview=bool(main_window.chk_preview_window.isChecked()),
     )
 
 
+def begin_layout_interaction_pause(main_window, reason: str = "layout") -> None:
+    """レイアウト操作中の解析一時停止を開始する。"""
+    # ドック再配置中は解析更新を一時停止してUIの引っ掛かりを減らす。
+    reasons = getattr(main_window, "_layout_interaction_pause_reasons", None)
+    if isinstance(reasons, set):
+        reasons.add(str(reason))
+
+    timer = getattr(main_window, "_layout_interaction_resume_timer", None)
+    if timer is not None:
+        timer.stop()
+
+    if bool(getattr(main_window, "_layout_interaction_pause_active", False)):
+        return
+
+    main_window._layout_interaction_pause_active = True
+    _set_worker_view_flags_if_changed(main_window, **_WORKER_VIEW_FLAGS_DISABLED)
+
+
+def schedule_layout_interaction_resume(main_window, reason: str = "layout") -> None:
+    """レイアウト操作停止後の解析再開をタイマーで予約する。"""
+    # 最後の操作から一定時間無操作なら自動で再開する。
+    reasons = getattr(main_window, "_layout_interaction_pause_reasons", None)
+    if isinstance(reasons, set):
+        reasons.discard(str(reason))
+
+    timer = getattr(main_window, "_layout_interaction_resume_timer", None)
+    if timer is None:
+        end_layout_interaction_pause(main_window)
+        return
+    timer.start()
+
+
+def end_layout_interaction_pause(main_window) -> None:
+    """解析一時停止を解除し、可視ドックの再描画を行う。"""
+    if not bool(getattr(main_window, "_layout_interaction_pause_active", False)):
+        return
+
+    timer = getattr(main_window, "_layout_interaction_resume_timer", None)
+    if timer is not None:
+        timer.stop()
+
+    main_window._layout_interaction_pause_active = False
+    reasons = getattr(main_window, "_layout_interaction_pause_reasons", None)
+    if isinstance(reasons, set):
+        reasons.clear()
+
+    sync_worker_view_flags(main_window)
+    _restore_visible_docks_from_snapshot(main_window)
+
+
 def update_preview_snapshot(main_window):
+    """現在の取得設定でプレビューを1回更新する。"""
     # プレビューは一度だけキャプチャして更新する軽量経路。
     if not main_window.chk_preview_window.isChecked():
         return
@@ -414,6 +566,7 @@ def update_preview_snapshot(main_window):
 
 
 def on_preview_toggled(main_window, checked: bool):
+    """プレビューの有効状態を実ウィンドウへ反映する。"""
     # チェック状態と実ウィンドウ表示を常に同期させる。
     if checked:
         main_window.preview_window.show()
@@ -427,6 +580,7 @@ def on_preview_toggled(main_window, checked: bool):
 
 
 def on_preview_closed(main_window):
+    """プレビューウィンドウの手動クローズをチェック状態へ反映する。"""
     # プレビュー側の × 閉じる操作を設定チェックへ反映する。
     if main_window.chk_preview_window.isChecked():
         set_checked_blocked(main_window.chk_preview_window, False)

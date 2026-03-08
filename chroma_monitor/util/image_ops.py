@@ -1,8 +1,8 @@
 """画像変換・描画向けの共通関数。"""
 
-from collections import OrderedDict
 import math
 import weakref
+from collections import OrderedDict
 from typing import Tuple
 
 import cv2
@@ -126,6 +126,7 @@ def clamp_render_size(width: int, height: int) -> Tuple[int, int]:
 
 
 def _scaled_qpixmap_from_qimage(qimg: QImage, max_w: int, max_h: int) -> QPixmap:
+    """`QImage` を安全サイズへ等比スケーリングして `QPixmap` 化する。"""
     pm = QPixmap.fromImage(qimg)
     max_w, max_h = clamp_render_size(max_w, max_h)
     return pm.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)

@@ -1,4 +1,4 @@
-"""ビュー描画に関する処理。"""
+"""サリエンシーマップ表示ビュー。"""
 
 from typing import Optional
 
@@ -6,12 +6,14 @@ import cv2
 import numpy as np
 
 from ..util import constants as C
-from ..util.functions import clamp_int, resize_by_long_edge, rgb_to_qpixmap, safe_choice
+from ..util.image_ops import resize_by_long_edge, rgb_to_qpixmap
+from ..util.value_utils import clamp_int, safe_choice
 from .base_image_view import BaseImageLabelView
 from .image_math import normalize_map
 
 
 def _apply_composition_guides(bgr: np.ndarray, guide: str) -> np.ndarray:
+    """指定ガイド線を重ねた表示用画像を返す。"""
     # ガイドは表示用オーバーレイなので、入力画像自体は破壊しない。
     if bgr is None or bgr.size == 0:
         return bgr
@@ -80,7 +82,7 @@ def _apply_composition_guides(bgr: np.ndarray, guide: str) -> np.ndarray:
     out_f = out.astype(np.float32)
     outline_a = (outline.astype(np.float32) / 255.0)[:, :, None]
     core_a = (core.astype(np.float32) / 255.0)[:, :, None]
-    out_f = out_f * (1.0 - outline_a)  # black outline
+    out_f = out_f * (1.0 - outline_a)  # 黒い外縁
     white = np.array([245.0, 245.0, 245.0], dtype=np.float32).reshape(1, 1, 3)
     out_f = out_f * (1.0 - core_a) + white * core_a
     out = np.clip(out_f, 0, 255).astype(np.uint8)
@@ -89,30 +91,36 @@ def _apply_composition_guides(bgr: np.ndarray, guide: str) -> np.ndarray:
 
 
 class SaliencyView(BaseImageLabelView):
+    """スペクトル残差ベースのサリエンシー表示ビュー。"""
 
     def __init__(self):
+        """既定パラメータと内部キャッシュを初期化する。"""
         super().__init__("サリエンシーなし")
         self._last_saliency: Optional[np.ndarray] = None
         self._last_overlay_bgra: Optional[np.ndarray] = None
         self._overlay_alpha = C.DEFAULT_SALIENCY_OVERLAY_ALPHA  # 0..100
-        self._guide = C.DEFAULT_COMPOSITION_GUIDE  # none | thirds | center | diagonal
+        # 構図ガイド種別（なし/三分割/中央クロス/対角線）
+        self._guide = C.DEFAULT_COMPOSITION_GUIDE
         self._sr_detector = None
         self._sr_detector_ready = False
         self.set_resize_renderer(self.update_saliency)
 
     def set_overlay_alpha(self, value: int):
+        """オーバーレイ不透明度を更新する。"""
         # アルファ変更は直近フレームを再描画して即時反映する。
         self._overlay_alpha = clamp_int(value, C.SALIENCY_ALPHA_MIN, C.SALIENCY_ALPHA_MAX)
         if self._last_bgr is not None:
             self.update_saliency(self._last_bgr)
 
     def set_composition_guide(self, guide: str):
+        """構図ガイドの表示種別を更新する。"""
         # 無効値を避けるため safe_choice で正規化する。
         self._guide = safe_choice(guide, C.COMPOSITION_GUIDES, C.DEFAULT_COMPOSITION_GUIDE)
         if self._last_bgr is not None:
             self.update_saliency(self._last_bgr)
 
     def _compute_spectral_saliency_opencv(self, bgr: np.ndarray) -> Optional[np.ndarray]:
+        """OpenCV saliency実装を使ってサリエンシーを計算する。"""
         # OpenCV contrib がある環境では SpectralResidual 実装を優先利用する。
         if not self._sr_detector_ready:
             self._sr_detector_ready = True
@@ -141,6 +149,7 @@ class SaliencyView(BaseImageLabelView):
             return None
 
     def _compute_spectral_saliency_fft(self, bgr: np.ndarray) -> np.ndarray:
+        """FFTベースの互換実装でサリエンシーを計算する。"""
         # 互換経路: FFTベースでスペクトル残差を自前計算する。
         gray = cv2.cvtColor(bgr, cv2.COLOR_BGR2GRAY).astype(np.float32) / 255.0
         h, w = gray.shape[:2]
@@ -168,6 +177,7 @@ class SaliencyView(BaseImageLabelView):
         return sal.astype(np.float32)
 
     def _compute_saliency(self, bgr: np.ndarray) -> np.ndarray:
+        """利用可能な方式でサリエンシーマップを計算する。"""
         # OpenCV実装が使えない場合はFFT実装へフォールバック。
         sal = self._compute_spectral_saliency_opencv(bgr)
         if sal is None:
@@ -175,6 +185,7 @@ class SaliencyView(BaseImageLabelView):
         return normalize_map(sal)
 
     def _make_overlay_bgra(self, saliency: np.ndarray) -> np.ndarray:
+        """正規化サリエンシーから色付きBGRAオーバーレイを生成する。"""
         # サリエンシー強度を疑似カラー(BGR) + αチャンネルへ変換する。
         sal_u8 = np.clip(np.round(saliency * 255.0), 0, 255).astype(np.uint8)
         heat_bgr = cv2.applyColorMap(sal_u8, cv2.COLORMAP_JET)
@@ -184,11 +195,13 @@ class SaliencyView(BaseImageLabelView):
         return np.dstack([heat_bgr, alpha])
 
     def _processing_long_edge(self) -> int:
+        """現在表示サイズに基づく解析用長辺上限を返す。"""
         # 表示サイズ相当までで解析すれば、見た目を保ったまま負荷を抑えられる。
         target = max(1, self.width(), self.height())
         return clamp_int(target, 160, 960)
 
     def update_saliency(self, bgr: np.ndarray):
+        """入力フレームをサリエンシー表示へ変換して描画する。"""
         if not self._set_last_bgr(bgr):
             return
 

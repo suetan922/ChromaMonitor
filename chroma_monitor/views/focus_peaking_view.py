@@ -1,16 +1,18 @@
-"""ビュー描画に関する処理。"""
+"""フォーカスピーキング表示ビュー。"""
 
 import cv2
 import numpy as np
 
 from ..util import constants as C
-from ..util.functions import (
+from ..util.image_ops import (
     bgr_to_qpixmap,
+    cvt_color_cached,
+    resize_by_long_edge,
+)
+from ..util.value_utils import (
     clamp_float,
     clamp_int,
-    cvt_color_cached,
     normalized_ratio,
-    resize_by_long_edge,
     safe_choice,
 )
 from .base_image_view import BaseImageLabelView
@@ -24,8 +26,10 @@ _FOCUS_PEAK_COLOR_BGR = {
 
 
 class FocusPeakingView(BaseImageLabelView):
+    """高周波成分を強調表示するフォーカスピーキングビュー。"""
 
     def __init__(self):
+        """既定感度・色・線幅でビューを初期化する。"""
         super().__init__("フォーカスピーキングなし")
         self._sensitivity = C.DEFAULT_FOCUS_PEAK_SENSITIVITY
         self._color = C.DEFAULT_FOCUS_PEAK_COLOR
@@ -33,6 +37,7 @@ class FocusPeakingView(BaseImageLabelView):
         self.set_resize_renderer(self.update_focus)
 
     def set_sensitivity(self, value: int):
+        """ピーキング感度を更新する。"""
         self._sensitivity = clamp_int(
             value, C.FOCUS_PEAK_SENSITIVITY_MIN, C.FOCUS_PEAK_SENSITIVITY_MAX
         )
@@ -40,16 +45,19 @@ class FocusPeakingView(BaseImageLabelView):
             self.update_focus(self._last_bgr)
 
     def set_color(self, color: str):
+        """ピーキング色を更新する。"""
         self._color = safe_choice(color, C.FOCUS_PEAK_COLORS, C.DEFAULT_FOCUS_PEAK_COLOR)
         if self._last_bgr is not None:
             self.update_focus(self._last_bgr)
 
     def set_thickness(self, value: float):
+        """ピーキング線幅を更新する。"""
         self._thickness = clamp_float(value, C.FOCUS_PEAK_THICKNESS_MIN, C.FOCUS_PEAK_THICKNESS_MAX)
         if self._last_bgr is not None:
             self.update_focus(self._last_bgr)
 
     def _focus_mask(self, gray: np.ndarray) -> np.ndarray:
+        """勾配強度に基づくピーキングマスクを生成する。"""
         # ノイズに引っ張られにくいよう軽くぼかしてから勾配を取る。
         blur = cv2.GaussianBlur(gray, (0, 0), 1.0)
         gx = cv2.Sobel(blur, cv2.CV_32F, 1, 0, ksize=3)
@@ -79,6 +87,7 @@ class FocusPeakingView(BaseImageLabelView):
         return mask
 
     def update_focus(self, bgr: np.ndarray):
+        """入力フレームをフォーカスピーキング表示へ更新する。"""
         if not self._set_last_bgr(bgr):
             return
 

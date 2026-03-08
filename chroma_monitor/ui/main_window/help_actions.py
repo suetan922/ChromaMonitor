@@ -11,13 +11,12 @@ from PySide6.QtWidgets import QMenuBar
 from ...util import constants as C
 
 _APP_VERSION = "0.1.0"
-_LATEST_RELEASE_API_URL = (
-    f"https://api.github.com/repos/{C.APP_GITHUB_REPOSITORY}/releases/latest"
-)
+_LATEST_RELEASE_API_URL = f"https://api.github.com/repos/{C.APP_GITHUB_REPOSITORY}/releases/latest"
 _UPDATE_CHECK_TIMEOUT_MS = 5000
 
 
 def _parse_version_tuple(text: str) -> tuple[int, ...] | None:
+    """文字列からバージョン比較用の数値タプルを抽出する。"""
     parts = re.findall(r"\d+", str(text or ""))
     if not parts:
         return None
@@ -25,6 +24,7 @@ def _parse_version_tuple(text: str) -> tuple[int, ...] | None:
 
 
 def _is_release_newer(current_version: str, latest_tag: str) -> bool:
+    """現在バージョンより新しいタグかどうかを判定する。"""
     current = _parse_version_tuple(current_version)
     latest = _parse_version_tuple(latest_tag)
     if current is None or latest is None:
@@ -36,6 +36,7 @@ def _is_release_newer(current_version: str, latest_tag: str) -> bool:
 
 
 def setup_help_menu(main_window, menu_bar: QMenuBar) -> None:
+    """ヘルプメニューと更新通知用アクションを初期化する。"""
     main_window.help_menu = menu_bar.addMenu("ヘルプ")
     main_window.act_open_release_page = main_window.help_menu.addAction("更新情報を開く")
     main_window.act_open_release_page.setToolTip(f"リリースページを開く（現在: v{_APP_VERSION}）")
@@ -50,6 +51,7 @@ def setup_help_menu(main_window, menu_bar: QMenuBar) -> None:
 
 
 def start_release_check_once(main_window) -> None:
+    """重複起動を避けつつ、更新確認を一度だけ遅延実行する。"""
     if main_window._update_check_started:
         return
     main_window._update_check_started = True
@@ -57,6 +59,7 @@ def start_release_check_once(main_window) -> None:
 
 
 def check_latest_release(main_window) -> None:
+    """GitHub Releases APIへ最新タグ問い合わせを送信する。"""
     if main_window._update_reply is not None:
         return
     request = QNetworkRequest(QUrl(_LATEST_RELEASE_API_URL))
@@ -68,6 +71,7 @@ def check_latest_release(main_window) -> None:
 
 
 def on_release_check_finished(main_window, reply: QNetworkReply) -> None:
+    """更新確認レスポンスを解釈し、通知表示状態を更新する。"""
     if reply is None:
         return
     try:
@@ -96,4 +100,5 @@ def on_release_check_finished(main_window, reply: QNetworkReply) -> None:
 
 
 def open_release_page(main_window) -> None:
+    """現在設定されているリリースページURLをブラウザで開く。"""
     QDesktopServices.openUrl(QUrl(main_window._release_page_url))

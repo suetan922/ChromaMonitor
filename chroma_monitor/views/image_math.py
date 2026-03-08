@@ -1,9 +1,10 @@
-"""ビュー描画に関する処理。"""
+"""画像解析で使う数値変換ユーティリティ。"""
 
 import numpy as np
 
 
 def normalize_map(src: np.ndarray) -> np.ndarray:
+    """外れ値を抑えた0..1正規化マップを返す。"""
     arr = np.asarray(src, dtype=np.float32)
     if arr.size == 0:
         return np.zeros((1, 1), dtype=np.float32)

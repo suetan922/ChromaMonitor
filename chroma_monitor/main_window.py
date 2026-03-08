@@ -14,28 +14,31 @@ from PySide6.QtWidgets import (
 from .analyzer import AnalyzerWorker
 from .capture.win32_windows import HAS_WIN32
 from .ui import layout_presets as mw_layout_presets
-from .ui.main_window import help_actions as mw_help
-from .ui.main_window import result_handlers as mw_results
-from .ui.main_window import roi_handlers as mw_roi
-from .ui.main_window import runtime_actions as mw_runtime
-from .ui.main_window import settings_logic as mw_settings
-from .ui.main_window import window_layout as mw_windowing
-from .ui.settings_dialog import hide_settings_window as hide_settings_dialog_window
-from .ui.settings_dialog import show_settings_window as show_settings_dialog_window
-from .ui.view_docks import setup_view_docks
 from .ui.input_widgets import (
+    RefreshOnInteractComboBox,
     SelectAllLineEdit,
     SelectAllSpinBox,
     add_checkable_action,
     configure_numeric_input,
 )
+from .ui.main_window import help_actions as mw_help
+from .ui.main_window import result_color_band as mw_color_band
+from .ui.main_window import result_snapshot as mw_snapshot
+from .ui.main_window import roi_handlers as mw_roi
+from .ui.main_window import runtime_actions as mw_runtime
+from .ui.main_window import settings_logic as mw_settings
+from .ui.main_window import window_layout as mw_windowing
+from .ui.main_window import window_tabs as mw_tabs
+from .ui.main_window import window_topmost as mw_topmost
+from .ui.settings_dialog import hide_settings_window as hide_settings_dialog_window
+from .ui.settings_dialog import show_settings_window as show_settings_dialog_window
+from .ui.view_docks import setup_view_docks
 from .util import constants as C
-from .views import PreviewWindow
-
+from .views.preview import PreviewWindow
 
 _WINDOW_DOCK_MENU_ITEMS = (
     ("act_color", "色相環", True, "dock_color"),
-    ("act_color_band", "カラー割合", True, "dock_color_band"),
+    ("act_color_band", "配色比率", True, "dock_color_band"),
     ("act_hist", "H/S/V ヒストグラム", True, "dock_hist"),
     ("act_rgb_hist", "R/G/B ヒストグラム", False, "dock_rgb_hist"),
     ("act_scatter", "S-V 散布図", True, "dock_scatter"),
@@ -51,13 +54,16 @@ _WINDOW_DOCK_MENU_ITEMS = (
 _DEFAULT_PREVIEW_WINDOW = False
 _SETTINGS_SAVE_DEBOUNCE_MS = 220
 _DOCK_REBALANCE_DEBOUNCE_MS = 36
+_LAYOUT_INTERACTION_RESUME_DEBOUNCE_MS = 220
 _FOCUS_PEAK_THICKNESS_STEP = 0.1
 _SQUINT_BLUR_SIGMA_STEP = 0.1
 
 
 class MainWindow(QMainWindow):
+    """メインUIと解析ワーカー連携を統括するアプリ主画面。"""
 
     def __init__(self):
+        """ウィンドウ状態・各種UI・シグナル接続を順に初期化する。"""
         super().__init__()
         self._init_window_runtime_state()
         self._init_analyzer_workers()
@@ -76,6 +82,7 @@ class MainWindow(QMainWindow):
         self._initialize_runtime_defaults()
 
     def _init_window_runtime_state(self) -> None:
+        """ランタイム管理用フラグ・タイマー・ネットワーク状態を初期化する。"""
         self.setWindowTitle(C.APP_NAME)
         self.resize(1120, 700)
         self._did_initial_screen_fit = False
@@ -97,6 +104,12 @@ class MainWindow(QMainWindow):
         self._dock_rebalance_running = False
         self._dock_geometry_snapshot = {}
         self._dock_rebalance_last_main_size = self.size()
+        self._layout_interaction_pause_active = False
+        self._layout_interaction_pause_reasons = set()
+        self._layout_interaction_resume_timer = QTimer(self)
+        self._layout_interaction_resume_timer.setSingleShot(True)
+        self._layout_interaction_resume_timer.setInterval(_LAYOUT_INTERACTION_RESUME_DEBOUNCE_MS)
+        self._layout_interaction_resume_timer.timeout.connect(self._end_layout_interaction_pause)
         self._settings_save_timer = QTimer(self)
         self._settings_save_timer.setSingleShot(True)
         self._settings_save_timer.setInterval(_SETTINGS_SAVE_DEBOUNCE_MS)
@@ -113,6 +126,7 @@ class MainWindow(QMainWindow):
         self._roi_selectors = []
 
     def _init_analyzer_workers(self) -> None:
+        """ライブ解析と画像解析のワーカー参照を初期化する。"""
         # キャプチャ解析ワーカー（ライブ）と画像解析ワーカー（単発）を分離して保持。
         self.worker = AnalyzerWorker()
         self.worker.resultReady.connect(self.on_result)
@@ -121,12 +135,79 @@ class MainWindow(QMainWindow):
         self._image_worker = None
         self._image_progress = None
 
+    @staticmethod
+    def _set_widget_unit_label(widget, suffix: str) -> None:
+        """設定ダイアログ表示用の単位ラベル文字列をウィジェットへ保持する。"""
+        widget._chroma_unit_label_text = str(suffix).strip()
+
+    @staticmethod
+    def _populate_data_combo(combo: QComboBox, items) -> None:
+        """`(label, data)` 形式の候補列でコンボを初期化する。"""
+        combo.clear()
+        for label, data in items:
+            combo.addItem(label, data)
+
+    @staticmethod
+    def _build_int_spinbox(
+        minimum: int,
+        maximum: int,
+        value: int,
+        *,
+        step: int = 1,
+        suffix: str = "",
+        min_width: int = 110,
+        min_height: int = 28,
+    ) -> SelectAllSpinBox:
+        """共通設定済みの整数入力欄を生成する。"""
+        spin = SelectAllSpinBox()
+        spin.setRange(int(minimum), int(maximum))
+        spin.setSingleStep(int(step))
+        spin.setValue(int(value))
+        if suffix:
+            MainWindow._set_widget_unit_label(spin, suffix)
+        configure_numeric_input(spin, min_width=min_width, min_height=min_height)
+        return spin
+
+    @staticmethod
+    def _build_double_spinbox(
+        minimum: float,
+        maximum: float,
+        value: float,
+        *,
+        decimals: int,
+        step: float,
+        suffix: str = "",
+        min_width: int = 110,
+        min_height: int = 28,
+    ) -> QDoubleSpinBox:
+        """共通設定済みの小数入力欄を生成する。"""
+        spin = QDoubleSpinBox()
+        spin.setRange(float(minimum), float(maximum))
+        spin.setDecimals(int(decimals))
+        spin.setSingleStep(float(step))
+        spin.setValue(float(value))
+        if suffix:
+            MainWindow._set_widget_unit_label(spin, suffix)
+        configure_numeric_input(spin, min_width=min_width, min_height=min_height)
+        return spin
+
+    def _populate_harmony_guide_combo(self, combo: QComboBox) -> None:
+        """色彩調和ガイド用コンボへ候補を設定する。"""
+        self._populate_data_combo(
+            combo,
+            (
+                (C.WHEEL_HARMONY_GUIDE_LABELS[guide_type], guide_type)
+                for guide_type in C.WHEEL_HARMONY_GUIDE_COMBO_ORDER
+            ),
+        )
+
     def _build_control_widgets(self) -> None:
+        """設定・操作に使う入力ウィジェット群を生成する。"""
         # --- Controls: キャプチャ/解析設定 ---
-        self.btn_refresh = QPushButton("ウィンドウ一覧更新")
-        self.combo_win = QComboBox()
+        self.combo_win = RefreshOnInteractComboBox()
         self.combo_win.setEditable(True)
         self.combo_win.setInsertPolicy(QComboBox.NoInsert)
+        self.combo_win.set_refresh_callback(lambda: self.refresh_windows(announce=False))
         win_completer = QCompleter(self.combo_win.model(), self.combo_win)
         win_completer.setCaseSensitivity(Qt.CaseInsensitive)
         win_completer.setFilterMode(Qt.MatchContains)
@@ -134,99 +215,118 @@ class MainWindow(QMainWindow):
         self.combo_win.setCompleter(win_completer)
         if self.combo_win.lineEdit() is not None:
             self.combo_win.lineEdit().setClearButtonEnabled(True)
+            self.combo_win.lineEdit().setPlaceholderText("例: CLIP STUDIO PAINT")
+            self.combo_win.lineEdit().setToolTip(
+                "入力例: CLIP STUDIO PAINT\nウィンドウ名の一部を入力して候補を絞り込めます。"
+            )
         self.btn_pick_roi_win = QPushButton("領域選択（ウィンドウ内）")
         self.btn_pick_roi_screen = QPushButton("領域選択（画面）")
 
-        self.spin_interval = QDoubleSpinBox()
-        self.spin_interval.setSuffix(" 秒")
-        self.spin_interval.setDecimals(2)
-        self.spin_interval.setRange(0.10, 10.00)
-        self.spin_interval.setSingleStep(0.10)
-        self.spin_interval.setValue(C.DEFAULT_INTERVAL_SEC)
-        configure_numeric_input(self.spin_interval)
+        self.spin_interval = self._build_double_spinbox(
+            0.10,
+            10.00,
+            C.DEFAULT_INTERVAL_SEC,
+            decimals=2,
+            step=0.10,
+            suffix=" 秒",
+        )
 
-        self.spin_points = SelectAllSpinBox()
-        self.spin_points.setRange(C.ANALYZER_MIN_SAMPLE_POINTS, C.ANALYZER_MAX_SAMPLE_POINTS)
-        self.spin_points.setSingleStep(500)
-        self.spin_points.setValue(C.DEFAULT_SAMPLE_POINTS)
-        configure_numeric_input(self.spin_points)
+        self.spin_points = self._build_int_spinbox(
+            C.ANALYZER_MIN_SAMPLE_POINTS,
+            C.ANALYZER_MAX_SAMPLE_POINTS,
+            C.DEFAULT_SAMPLE_POINTS,
+            step=500,
+        )
         self.combo_analysis_resolution_mode = QComboBox()
-        self.combo_analysis_resolution_mode.addItem(
-            "オリジナルサイズ",
-            C.ANALYSIS_RESOLUTION_MODE_ORIGINAL,
+        self._populate_data_combo(
+            self.combo_analysis_resolution_mode,
+            (
+                ("オリジナルサイズ", C.ANALYSIS_RESOLUTION_MODE_ORIGINAL),
+                ("指定サイズ", C.ANALYSIS_RESOLUTION_MODE_CUSTOM),
+            ),
         )
-        self.combo_analysis_resolution_mode.addItem(
-            "指定サイズ",
-            C.ANALYSIS_RESOLUTION_MODE_CUSTOM,
+        self.edit_analysis_max_dim = self._build_int_spinbox(
+            C.ANALYZER_MAX_DIM_MIN,
+            C.ANALYZER_MAX_DIM_MAX,
+            C.ANALYZER_MAX_DIM,
+            step=10,
+            suffix=" px",
         )
-        self.edit_analysis_max_dim = SelectAllSpinBox()
-        self.edit_analysis_max_dim.setRange(C.ANALYZER_MAX_DIM_MIN, C.ANALYZER_MAX_DIM_MAX)
-        self.edit_analysis_max_dim.setSingleStep(10)
-        self.edit_analysis_max_dim.setValue(C.ANALYZER_MAX_DIM)
-        self.edit_analysis_max_dim.setSuffix(" px")
-        configure_numeric_input(self.edit_analysis_max_dim)
 
         self.combo_capture_source = QComboBox()
-        self.combo_capture_source.addItem("ウィンドウを選んで取得", C.CAPTURE_SOURCE_WINDOW)
-        self.combo_capture_source.addItem("画面範囲を直接指定", C.CAPTURE_SOURCE_SCREEN)
+        self._populate_data_combo(
+            self.combo_capture_source,
+            (
+                ("ウィンドウを選んで取得", C.CAPTURE_SOURCE_WINDOW),
+                ("画面範囲を直接指定", C.CAPTURE_SOURCE_SCREEN),
+            ),
+        )
 
         self.combo_scatter_shape = QComboBox()
-        self.combo_scatter_shape.addItem("四角", C.SCATTER_SHAPE_SQUARE)
-        self.combo_scatter_shape.addItem("三角", C.SCATTER_SHAPE_TRIANGLE)
-        self.combo_scatter_render_mode = QComboBox()
-        self.combo_scatter_render_mode.addItem(
-            "色をそのまま",
-            C.SCATTER_RENDER_MODE_DOMINANT,
+        self._populate_data_combo(
+            self.combo_scatter_shape,
+            (
+                ("四角", C.SCATTER_SHAPE_SQUARE),
+                ("三角", C.SCATTER_SHAPE_TRIANGLE),
+            ),
         )
-        self.combo_scatter_render_mode.addItem(
-            "ヒートマップ",
-            C.SCATTER_RENDER_MODE_HEATMAP,
+        self.combo_scatter_render_mode = QComboBox()
+        self._populate_data_combo(
+            self.combo_scatter_render_mode,
+            (
+                ("色をそのまま", C.SCATTER_RENDER_MODE_DOMINANT),
+                ("ヒートマップ", C.SCATTER_RENDER_MODE_HEATMAP),
+            ),
         )
         self.combo_wheel_mode = QComboBox()
-        self.combo_wheel_mode.addItem("HSV 180ビン", C.WHEEL_MODE_HSV180)
-        self.combo_wheel_mode.addItem("マンセル基準（40色相）", C.WHEEL_MODE_MUNSELL40)
-        def _populate_harmony_combo(combo: QComboBox) -> None:
-            combo.clear()
-            for guide_type in C.WHEEL_HARMONY_GUIDE_COMBO_ORDER:
-                combo.addItem(C.WHEEL_HARMONY_GUIDE_LABELS[guide_type], guide_type)
+        self._populate_data_combo(
+            self.combo_wheel_mode,
+            (
+                ("HSV 180ビン", C.WHEEL_MODE_HSV180),
+                ("マンセル基準（40色相）", C.WHEEL_MODE_MUNSELL40),
+            ),
+        )
 
         self.chk_wheel_harmony_guide = QCheckBox("色彩調和ガイドを表示")
         self.chk_wheel_harmony_guide.setChecked(C.DEFAULT_WHEEL_HARMONY_GUIDE_ENABLED)
         self.combo_wheel_harmony_guide = QComboBox()
-        _populate_harmony_combo(self.combo_wheel_harmony_guide)
-        default_harmony_idx = self.combo_wheel_harmony_guide.findData(C.DEFAULT_WHEEL_HARMONY_GUIDE_TYPE)
+        self._populate_harmony_guide_combo(self.combo_wheel_harmony_guide)
+        default_harmony_idx = self.combo_wheel_harmony_guide.findData(
+            C.DEFAULT_WHEEL_HARMONY_GUIDE_TYPE
+        )
         if default_harmony_idx >= 0:
             self.combo_wheel_harmony_guide.setCurrentIndex(default_harmony_idx)
         self.combo_wheel_harmony_guide.setEnabled(C.DEFAULT_WHEEL_HARMONY_GUIDE_ENABLED)
         self.combo_rgb_hist_mode = QComboBox()
-        self.combo_rgb_hist_mode.addItem("横並び", C.RGB_HIST_MODE_SIDE_BY_SIDE)
-        self.combo_rgb_hist_mode.addItem("重ね表示", C.RGB_HIST_MODE_OVERLAY)
-        self.spin_wheel_sat_threshold = SelectAllSpinBox()
-        self.spin_wheel_sat_threshold.setRange(C.WHEEL_SAT_THRESHOLD_MIN, C.WHEEL_SAT_THRESHOLD_MAX)
-        self.spin_wheel_sat_threshold.setValue(C.DEFAULT_WHEEL_SAT_THRESHOLD)
-        self.spin_wheel_sat_threshold.setSingleStep(1)
-        self.spin_wheel_sat_threshold.setSuffix(" / 255")
-        configure_numeric_input(self.spin_wheel_sat_threshold)
-        self.chk_color_band_use_wheel_sat_threshold = QCheckBox(
-            "彩度しきい値を色相環と同じにする"
+        self._populate_data_combo(
+            self.combo_rgb_hist_mode,
+            (
+                ("横並び", C.RGB_HIST_MODE_SIDE_BY_SIDE),
+                ("重ね表示", C.RGB_HIST_MODE_OVERLAY),
+            ),
         )
+        self.spin_wheel_sat_threshold = self._build_int_spinbox(
+            C.WHEEL_SAT_THRESHOLD_MIN,
+            C.WHEEL_SAT_THRESHOLD_MAX,
+            C.DEFAULT_WHEEL_SAT_THRESHOLD,
+            suffix=" / 255",
+        )
+        self.chk_color_band_use_wheel_sat_threshold = QCheckBox("彩度しきい値を色相環と同じにする")
         self.chk_color_band_use_wheel_sat_threshold.setChecked(
             C.DEFAULT_COLOR_BAND_USE_WHEEL_SAT_THRESHOLD
         )
-        self.spin_color_band_sat_threshold = SelectAllSpinBox()
-        self.spin_color_band_sat_threshold.setRange(C.WHEEL_SAT_THRESHOLD_MIN, C.WHEEL_SAT_THRESHOLD_MAX)
-        self.spin_color_band_sat_threshold.setValue(C.DEFAULT_COLOR_BAND_SAT_THRESHOLD)
-        self.spin_color_band_sat_threshold.setSingleStep(1)
-        self.spin_color_band_sat_threshold.setSuffix(" / 255")
-        configure_numeric_input(self.spin_color_band_sat_threshold)
-        self.chk_color_band_use_wheel_harmony = QCheckBox(
-            "色彩調和を色相環と同じ設定にする"
+        self.spin_color_band_sat_threshold = self._build_int_spinbox(
+            C.WHEEL_SAT_THRESHOLD_MIN,
+            C.WHEEL_SAT_THRESHOLD_MAX,
+            C.DEFAULT_COLOR_BAND_SAT_THRESHOLD,
+            suffix=" / 255",
         )
+        self.chk_color_band_use_wheel_harmony = QCheckBox("色彩調和を色相環と同じ設定にする")
         self.chk_color_band_use_wheel_harmony.setChecked(C.DEFAULT_COLOR_BAND_USE_WHEEL_HARMONY)
         self.chk_color_band_harmony_guide = QCheckBox("色彩調和を表示")
         self.chk_color_band_harmony_guide.setChecked(C.DEFAULT_COLOR_BAND_HARMONY_GUIDE_ENABLED)
         self.combo_color_band_harmony_guide = QComboBox()
-        _populate_harmony_combo(self.combo_color_band_harmony_guide)
+        self._populate_harmony_guide_combo(self.combo_color_band_harmony_guide)
         default_color_band_harmony_idx = self.combo_color_band_harmony_guide.findData(
             C.DEFAULT_COLOR_BAND_HARMONY_GUIDE_TYPE
         )
@@ -245,94 +345,131 @@ class MainWindow(QMainWindow):
         self.combo_color_band_harmony_guide.setEnabled(own_harmony_enabled)
 
         self.combo_mode = QComboBox()
-        self.combo_mode.addItem("一定間隔で更新", C.UPDATE_MODE_INTERVAL)
-        self.combo_mode.addItem("画面に動きがあったとき", C.UPDATE_MODE_CHANGE)
-        self.spin_diff = QDoubleSpinBox()
-        self.spin_diff.setRange(C.ANALYZER_MIN_DIFF_THRESHOLD, 50.0)
-        self.spin_diff.setDecimals(1)
-        self.spin_diff.setSingleStep(C.ANALYZER_MIN_DIFF_THRESHOLD)
-        self.spin_diff.setValue(C.DEFAULT_DIFF_THRESHOLD)
-        configure_numeric_input(self.spin_diff)
-        self.spin_stable = SelectAllSpinBox()
-        self.spin_stable.setRange(C.ANALYZER_MIN_STABLE_FRAMES, 20)
-        self.spin_stable.setValue(C.DEFAULT_STABLE_FRAMES)
-        configure_numeric_input(self.spin_stable)
-        self.spin_edge_sensitivity = SelectAllSpinBox()
-        self.spin_edge_sensitivity.setRange(C.EDGE_SENSITIVITY_MIN, C.EDGE_SENSITIVITY_MAX)
-        self.spin_edge_sensitivity.setValue(C.DEFAULT_EDGE_SENSITIVITY)
-        self.spin_edge_sensitivity.setSuffix(" / 100")
-        configure_numeric_input(self.spin_edge_sensitivity, min_width=130)
+        self._populate_data_combo(
+            self.combo_mode,
+            (
+                ("一定間隔で更新", C.UPDATE_MODE_INTERVAL),
+                ("画面に動きがあったとき", C.UPDATE_MODE_CHANGE),
+            ),
+        )
+        self.spin_diff = self._build_double_spinbox(
+            C.ANALYZER_MIN_DIFF_THRESHOLD,
+            50.0,
+            C.DEFAULT_DIFF_THRESHOLD,
+            decimals=1,
+            step=C.ANALYZER_MIN_DIFF_THRESHOLD,
+        )
+        self.spin_stable = self._build_int_spinbox(
+            C.ANALYZER_MIN_STABLE_FRAMES,
+            20,
+            C.DEFAULT_STABLE_FRAMES,
+        )
+        self.spin_edge_sensitivity = self._build_int_spinbox(
+            C.EDGE_SENSITIVITY_MIN,
+            C.EDGE_SENSITIVITY_MAX,
+            C.DEFAULT_EDGE_SENSITIVITY,
+            suffix=" / 100",
+            min_width=130,
+        )
         self.combo_binary_preset = QComboBox()
-        self.combo_binary_preset.addItem("自動", C.BINARY_PRESET_AUTO)
-        self.combo_binary_preset.addItem("白を増やす", C.BINARY_PRESET_MORE_WHITE)
-        self.combo_binary_preset.addItem("黒を増やす", C.BINARY_PRESET_MORE_BLACK)
+        self._populate_data_combo(
+            self.combo_binary_preset,
+            (
+                ("自動", C.BINARY_PRESET_AUTO),
+                ("白を増やす", C.BINARY_PRESET_MORE_WHITE),
+                ("黒を増やす", C.BINARY_PRESET_MORE_BLACK),
+            ),
+        )
         self.combo_ternary_preset = QComboBox()
-        self.combo_ternary_preset.addItem("標準", C.TERNARY_PRESET_STANDARD)
-        self.combo_ternary_preset.addItem("やわらかめ", C.TERNARY_PRESET_SOFT)
-        self.combo_ternary_preset.addItem("くっきり", C.TERNARY_PRESET_STRONG)
-        self.spin_saliency_alpha = SelectAllSpinBox()
-        self.spin_saliency_alpha.setRange(C.SALIENCY_ALPHA_MIN, C.SALIENCY_ALPHA_MAX)
-        self.spin_saliency_alpha.setValue(C.DEFAULT_SALIENCY_OVERLAY_ALPHA)
-        self.spin_saliency_alpha.setSuffix(" %")
-        configure_numeric_input(self.spin_saliency_alpha)
+        self._populate_data_combo(
+            self.combo_ternary_preset,
+            (
+                ("標準", C.TERNARY_PRESET_STANDARD),
+                ("やわらかめ", C.TERNARY_PRESET_SOFT),
+                ("くっきり", C.TERNARY_PRESET_STRONG),
+            ),
+        )
+        self.spin_saliency_alpha = self._build_int_spinbox(
+            C.SALIENCY_ALPHA_MIN,
+            C.SALIENCY_ALPHA_MAX,
+            C.DEFAULT_SALIENCY_OVERLAY_ALPHA,
+            suffix=" %",
+        )
         self.combo_composition_guide = QComboBox()
-        self.combo_composition_guide.addItem("なし", C.COMPOSITION_GUIDE_NONE)
-        self.combo_composition_guide.addItem("三分割", C.COMPOSITION_GUIDE_THIRDS)
-        self.combo_composition_guide.addItem("中央クロス", C.COMPOSITION_GUIDE_CENTER)
-        self.combo_composition_guide.addItem("対角線", C.COMPOSITION_GUIDE_DIAGONAL)
-        self.spin_focus_peak_sensitivity = SelectAllSpinBox()
-        self.spin_focus_peak_sensitivity.setRange(
-            C.FOCUS_PEAK_SENSITIVITY_MIN, C.FOCUS_PEAK_SENSITIVITY_MAX
+        self._populate_data_combo(
+            self.combo_composition_guide,
+            (
+                ("なし", C.COMPOSITION_GUIDE_NONE),
+                ("三分割", C.COMPOSITION_GUIDE_THIRDS),
+                ("中央クロス", C.COMPOSITION_GUIDE_CENTER),
+                ("対角線", C.COMPOSITION_GUIDE_DIAGONAL),
+            ),
         )
-        self.spin_focus_peak_sensitivity.setValue(C.DEFAULT_FOCUS_PEAK_SENSITIVITY)
-        self.spin_focus_peak_sensitivity.setSuffix(" / 100")
-        configure_numeric_input(self.spin_focus_peak_sensitivity, min_width=130)
+        self.spin_focus_peak_sensitivity = self._build_int_spinbox(
+            C.FOCUS_PEAK_SENSITIVITY_MIN,
+            C.FOCUS_PEAK_SENSITIVITY_MAX,
+            C.DEFAULT_FOCUS_PEAK_SENSITIVITY,
+            suffix=" / 100",
+            min_width=130,
+        )
         self.combo_focus_peak_color = QComboBox()
-        self.combo_focus_peak_color.addItem("シアン", C.FOCUS_PEAK_COLOR_CYAN)
-        self.combo_focus_peak_color.addItem("グリーン", C.FOCUS_PEAK_COLOR_GREEN)
-        self.combo_focus_peak_color.addItem("イエロー", C.FOCUS_PEAK_COLOR_YELLOW)
-        self.combo_focus_peak_color.addItem("レッド", C.FOCUS_PEAK_COLOR_RED)
-        self.spin_focus_peak_thickness = QDoubleSpinBox()
-        self.spin_focus_peak_thickness.setRange(
-            C.FOCUS_PEAK_THICKNESS_MIN, C.FOCUS_PEAK_THICKNESS_MAX
+        self._populate_data_combo(
+            self.combo_focus_peak_color,
+            (
+                ("シアン", C.FOCUS_PEAK_COLOR_CYAN),
+                ("グリーン", C.FOCUS_PEAK_COLOR_GREEN),
+                ("イエロー", C.FOCUS_PEAK_COLOR_YELLOW),
+                ("レッド", C.FOCUS_PEAK_COLOR_RED),
+            ),
         )
-        self.spin_focus_peak_thickness.setValue(C.DEFAULT_FOCUS_PEAK_THICKNESS)
-        self.spin_focus_peak_thickness.setDecimals(1)
-        self.spin_focus_peak_thickness.setSingleStep(_FOCUS_PEAK_THICKNESS_STEP)
-        self.spin_focus_peak_thickness.setSuffix(" px")
-        configure_numeric_input(self.spin_focus_peak_thickness)
+        self.spin_focus_peak_thickness = self._build_double_spinbox(
+            C.FOCUS_PEAK_THICKNESS_MIN,
+            C.FOCUS_PEAK_THICKNESS_MAX,
+            C.DEFAULT_FOCUS_PEAK_THICKNESS,
+            decimals=1,
+            step=_FOCUS_PEAK_THICKNESS_STEP,
+            suffix=" px",
+        )
         self.combo_squint_mode = QComboBox()
-        self.combo_squint_mode.addItem("ぼかしのみ", C.SQUINT_MODE_BLUR)
-        self.combo_squint_mode.addItem("縮小 → 拡大", C.SQUINT_MODE_SCALE)
-        self.combo_squint_mode.addItem("縮小 → 拡大 + ぼかし", C.SQUINT_MODE_SCALE_BLUR)
-        self.spin_squint_scale = SelectAllSpinBox()
-        self.spin_squint_scale.setRange(C.SQUINT_SCALE_PERCENT_MIN, C.SQUINT_SCALE_PERCENT_MAX)
-        self.spin_squint_scale.setValue(C.DEFAULT_SQUINT_SCALE_PERCENT)
-        self.spin_squint_scale.setSuffix(" %")
-        configure_numeric_input(self.spin_squint_scale)
-        self.spin_squint_blur = QDoubleSpinBox()
-        self.spin_squint_blur.setRange(C.SQUINT_BLUR_SIGMA_MIN, C.SQUINT_BLUR_SIGMA_MAX)
-        self.spin_squint_blur.setValue(C.DEFAULT_SQUINT_BLUR_SIGMA)
-        self.spin_squint_blur.setDecimals(1)
-        self.spin_squint_blur.setSingleStep(_SQUINT_BLUR_SIGMA_STEP)
-        self.spin_squint_blur.setSuffix(" px")
-        configure_numeric_input(self.spin_squint_blur)
+        self._populate_data_combo(
+            self.combo_squint_mode,
+            (
+                ("ぼかしのみ", C.SQUINT_MODE_BLUR),
+                ("縮小 → 拡大", C.SQUINT_MODE_SCALE),
+                ("縮小 → 拡大 + ぼかし", C.SQUINT_MODE_SCALE_BLUR),
+            ),
+        )
+        self.spin_squint_scale = self._build_int_spinbox(
+            C.SQUINT_SCALE_PERCENT_MIN,
+            C.SQUINT_SCALE_PERCENT_MAX,
+            C.DEFAULT_SQUINT_SCALE_PERCENT,
+            suffix=" %",
+        )
+        self.spin_squint_blur = self._build_double_spinbox(
+            C.SQUINT_BLUR_SIGMA_MIN,
+            C.SQUINT_BLUR_SIGMA_MAX,
+            C.DEFAULT_SQUINT_BLUR_SIGMA,
+            decimals=1,
+            step=_SQUINT_BLUR_SIGMA_STEP,
+            suffix=" px",
+        )
         self.chk_vectorscope_skin_line = QCheckBox("スキントーンラインを表示")
         self.chk_vectorscope_skin_line.setChecked(C.DEFAULT_VECTORSCOPE_SHOW_SKIN_LINE)
-        self.spin_vectorscope_warn_threshold = SelectAllSpinBox()
-        self.spin_vectorscope_warn_threshold.setRange(
+        self.spin_vectorscope_warn_threshold = self._build_int_spinbox(
             C.VECTORSCOPE_WARN_THRESHOLD_MIN,
             C.VECTORSCOPE_WARN_THRESHOLD_MAX,
+            C.DEFAULT_VECTORSCOPE_WARN_THRESHOLD,
+            suffix=" %",
         )
-        self.spin_vectorscope_warn_threshold.setValue(C.DEFAULT_VECTORSCOPE_WARN_THRESHOLD)
-        self.spin_vectorscope_warn_threshold.setSuffix(" %")
-        configure_numeric_input(self.spin_vectorscope_warn_threshold)
 
         self.chk_preview_window = QCheckBox("領域プレビュー")
         self.chk_preview_window.setChecked(_DEFAULT_PREVIEW_WINDOW)
 
         self.edit_preset_name = SelectAllLineEdit()
-        self.edit_preset_name.setPlaceholderText("プリセット名")
+        self.edit_preset_name.setPlaceholderText("例: 作業レイアウトA")
+        self.edit_preset_name.setToolTip(
+            "入力例: 作業レイアウトA\n現在のドック配置をこの名前で保存します。"
+        )
         self.combo_layout_presets = QComboBox()
         self.btn_save_preset = QPushButton("プリセット保存")
         self.btn_load_preset = QPushButton("適用")
@@ -352,13 +489,22 @@ class MainWindow(QMainWindow):
         self.lbl_status.setStyleSheet("color:#BBBBBB;")
 
     def _connect_control_signals(self) -> None:
-        self.btn_refresh.clicked.connect(self.refresh_windows)
+        """操作ウィジェットと各種ハンドラのシグナル接続を行う。"""
+        self._connect_capture_control_signals()
+        self._connect_analysis_control_signals()
+        self._connect_layout_preset_signals()
+
+    def _connect_capture_control_signals(self) -> None:
+        """取得元選択とROI操作のシグナルを接続する。"""
         self.combo_win.currentIndexChanged.connect(self.on_window_changed)
         if self.combo_win.lineEdit() is not None:
             self.combo_win.lineEdit().editingFinished.connect(self.on_window_text_committed)
         self.btn_pick_roi_win.clicked.connect(self.pick_roi_in_window)
         self.btn_pick_roi_screen.clicked.connect(self.pick_roi_on_screen)
         self.combo_capture_source.currentIndexChanged.connect(self.apply_capture_source)
+
+    def _connect_analysis_control_signals(self) -> None:
+        """解析設定とプレビュー制御のシグナルを接続する。"""
         self.spin_interval.valueChanged.connect(lambda v: self.worker.set_interval(float(v)))
         self.spin_points.valueChanged.connect(self.apply_sample_points_settings)
         self.combo_analysis_resolution_mode.currentIndexChanged.connect(
@@ -376,7 +522,9 @@ class MainWindow(QMainWindow):
         self.spin_color_band_sat_threshold.valueChanged.connect(self.apply_color_band_settings)
         self.chk_color_band_use_wheel_harmony.toggled.connect(self.apply_color_band_settings)
         self.chk_color_band_harmony_guide.toggled.connect(self.apply_color_band_settings)
-        self.combo_color_band_harmony_guide.currentIndexChanged.connect(self.apply_color_band_settings)
+        self.combo_color_band_harmony_guide.currentIndexChanged.connect(
+            self.apply_color_band_settings
+        )
         self.combo_mode.currentIndexChanged.connect(self.apply_mode_settings)
         self.spin_diff.valueChanged.connect(self.apply_mode_settings)
         self.spin_stable.valueChanged.connect(self.apply_mode_settings)
@@ -396,11 +544,15 @@ class MainWindow(QMainWindow):
         self.chk_vectorscope_skin_line.toggled.connect(self.apply_vectorscope_settings)
         self.spin_vectorscope_warn_threshold.valueChanged.connect(self.apply_vectorscope_settings)
         self.chk_preview_window.toggled.connect(self.on_preview_toggled)
+
+    def _connect_layout_preset_signals(self) -> None:
+        """レイアウトプリセット操作のシグナルを接続する。"""
         self.btn_save_preset.clicked.connect(self.save_layout_preset)
         self.btn_load_preset.clicked.connect(self.load_selected_layout_preset)
         self.btn_delete_preset.clicked.connect(self.delete_selected_layout_preset)
 
     def _build_menu_bar(self) -> None:
+        """メニューバーと各アクションを構築する。"""
         # --- Menu bar (ウィンドウ / 設定 / レイアウト) ---
         mb = self.menuBar() if hasattr(self, "menuBar") else QMenuBar(self)
         win_menu = mb.addMenu("ウィンドウ")
@@ -438,6 +590,7 @@ class MainWindow(QMainWindow):
         self._setup_help_menu(mb)
 
     def _build_toolbar(self) -> None:
+        """Start/Stop/画像読み込みのツールバーを構築する。"""
         # --- Toolbar for Start/Stop ---
         tb = self.addToolBar("コントロール")
         tb.setObjectName("controlToolbar")
@@ -458,6 +611,7 @@ class MainWindow(QMainWindow):
         self.btn_stop_bar.setChecked(True)
 
     def _setup_preview_and_docks(self) -> None:
+        """プレビューとドック群を構築し、関連イベントを接続する。"""
         self.preview_window = PreviewWindow()
         self.preview_window.closed.connect(self.on_preview_closed)
         # 解析ビュー用ドック群を構築。
@@ -468,9 +622,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "list_color_chips"):
             self.list_color_chips.currentRowChanged.connect(self._on_color_chip_selected)
         if hasattr(self.wheel, "harmonyGuideRotationChanged"):
-            self.wheel.harmonyGuideRotationChanged.connect(
-                self._on_wheel_harmony_rotation_changed
-            )
+            self.wheel.harmonyGuideRotationChanged.connect(self._on_wheel_harmony_rotation_changed)
         self.chk_scatter_hue_filter.toggled.connect(self.apply_scatter_settings)
         self.slider_scatter_hue_center.valueChanged.connect(self.apply_scatter_settings)
         self._sync_scatter_filter_controls()
@@ -483,6 +635,7 @@ class MainWindow(QMainWindow):
         self._sync_worker_view_flags()
 
     def _on_tabified_dock_activated(self, dock) -> None:
+        """タブ切替直後の表示同期とスナップショット復元を行う。"""
         # タブ切替時に表示フラグ再同期と表示復元を行い、更新取りこぼしを防ぐ。
         self._sync_tabbed_dock_title_bars()
         self._sync_worker_view_flags()
@@ -493,6 +646,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(60, lambda d=dock, self=self: self._restore_dock_from_snapshot(d))
 
     def _initialize_runtime_defaults(self) -> None:
+        """起動直後のワーカー既定値をUI設定から反映する。"""
         self.worker.set_interval(self.spin_interval.value())
         self.worker.set_sample_points(self.spin_points.value())
         self.apply_analysis_resolution_settings(save=False)
@@ -501,6 +655,7 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._finish_startup)
 
     def _finish_startup(self):
+        """設定ロード後の初期描画同期と自動処理開始を行う。"""
         if self._startup_finished:
             return
         self._startup_finished = True
@@ -531,88 +686,129 @@ class MainWindow(QMainWindow):
     _open_release_page = mw_help.open_release_page
 
     def _request_save_settings(self):
+        """設定保存をデバウンス付きで予約する。"""
         if self._settings_load_in_progress:
             return
         self._settings_save_pending = True
         self._settings_save_timer.start()
 
     def _flush_settings_save(self):
+        """保留中の設定保存を実行する。"""
         if not self._settings_save_pending:
             return
         self._settings_save_pending = False
         self.save_settings()
 
     def showEvent(self, event):
+        """初回表示時に画面内へ収まるようウィンドウサイズを補正する。"""
         super().showEvent(event)
         if not self._did_initial_screen_fit:
             self._did_initial_screen_fit = True
             self._fit_window_to_desktop()
 
     def event(self, event):
+        """レイアウト・表示状態変化イベントに応じて同期処理を行う。"""
         if event.type() == QEvent.LayoutRequest:
             self._schedule_layout_autosave()
             self._schedule_dock_rebalance()
         elif event.type() == QEvent.WindowStateChange:
             self._schedule_layout_autosave()
             self._schedule_window_fit()
+            self._refresh_topmost_if_enabled()
+        elif event.type() == QEvent.Show:
+            self._refresh_topmost_if_enabled()
         return super().event(event)
 
     def eventFilter(self, obj, event):
+        """ドック/タブ/カラーバーの共通イベントを捕捉して処理する。"""
         if obj is getattr(self, "top_colors_bar", None) and event.type() == QEvent.Resize:
             self._refresh_top_color_bar()
             return super().eventFilter(obj, event)
-        if (
-            obj is getattr(self, "dock_color_band", None)
-            and event.type() in (QEvent.Resize, QEvent.Show)
+        if obj is getattr(self, "dock_color_band", None) and event.type() in (
+            QEvent.Resize,
+            QEvent.Show,
         ):
             self._update_color_band_compact_visibility()
-        if mw_windowing.is_dock_tab_bar(self, obj):
-            if mw_windowing.handle_dock_tab_bar_event(self, obj, event):
+        if mw_tabs.is_dock_tab_bar(self, obj):
+            if mw_tabs.handle_dock_tab_bar_event(self, obj, event):
                 return True
             return super().eventFilter(obj, event)
         if obj in getattr(self, "_dock_map", {}).values():
             if event.type() in (QEvent.Move, QEvent.Show, QEvent.Resize):
+                # ドック内再配置/リサイズ中のみ更新を一時停止し、操作後に自動再開する。
+                is_floating = bool(obj.isFloating())
+                if not is_floating:
+                    size = obj.size()
+                    if size.width() > 0 and size.height() > 0:
+                        try:
+                            is_tabbed = len(self.tabifiedDockWidgets(obj)) > 0
+                        except Exception:
+                            is_tabbed = False
+                        # タブ内の非アクティブ状態では高さが極端に小さく見えることがあるため、
+                        # その瞬間値は次回フロート基準へ学習しない。
+                        if (not is_tabbed) or int(size.height()) >= 96:
+                            obj._last_docked_size = (int(size.width()), int(size.height()))
+                should_pause = bool(
+                    event.type() == QEvent.Resize
+                    or (event.type() in (QEvent.Move, QEvent.Show) and not is_floating)
+                )
+                if should_pause:
+                    self._begin_layout_interaction_pause("dock_layout")
                 self._update_floating_dock_dockability(obj)
                 if not obj.isFloating():
                     self._schedule_dock_rebalance()
-                else:
-                    self._track_floating_dock_size(obj)
+                elif event.type() == QEvent.Move:
+                    self._notify_floating_dock_moved(obj)
+                    self._track_floating_dock_size(obj, from_move=True)
+                elif event.type() == QEvent.Resize:
+                    self._track_floating_dock_size(obj, from_move=False)
                 if event.type() in (QEvent.Show, QEvent.Resize):
                     # 初回表示直後にサイズが確定してからスナップショット復元できるようにする。
-                    self._restore_dock_from_snapshot(obj)
+                    if not bool(getattr(self, "_layout_interaction_pause_active", False)):
+                        self._restore_dock_from_snapshot(obj)
+                if should_pause:
+                    self._schedule_layout_interaction_resume("dock_layout")
         return super().eventFilter(obj, event)
 
     def moveEvent(self, event):
+        """メイン移動時にフローティングドック状態と保存予約を更新する。"""
         super().moveEvent(event)
         self._sync_all_floating_dock_dockability()
         self._schedule_layout_autosave()
 
     def resizeEvent(self, event):
+        """メインリサイズ時の一時停止制御とレイアウト同期を行う。"""
+        self._begin_layout_interaction_pause("main_resize")
         super().resizeEvent(event)
         self._sync_all_floating_dock_dockability()
+        self.update_placeholder()
         self._schedule_layout_autosave()
-        self._schedule_window_fit()
+        self._schedule_layout_interaction_resume("main_resize")
 
     _fit_window_to_desktop = mw_windowing.fit_window_to_desktop
+    _fit_dialog_to_desktop = mw_windowing.fit_dialog_to_desktop
     _schedule_window_fit = mw_windowing.schedule_window_fit
-    _is_always_on_top_enabled = mw_windowing.is_always_on_top_enabled
+    _is_always_on_top_enabled = mw_topmost.is_always_on_top_enabled
     _schedule_dock_rebalance = mw_windowing.schedule_dock_rebalance
     _rebalance_dock_layout = mw_windowing.rebalance_dock_layout
     _on_dock_top_level_changed = mw_windowing.on_dock_top_level_changed
     _update_floating_dock_dockability = mw_windowing.update_floating_dock_dockability
     _sync_all_floating_dock_dockability = mw_windowing.sync_all_floating_dock_dockability
+    _notify_floating_dock_moved = mw_windowing.notify_floating_dock_moved
     _track_floating_dock_size = mw_windowing.track_floating_dock_size
 
     def _sync_tabbed_dock_title_bars(self, *_):
-        mw_windowing.sync_tabbed_dock_title_bars(self)
+        """タブ化状態に応じてドックのタイトルバー表示を同期する。"""
+        mw_tabs.sync_tabbed_dock_title_bars(self)
 
-    apply_always_on_top = mw_windowing.apply_always_on_top
-    _present_settings_window = mw_windowing.present_settings_window
-    _refresh_top_color_bar = mw_results.refresh_top_color_bar
-    _on_color_chip_selected = mw_results.on_color_chip_selected
+    apply_always_on_top = mw_topmost.apply_always_on_top
+    _refresh_topmost_if_enabled = mw_topmost.refresh_topmost_if_enabled
+    _present_settings_window = mw_topmost.present_settings_window
+    _refresh_top_color_bar = mw_color_band.refresh_top_color_bar
+    _on_color_chip_selected = mw_color_band.on_color_chip_selected
     _on_wheel_harmony_rotation_changed = mw_settings.on_wheel_harmony_rotation_changed
-    _update_color_band_compact_visibility = mw_results.update_color_band_compact_visibility
-    _restore_dock_from_snapshot = mw_results.restore_dock_from_snapshot
+    _update_color_band_compact_visibility = mw_color_band.update_color_band_compact_visibility
+    _restore_dock_from_snapshot = mw_snapshot.restore_dock_from_snapshot
     on_status = mw_runtime.on_status
     _cancel_image_analysis = mw_runtime.cancel_image_analysis
     on_load_image = mw_runtime.on_load_image
@@ -637,6 +833,9 @@ class MainWindow(QMainWindow):
     _sync_analysis_resolution_rows = mw_settings.sync_analysis_resolution_rows
     _sync_color_band_controls = mw_settings.sync_color_band_controls
     _sync_worker_view_flags = mw_runtime.sync_worker_view_flags
+    _begin_layout_interaction_pause = mw_runtime.begin_layout_interaction_pause
+    _schedule_layout_interaction_resume = mw_runtime.schedule_layout_interaction_resume
+    _end_layout_interaction_pause = mw_runtime.end_layout_interaction_pause
     apply_sample_points_settings = mw_settings.apply_sample_points_settings
     _sync_scatter_filter_controls = mw_settings.sync_scatter_filter_controls
     apply_scatter_settings = mw_settings.apply_scatter_settings
@@ -678,4 +877,4 @@ class MainWindow(QMainWindow):
     on_roi_screen_selected = mw_roi.on_roi_screen_selected
     pick_roi_in_window = mw_roi.pick_roi_in_window
     on_roi_window_selected = mw_roi.on_roi_window_selected
-    on_result = mw_results.on_result
+    on_result = mw_snapshot.on_result

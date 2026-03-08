@@ -1,25 +1,31 @@
-"""ビュー描画に関する処理。"""
+"""グレースケール/2値化/3値化ビュー。"""
 
 import cv2
 import numpy as np
 
 from ..util import constants as C
-from ..util.functions import (
-    clamp_int,
+from ..util.image_ops import (
     cvt_color_cached,
     gray_to_qpixmap,
     resize_by_long_edge,
+)
+from ..util.value_utils import (
+    clamp_int,
     safe_choice,
 )
 from .base_image_view import BaseImageLabelView
 
+
 class GrayscaleView(BaseImageLabelView):
+    """グレースケール表示ビュー。"""
 
     def __init__(self):
+        """ビューを初期化し、リサイズ時レンダラを設定する。"""
         super().__init__("グレースケールなし")
         self.set_resize_renderer(self.update_gray)
 
     def update_gray(self, bgr: np.ndarray):
+        """入力フレームをグレースケール化して表示する。"""
         if not self._set_last_bgr(bgr):
             return
         # グレースケールは元解像度のまま表示し、見た目の忠実度を優先する。
@@ -28,18 +34,22 @@ class GrayscaleView(BaseImageLabelView):
         self.setPixmap(pm)
 
 class BinaryView(BaseImageLabelView):
+    """2値化表示ビュー。"""
 
     def __init__(self):
+        """既定プリセットで2値化ビューを初期化する。"""
         super().__init__("2値化なし")
         self._preset = C.DEFAULT_BINARY_PRESET  # auto | more_white | more_black
         self.set_resize_renderer(self.update_binary)
 
     def set_preset(self, preset: str):
+        """2値化プリセットを更新する。"""
         self._preset = safe_choice(preset, C.BINARY_PRESETS, C.DEFAULT_BINARY_PRESET)
         if self._last_bgr is not None:
             self.update_binary(self._last_bgr)
 
     def update_binary(self, bgr: np.ndarray):
+        """入力フレームを2値化して表示する。"""
         if not self._set_last_bgr(bgr):
             return
         gray = cvt_color_cached(bgr, cv2.COLOR_BGR2GRAY)
@@ -59,18 +69,22 @@ class BinaryView(BaseImageLabelView):
         self.setPixmap(pm)
 
 class TernaryView(BaseImageLabelView):
+    """3値化表示ビュー。"""
 
     def __init__(self):
+        """既定プリセットで3値化ビューを初期化する。"""
         super().__init__("3値化なし")
         self._preset = C.DEFAULT_TERNARY_PRESET  # standard | soft | strong
         self.set_resize_renderer(self.update_ternary)
 
     def set_preset(self, preset: str):
+        """3値化プリセットを更新する。"""
         self._preset = safe_choice(preset, C.TERNARY_PRESETS, C.DEFAULT_TERNARY_PRESET)
         if self._last_bgr is not None:
             self.update_ternary(self._last_bgr)
 
     def update_ternary(self, bgr: np.ndarray):
+        """入力フレームを3値化して表示する。"""
         if not self._set_last_bgr(bgr):
             return
         gray = cvt_color_cached(bgr, cv2.COLOR_BGR2GRAY)

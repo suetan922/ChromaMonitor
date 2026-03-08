@@ -20,39 +20,39 @@ from PySide6.QtWidgets import (
 )
 
 from ..util import constants as C
-from ..views import (
-    BinaryView,
-    ChannelHistogram,
-    ColorWheelWidget,
-    EdgeView,
-    FocusPeakingView,
-    GrayscaleView,
-    RgbHistogramWidget,
-    SaliencyView,
-    ScatterRasterWidget,
-    SquintView,
-    TernaryView,
-    VectorScopeView,
-)
+from ..views.color_scatter import ColorWheelWidget, ScatterRasterWidget
+from ..views.edge_view import EdgeView
+from ..views.focus_peaking_view import FocusPeakingView
+from ..views.histogram import ChannelHistogram, RgbHistogramWidget
+from ..views.saliency_view import SaliencyView
+from ..views.squint_view import SquintView
+from ..views.tonal_views import BinaryView, GrayscaleView, TernaryView
+from ..views.vectorscope_view import VectorScopeView
 
 _H_COLOR = QColor(220, 90, 90)
 _S_COLOR = QColor(90, 170, 90)
 _V_COLOR = QColor(80, 140, 240)
+_COLOR_BAND_WARMCOOL_BOTTOM_SPACING = 6
 
 
 class UniformMinDockWidget(QDockWidget):
+    """全ビューで共通の最小サイズヒントを返すドック。"""
 
     def minimumSizeHint(self):
+        """ドック共通の最小サイズを返す。"""
         return QSize(C.VIEW_MIN_WIDTH, C.VIEW_MIN_HEIGHT)
 
 
 class ZeroMinContainer(QWidget):
+    """子要素に依存せず最小サイズを0で返すコンテナ。"""
 
     def minimumSizeHint(self):
+        """縮小時に内部要素の最小ヒントを優先しないため0を返す。"""
         return QSize(0, 0)
 
 
 def _build_single_view_container(view: QWidget) -> QWidget:
+    """単一ビューを共通マージンで包むコンテナを作る。"""
     # 単一ビュー向けの共通余白コンテナ。
     container = QWidget()
     layout = QVBoxLayout(container)
@@ -68,6 +68,7 @@ def _create_dock(
     content: QWidget,
     area: Qt.DockWidgetArea = Qt.RightDockWidgetArea,
 ) -> QDockWidget:
+    """指定内容のドックを生成し、初期エリアへ追加して返す。"""
     # タイトル・ObjectName・初期配置をまとめて設定する。
     dock = UniformMinDockWidget(title, main_window)
     dock.setObjectName(object_name)
@@ -77,17 +78,8 @@ def _create_dock(
     return dock
 
 
-def _clear_attach_on_show_flag(dock: QDockWidget, visible: bool) -> None:
-    if visible and getattr(dock, "_attach_on_next_show", False):
-        dock._attach_on_next_show = False
-
-
-def _restore_from_snapshot_if_visible(main_window, dock: QDockWidget, visible: bool) -> None:
-    if visible:
-        main_window._restore_dock_from_snapshot(dock)
-
-
 def _configure_view_dock(main_window, dock: QDockWidget) -> None:
+    """各ドックへ共通機能と共通シグナル接続を設定する。"""
     # 各ドックの共通機能（移動/フロート/閉じる等）を設定する。
     dock.setFeatures(
         QDockWidget.DockWidgetMovable
@@ -100,12 +92,15 @@ def _configure_view_dock(main_window, dock: QDockWidget) -> None:
     dock.visibilityChanged.connect(main_window.update_placeholder)
     dock.visibilityChanged.connect(main_window.sync_window_menu_checks)
     dock.visibilityChanged.connect(main_window._sync_tabbed_dock_title_bars)
-    dock.visibilityChanged.connect(
-        lambda v, d=dock: _clear_attach_on_show_flag(d, bool(v))
-    )
-    dock.visibilityChanged.connect(
-        lambda v, mw=main_window, d=dock: _restore_from_snapshot_if_visible(mw, d, bool(v))
-    )
+
+    def _on_visibility_changed(visible: bool, *, mw=main_window, d=dock) -> None:
+        is_visible = bool(visible)
+        if is_visible and getattr(d, "_attach_on_next_show", False):
+            d._attach_on_next_show = False
+        if is_visible:
+            mw._restore_dock_from_snapshot(d)
+
+    dock.visibilityChanged.connect(_on_visibility_changed)
 
     for signal in (dock.topLevelChanged, dock.dockLocationChanged):
         # 配置が変わったときだけ自動保存を予約する。
@@ -117,6 +112,7 @@ def _register_docks(
     main_window,
     dock_specs: list[tuple[str, QDockWidget, Qt.DockWidgetArea]],
 ) -> None:
+    """ドック参照テーブルと既定エリア情報を一括登録する。"""
     # dock_* 属性 / _dock_map / 既定エリアを同時に構築して重複管理を避ける。
     main_window._dock_map = {}
     main_window._dock_default_areas = {}
@@ -129,6 +125,7 @@ def _register_docks(
 
 
 def _build_dock_actions(main_window) -> dict[str, object]:
+    """ドック名と対応アクションのマップを構築する。"""
     # act_<dock名> ルールで対応アクションを解決する。
     dock_actions = {}
     for dock_name in main_window._dock_map:
@@ -140,6 +137,7 @@ def _build_dock_actions(main_window) -> dict[str, object]:
 
 
 def _detach_initially_hidden_docks(main_window) -> None:
+    """初期設定で非表示のドックをレイアウトツリーから外す。"""
     # 既定で非表示のドックはレイアウトから外す。
     # 再表示時は toggle_dock 側の共通追加処理（エリア内タブ化）を使う。
     for name, dock in main_window._dock_map.items():
@@ -154,6 +152,7 @@ def _detach_initially_hidden_docks(main_window) -> None:
 
 
 def setup_view_docks(main_window) -> None:
+    """解析ビュー一式のドックと初期レイアウトを構築する。"""
     # 各解析ビューウィジェットを生成する。
     main_window.wheel = ColorWheelWidget()
     main_window.wheel.setStyleSheet("background:#FFFFFF; border:1px solid #CCC;")
@@ -217,7 +216,9 @@ def setup_view_docks(main_window) -> None:
     main_window.top_colors_bar.setScaledContents(False)
 
     main_window.lbl_warmcool = QLabel("暖色: -   寒色: -   その他: -")
-    main_window.lbl_warmcool.setStyleSheet("color:#111; font-size:12px;")
+    main_window.lbl_warmcool.setStyleSheet(
+        "color:#111; font-size:12px; background:transparent; border:none;"
+    )
     main_window.lbl_warmcool.setWordWrap(True)
     main_window.lbl_warmcool.setMinimumHeight(0)
     main_window.lbl_warmcool.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -338,7 +339,7 @@ def setup_view_docks(main_window) -> None:
     cw_l.addWidget(main_window.wheel, 1)
     color_dock = _create_dock(main_window, "色相環", "dock_color", color_widget)
 
-    # カラー割合は内部要素が多いため、コンテナの最小ヒントを 0 にして
+    # 配色比率は内部要素が多いため、コンテナの最小ヒントを 0 にして
     # ドック共通最小サイズ定数でのみ下限を管理する。
     color_band_widget = ZeroMinContainer()
     cb_l = QVBoxLayout(color_band_widget)
@@ -346,11 +347,12 @@ def setup_view_docks(main_window) -> None:
     cb_l.setSpacing(4)
     cb_l.addWidget(main_window.top_colors_bar)
     cb_l.addWidget(main_window.lbl_warmcool)
+    cb_l.addSpacing(_COLOR_BAND_WARMCOOL_BOTTOM_SPACING)
     cb_l.addWidget(main_window.color_band_splitter, 1)
     color_band_widget.setMinimumSize(0, 0)
     color_band_dock = _create_dock(
         main_window,
-        "カラー割合",
+        "配色比率",
         "dock_color_band",
         color_band_widget,
         area=Qt.LeftDockWidgetArea,
@@ -393,8 +395,10 @@ def setup_view_docks(main_window) -> None:
         "H/S/V ヒストグラム",
         "dock_hist",
         hist_container,
-        area=Qt.BottomDockWidgetArea,
+        area=Qt.LeftDockWidgetArea,
     )
+    # 初期レイアウトから再表示したときは、色相環グループへ優先的にタブ合流させる。
+    hist_dock._preferred_tab_anchor_name = "dock_color"
 
     rgb_hist_container = QWidget()
     rg_l = QVBoxLayout(rgb_hist_container)
@@ -406,8 +410,10 @@ def setup_view_docks(main_window) -> None:
         "R/G/B ヒストグラム",
         "dock_rgb_hist",
         rgb_hist_container,
-        area=Qt.RightDockWidgetArea,
+        area=Qt.LeftDockWidgetArea,
     )
+    # RGBヒストグラムも色相環グループへ合流する。
+    rgb_hist_dock._preferred_tab_anchor_name = "dock_color"
 
     main_window.edge_view = EdgeView()
     edge_container = _build_single_view_container(main_window.edge_view)
@@ -463,16 +469,20 @@ def setup_view_docks(main_window) -> None:
         Qt.TopDockWidgetArea,
         Qt.BottomDockWidgetArea,
     ):
-        main_window.setTabPosition(area, QTabWidget.North)
+        main_window.setTabPosition(area, QTabWidget.South)
 
-    main_window.placeholder = QLabel("🖼️ ウィンドウメニューから表示したいビューを選択してください")
+    main_window.placeholder = QLabel("ウィンドウメニューから表示したいビューを選択してください")
     main_window.placeholder.setAlignment(Qt.AlignCenter)
+    main_window.placeholder.setWordWrap(True)
+    main_window.placeholder.setMinimumSize(0, 0)
+    main_window.placeholder.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
     main_window.placeholder.setStyleSheet("color:#555; font-size:14px;")
 
     central = QWidget()
     central.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
     c_l = QVBoxLayout(central)
     c_l.setContentsMargins(0, 0, 0, 0)
+    c_l.setSpacing(0)
     c_l.addWidget(main_window.placeholder, 1)
     main_window.setCentralWidget(central)
     main_window.central_container = central
@@ -483,8 +493,8 @@ def setup_view_docks(main_window) -> None:
             ("dock_color", color_dock, Qt.LeftDockWidgetArea),
             ("dock_color_band", color_band_dock, Qt.LeftDockWidgetArea),
             ("dock_scatter", scatter_dock, Qt.RightDockWidgetArea),
-            ("dock_hist", hist_dock, Qt.BottomDockWidgetArea),
-            ("dock_rgb_hist", rgb_hist_dock, Qt.RightDockWidgetArea),
+            ("dock_hist", hist_dock, Qt.LeftDockWidgetArea),
+            ("dock_rgb_hist", rgb_hist_dock, Qt.LeftDockWidgetArea),
             ("dock_edge", edge_dock, Qt.RightDockWidgetArea),
             ("dock_gray", gray_dock, Qt.RightDockWidgetArea),
             ("dock_binary", binary_dock, Qt.RightDockWidgetArea),
@@ -519,8 +529,10 @@ def setup_view_docks(main_window) -> None:
     # 初期配置: 左にカラー、右側にビュー群、下にヒストグラム。
     # タブ固定を避け、自由な多段再配置を優先する。
     main_window.addDockWidget(Qt.LeftDockWidgetArea, color_dock)
-    # カラー割合は色相環と同一グループで開き、単独枠として分離しない。
+    # 配色比率・ヒストグラムは色相環と同一グループで開き、単独枠として分離しない。
     main_window.tabifyDockWidget(color_dock, color_band_dock)
+    main_window.tabifyDockWidget(color_dock, hist_dock)
+    main_window.tabifyDockWidget(color_dock, rgb_hist_dock)
     color_dock.raise_()
     main_window.addDockWidget(Qt.RightDockWidgetArea, scatter_dock)
     main_window.splitDockWidget(scatter_dock, edge_dock, Qt.Vertical)
@@ -531,8 +543,6 @@ def setup_view_docks(main_window) -> None:
     main_window.splitDockWidget(saliency_dock, focus_dock, Qt.Vertical)
     main_window.splitDockWidget(focus_dock, squint_dock, Qt.Vertical)
     main_window.splitDockWidget(squint_dock, vectorscope_dock, Qt.Vertical)
-    main_window.addDockWidget(Qt.BottomDockWidgetArea, hist_dock)
-    main_window.addDockWidget(Qt.BottomDockWidgetArea, rgb_hist_dock)
     main_window.resizeDocks([color_dock, scatter_dock, edge_dock], [700, 700, 700], Qt.Horizontal)
     main_window.resizeDocks(
         [

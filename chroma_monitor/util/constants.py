@@ -37,6 +37,8 @@ SCATTER_SHAPE_SQUARE = "square"
 """散布図形状: 四角座標。"""
 SCATTER_SHAPE_TRIANGLE = "triangle"
 """散布図形状: 三角座標。"""
+SCATTER_SHAPES = (SCATTER_SHAPE_SQUARE, SCATTER_SHAPE_TRIANGLE)
+"""散布図形状の許可値一覧。"""
 SCATTER_RENDER_MODE_DOMINANT = "dominant"
 """散布図描画: セル最頻色。"""
 SCATTER_RENDER_MODE_HEATMAP = "heatmap"
@@ -143,6 +145,11 @@ RGB_HIST_MODES = (RGB_HIST_MODE_SIDE_BY_SIDE, RGB_HIST_MODE_OVERLAY)
 # Analysis resolution modes
 ANALYSIS_RESOLUTION_MODE_ORIGINAL = "original"
 ANALYSIS_RESOLUTION_MODE_CUSTOM = "custom"
+ANALYSIS_RESOLUTION_MODES = (
+    ANALYSIS_RESOLUTION_MODE_ORIGINAL,
+    ANALYSIS_RESOLUTION_MODE_CUSTOM,
+)
+"""解析解像度モードの許可値一覧。"""
 
 # Update modes
 UPDATE_MODE_INTERVAL = "interval"
@@ -241,15 +248,15 @@ DEFAULT_RGB_HIST_MODE = RGB_HIST_MODE_SIDE_BY_SIDE
 DEFAULT_WHEEL_SAT_THRESHOLD = 1
 """色相環集計で使う彩度しきい値既定値。"""
 DEFAULT_COLOR_BAND_USE_WHEEL_SAT_THRESHOLD = False
-"""カラー割合の彩度しきい値で色相環設定を使う既定値。"""
+"""配色比率の彩度しきい値で色相環設定を使う既定値。"""
 DEFAULT_COLOR_BAND_SAT_THRESHOLD = 0
-"""カラー割合集計で使う彩度しきい値既定値。"""
+"""配色比率集計で使う彩度しきい値既定値。"""
 DEFAULT_COLOR_BAND_USE_WHEEL_HARMONY = True
-"""カラー割合の色彩調和で色相環設定を使う既定値。"""
+"""配色比率の色彩調和で色相環設定を使う既定値。"""
 DEFAULT_COLOR_BAND_HARMONY_GUIDE_ENABLED = False
-"""カラー割合の色彩調和表示の既定値。"""
+"""配色比率の色彩調和表示の既定値。"""
 DEFAULT_COLOR_BAND_HARMONY_GUIDE_TYPE = WHEEL_HARMONY_GUIDE_IDENTITY
-"""カラー割合の色彩調和タイプ既定値。"""
+"""配色比率の色彩調和タイプ既定値。"""
 DEFAULT_EDGE_SENSITIVITY = 50
 """エッジ検出感度既定値。"""
 DEFAULT_BINARY_PRESET = BINARY_PRESET_AUTO
@@ -274,7 +281,7 @@ DEFAULT_SQUINT_BLUR_SIGMA = 1.8
 """スクイントぼかしσ既定値。"""
 DEFAULT_VECTORSCOPE_SHOW_SKIN_LINE = True
 """ベクトルスコープ肌色線の既定表示状態。"""
-DEFAULT_VECTORSCOPE_WARN_THRESHOLD = 90
+DEFAULT_VECTORSCOPE_WARN_THRESHOLD = 100
 """高彩度警告しきい値(%)既定値。"""
 DEFAULT_ALWAYS_ON_TOP = False
 """常に最前面表示の既定値。"""
@@ -289,8 +296,20 @@ VIEW_MIN_WIDTH = 48
 """ドック/ビューの共通最小幅(px)。"""
 VIEW_MIN_HEIGHT = 48
 """ドック/ビューの共通最小高さ(px)。"""
-VIEW_MIN_SIZE = VIEW_MIN_WIDTH
-"""後方互換用の共通最小サイズ(px)。"""
+
+# Debug logging
+DEBUG_WINDOW_LAYOUT_LOG_ENABLED = True
+"""window_layout デバッグログの既定有効状態。"""
+DEBUG_WINDOW_LAYOUT_LOG_FILE = "window_layout_debug.log"
+"""window_layout デバッグログの既定ファイル名。"""
+DEBUG_WINDOW_LAYOUT_LOG_MAX_BYTES = 5 * 1024 * 1024
+"""window_layout デバッグログ1ファイルあたりの最大サイズ。"""
+DEBUG_WINDOW_LAYOUT_LOG_BACKUP_COUNT = 3
+"""window_layout デバッグログの世代数。"""
+DEBUG_WINDOW_LAYOUT_LOG_ENV = "CHROMA_MONITOR_DEBUG_WINDOW_LAYOUT_LOG"
+"""window_layout デバッグログ有効化を上書きする環境変数名。"""
+DEBUG_WINDOW_LAYOUT_LOG_PATH_ENV = "CHROMA_MONITOR_DEBUG_WINDOW_LAYOUT_LOG_PATH"
+"""window_layout デバッグログ出力先を上書きする環境変数名。"""
 
 # Settings page indices
 SETTINGS_PAGE_CAPTURE = 0
@@ -327,7 +346,6 @@ SQUINT_BLUR_SIGMA_MAX = 30.0
 """スクイントぼかしσの最大値。"""
 
 # Top-color display
-TOP_COLORS_TITLE = "色割合TOP8"
 TOP_COLORS_COUNT = 8
 TOP_COLOR_BAR_HEIGHT = 24
 
