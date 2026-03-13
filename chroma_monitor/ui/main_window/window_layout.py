@@ -49,8 +49,11 @@ _DOCK_OPTIONS_NESTED = _DOCK_OPTIONS_BASE | QMainWindow.AllowNestedDocks
 _DOCK_DROP_ACTIVATION_MARGIN_RATIO = 0.16
 _DOCK_DROP_ACTIVATION_MARGIN_MIN_PX = 96
 _DOCK_DROP_ACTIVATION_MARGIN_MAX_PX = 360
-_FLOATING_SIZE_REMEMBER_RESUME_MS = 1200
+_FLOATING_SCREEN_FIX_RETRY_MS = 120
+_FLOATING_SIZE_REMEMBER_RETRY_MS = 120
 _FLOATING_DEBUG_EVENT_THROTTLE_SEC = 0.06
+_FLOATING_MOVE_DRAG_EDGE_MARGIN_PX = 12
+_FLOATING_MOVE_DRAG_GUARD_RETRY_MS = 120
 
 
 def _dock_debug_name(main_window, dock: QDockWidget) -> str:
@@ -101,9 +104,7 @@ def _debug_log_floating_dock_event(
         geom_text = "?"
     try:
         frame = dock.frameGeometry()
-        frame_text = (
-            f"{int(frame.x())},{int(frame.y())},{int(frame.width())}x{int(frame.height())}"
-        )
+        frame_text = f"{int(frame.x())},{int(frame.y())},{int(frame.width())}x{int(frame.height())}"
     except Exception:
         frame_text = "?"
     try:
@@ -189,22 +190,22 @@ def _remember_floating_dock_size(
     """フローティングドックの現在サイズを記録する。"""
     if dock is None or not dock.isFloating():
         return
-    if bool(getattr(dock, "_floating_suspend_size_remember", False)):
-        return
     if bool(getattr(dock, "_floating_size_restore_lock", False)):
         return
     size = dock.size()
     if size.width() <= 0 or size.height() <= 0:
         return
-    dock._floating_logical_size = QSize(int(size.width()), int(size.height()))
+    remembered_w = max(int(dock.minimumWidth()), int(size.width()))
+    remembered_h = max(int(dock.minimumHeight()), int(size.height()))
+    dock._floating_logical_size = QSize(int(remembered_w), int(remembered_h))
     _debug_log_floating_dock_event(
         main_window,
         dock,
         "remember_floating_size",
         throttle_sec=_FLOATING_DEBUG_EVENT_THROTTLE_SEC,
         force=bool(force),
-        remembered_w=int(size.width()),
-        remembered_h=int(size.height()),
+        remembered_w=int(remembered_w),
+        remembered_h=int(remembered_h),
     )
 
 
@@ -224,28 +225,21 @@ def _restore_floating_dock_size_on_screen_change(
     if dock.windowState() & Qt.WindowMinimized:
         return
 
-    remembered = getattr(dock, "_floating_logical_size", None)
-    if isinstance(remembered, QSize) and remembered.width() > 0 and remembered.height() > 0:
-        target_w = max(int(dock.minimumWidth()), int(remembered.width()))
-        target_h = max(int(dock.minimumHeight()), int(remembered.height()))
-    else:
-        size = dock.size()
-        target_w = max(int(dock.minimumWidth()), int(size.width()))
-        target_h = max(int(dock.minimumHeight()), int(size.height()))
-
     _debug_log_floating_dock_event(
         main_window,
         dock,
         "restore_on_screen_change_begin",
         clear_pending=bool(clear_pending),
-        target_w=int(target_w),
-        target_h=int(target_h),
+        keep_user_size=True,
     )
     dock._floating_size_restore_lock = True
     try:
-        if dock.width() != target_w or dock.height() != target_h:
-            dock.resize(int(target_w), int(target_h))
-        fit_top_level_widget_to_desktop(main_window, dock)
+        # mixed-DPI 画面跨ぎ時でも、ユーザーが設定した幅/高さは変更しない。
+        fit_top_level_widget_to_desktop(
+            main_window,
+            dock,
+            allow_resize=False,
+        )
         sync_dock_on_top(main_window, dock)
         schedule_dock_on_top_refresh(main_window, dock, delay_ms=0)
         schedule_dock_on_top_refresh(main_window, dock, delay_ms=140)
@@ -256,37 +250,392 @@ def _restore_floating_dock_size_on_screen_change(
         )
     finally:
         dock._floating_size_restore_lock = False
-        # 画面跨ぎ直後はOS/Qt由来の一時リサイズが発生しうるため、
-        # ここでは記録を更新せず、短時間だけ再記録を抑止する。
-        dock._floating_suspend_size_remember = True
-        QTimer.singleShot(
-            _FLOATING_SIZE_REMEMBER_RESUME_MS,
-            lambda d=dock: setattr(d, "_floating_suspend_size_remember", False),
+
+
+def _is_left_mouse_dragging() -> bool:
+    """左ボタン押下ドラッグ中か判定する。"""
+    app = QApplication.instance()
+    return bool(app is not None and app.mouseButtons() & Qt.LeftButton)
+
+
+def _is_cursor_near_floating_frame_edge(
+    dock: QDockWidget,
+    *,
+    margin_px: int = _FLOATING_MOVE_DRAG_EDGE_MARGIN_PX,
+) -> bool:
+    """カーソルがフローティング枠の端付近にあるか判定する。"""
+    if dock is None or not dock.isFloating():
+        return False
+    try:
+        frame = dock.frameGeometry()
+        cursor = QCursor.pos()
+    except Exception:
+        return False
+    if not frame.isValid():
+        return False
+    margin = int(margin_px)
+    expanded = frame.adjusted(-margin, -margin, margin, margin)
+    if not expanded.contains(cursor):
+        return False
+    dist_left = abs(cursor.x() - frame.left())
+    dist_right = abs(frame.right() - cursor.x())
+    dist_top = abs(cursor.y() - frame.top())
+    dist_bottom = abs(frame.bottom() - cursor.y())
+    in_vertical_span = (frame.top() - margin) <= cursor.y() <= (frame.bottom() + margin)
+    in_horizontal_span = (frame.left() - margin) <= cursor.x() <= (frame.right() + margin)
+    near_left = dist_left <= margin and in_vertical_span
+    near_right = dist_right <= margin and in_vertical_span
+    near_bottom = dist_bottom <= margin and in_horizontal_span
+    near_top = dist_top <= margin and in_horizontal_span
+    # 上辺中央はタイトルバー移動と重なるため、上辺は角のみリサイズ判定とする。
+    near_top_corner = near_top and (near_left or near_right)
+    return bool(near_left or near_right or near_bottom or near_top_corner)
+
+
+def _ensure_floating_move_drag_guard_timer(main_window, dock: QDockWidget):
+    """移動ドラッグ固定の解除監視タイマーを取得する。"""
+    timer = getattr(dock, "_floating_move_drag_guard_timer", None)
+    if timer is None:
+        timer = QTimer(dock)
+        timer.setSingleShot(True)
+        timer.timeout.connect(
+            lambda mw=main_window, d=dock: _on_floating_move_drag_guard_timer(mw, d)
         )
+        dock._floating_move_drag_guard_timer = timer
+    return timer
+
+
+def _stop_floating_move_drag_size_guard(
+    main_window,
+    dock: QDockWidget,
+    *,
+    reason: str,
+) -> None:
+    """移動ドラッグ中のサイズ固定を解除する。"""
+    if dock is None:
+        return
+    timer = getattr(dock, "_floating_move_drag_guard_timer", None)
+    if timer is not None and timer.isActive():
+        timer.stop()
+    if not bool(getattr(dock, "_floating_move_drag_active", False)):
+        dock._floating_move_drag_size = None
+        dock._floating_move_drag_last_ts = 0.0
+        return
+
+    dock._floating_move_drag_active = False
+    dock._floating_move_drag_size = None
+    dock._floating_move_drag_last_ts = 0.0
+    _debug_log_floating_dock_event(
+        main_window,
+        dock,
+        "floating_move_drag_guard_stop",
+        reason=str(reason),
+    )
+
+
+def _stop_qtimer(timer) -> None:
+    """有効な QTimer を停止する。"""
+    if timer is None:
+        return
+    try:
+        if timer.isActive():
+            timer.stop()
+    except Exception:
+        pass
+
+
+def _clear_floating_runtime_state(
+    main_window,
+    dock: QDockWidget | None,
+    *,
+    reason: str,
+) -> None:
+    """フローティング補助タイマー/状態を安全に初期化する。"""
+    if dock is None:
+        return
+    _stop_qtimer(getattr(dock, "_floating_screen_fix_timer", None))
+    _stop_qtimer(getattr(dock, "_floating_size_remember_timer", None))
+    _stop_qtimer(getattr(dock, "_floating_move_drag_guard_timer", None))
+    dock._floating_screen_fix_pending = False
+    _clear_floating_move_drag_state(main_window, dock, reason=str(reason))
+
+
+def _clear_floating_move_drag_state(
+    main_window,
+    dock: QDockWidget,
+    *,
+    reason: str,
+) -> None:
+    """移動/リサイズのドラッグ状態をクリアする。"""
+    if dock is None:
+        return
+    dock._floating_resize_drag_active = False
+    dock._floating_last_resize_event_ts = 0.0
+    _stop_floating_move_drag_size_guard(main_window, dock, reason=str(reason))
+
+
+def _start_floating_move_drag_size_guard(main_window, dock: QDockWidget) -> None:
+    """移動ドラッグ中はサイズを固定して誤リサイズを抑止する。"""
+    if dock is None or not dock.isFloating() or not dock.isVisible():
+        return
+    size = dock.size()
+    if size.width() <= 0 or size.height() <= 0:
+        return
+    if not bool(getattr(dock, "_floating_move_drag_active", False)):
+        dock._floating_move_drag_active = True
+        dock._floating_move_drag_size = QSize(int(size.width()), int(size.height()))
+        _debug_log_floating_dock_event(
+            main_window,
+            dock,
+            "floating_move_drag_guard_start",
+            ref_w=int(size.width()),
+            ref_h=int(size.height()),
+        )
+    dock._floating_move_drag_last_ts = float(time.monotonic())
+    _ensure_floating_move_drag_guard_timer(main_window, dock).start(
+        _FLOATING_MOVE_DRAG_GUARD_RETRY_MS
+    )
+
+
+def _on_floating_move_drag_guard_timer(main_window, dock: QDockWidget) -> None:
+    """移動ドラッグ固定の解除タイミングを監視する。"""
+    if dock is None:
+        return
+    if not bool(getattr(dock, "_floating_move_drag_active", False)):
+        return
+    if not dock.isFloating() or not dock.isVisible():
+        _clear_floating_move_drag_state(main_window, dock, reason="hidden_or_not_floating")
+        return
+    if _is_left_mouse_dragging():
+        _ensure_floating_move_drag_guard_timer(main_window, dock).start(
+            _FLOATING_MOVE_DRAG_GUARD_RETRY_MS
+        )
+        return
+    _clear_floating_move_drag_state(main_window, dock, reason="mouse_release")
+
+
+def _enforce_move_drag_reference_size(dock: QDockWidget, *, near_edge: bool) -> None:
+    """移動ドラッグ中に誤って変化したサイズを参照サイズへ戻す。"""
+    if bool(near_edge):
+        return
+    ref = getattr(dock, "_floating_move_drag_size", None)
+    if not isinstance(ref, QSize) or ref.width() <= 0 or ref.height() <= 0:
+        return
+    cur = dock.size()
+    if cur == ref:
+        return
+    try:
+        dock.resize(int(ref.width()), int(ref.height()))
+    except Exception:
+        return
+
+
+def _start_resize_drag_for_floating_dock(main_window, dock: QDockWidget) -> None:
+    """フローティングドックのリサイズドラッグ開始状態を記録する。"""
+    dock._floating_resize_drag_active = True
+    _stop_floating_move_drag_size_guard(main_window, dock, reason="resize_drag_start")
+    _debug_log_floating_dock_event(
+        main_window,
+        dock,
+        "floating_resize_drag_start",
+    )
+
+
+def _recent_resize_event_exists(dock: QDockWidget, now_ts: float, *, window_sec: float) -> bool:
+    """直近 window_sec 秒以内に resize イベントが記録されているか返す。"""
+    last_resize_ts = float(getattr(dock, "_floating_last_resize_event_ts", 0.0) or 0.0)
+    return (float(now_ts) - last_resize_ts) <= float(window_sec)
+
+
+def _update_floating_move_drag_state(
+    main_window,
+    dock: QDockWidget,
+    *,
+    from_move: bool,
+    left_dragging: bool,
+    screen_fix_pending: bool,
+) -> None:
+    """ドラッグ種別(移動/リサイズ)に応じて固定ガード状態を更新する。"""
+    if dock is None or not dock.isFloating() or not dock.isVisible():
+        _clear_floating_move_drag_state(main_window, dock, reason="hidden_or_not_floating")
+        return
+    if not left_dragging:
+        dock._floating_last_resize_event_ts = 0.0
+        _clear_floating_move_drag_state(main_window, dock, reason="mouse_release")
+        return
+
+    now = float(time.monotonic())
+    near_edge = _is_cursor_near_floating_frame_edge(dock)
+    resize_active = bool(getattr(dock, "_floating_resize_drag_active", False))
+    move_guard_active = bool(getattr(dock, "_floating_move_drag_active", False))
+
+    if not bool(from_move):
+        dock._floating_last_resize_event_ts = now
+        if move_guard_active:
+            _enforce_move_drag_reference_size(dock, near_edge=bool(near_edge))
+        # エッジ外で発生した Resize は mixed-DPI 跨ぎ由来の揺れとして扱い、
+        # 移動ドラッグを維持する。
+        if not near_edge and not resize_active:
+            return
+        if not resize_active:
+            _start_resize_drag_for_floating_dock(main_window, dock)
+        return
+
+    # 一度リサイズに入ったドラッグは、ボタンを離すまで移動扱いへ戻さない。
+    if resize_active:
+        return
+    # 直近で Resize が来ている間は、移動ガードへ切り替えない。
+    if _recent_resize_event_exists(dock, now, window_sec=0.28):
+        return
+    _start_floating_move_drag_size_guard(main_window, dock)
+
+
+def _ensure_floating_size_remember_timer(main_window, dock: QDockWidget):
+    """サイズ記録の遅延実行タイマーを取得する。"""
+    timer = getattr(dock, "_floating_size_remember_timer", None)
+    if timer is None:
+        timer = QTimer(dock)
+        timer.setSingleShot(True)
+        timer.timeout.connect(
+            lambda mw=main_window, d=dock: _on_floating_size_remember_timer(mw, d)
+        )
+        dock._floating_size_remember_timer = timer
+    return timer
+
+
+def _schedule_floating_dock_size_remember(
+    main_window,
+    dock: QDockWidget,
+    *,
+    reason: str,
+) -> None:
+    """フローティングドックのサイズ記録を安定後に予約する。"""
+    if dock is None or not dock.isFloating() or not dock.isVisible():
+        return
+    _ensure_floating_size_remember_timer(main_window, dock).start(_FLOATING_SIZE_REMEMBER_RETRY_MS)
+    _debug_log_floating_dock_event(
+        main_window,
+        dock,
+        "schedule_floating_size_remember",
+        throttle_sec=_FLOATING_DEBUG_EVENT_THROTTLE_SEC,
+        reason=str(reason),
+        retry_ms=int(_FLOATING_SIZE_REMEMBER_RETRY_MS),
+    )
+
+
+def _on_floating_size_remember_timer(main_window, dock: QDockWidget) -> None:
+    """ドラッグ/補正が落ち着いたタイミングでサイズ記録を確定する。"""
+    if dock is None:
+        return
+    if not dock.isFloating() or not dock.isVisible():
+        return
+    if _is_left_mouse_dragging() or bool(getattr(dock, "_floating_screen_fix_pending", False)):
+        _debug_log_floating_dock_event(
+            main_window,
+            dock,
+            "floating_size_remember_timer_retry",
+            throttle_sec=_FLOATING_DEBUG_EVENT_THROTTLE_SEC,
+        )
+        _ensure_floating_size_remember_timer(main_window, dock).start(
+            _FLOATING_SIZE_REMEMBER_RETRY_MS
+        )
+        return
+    if bool(getattr(dock, "_floating_size_restore_lock", False)):
+        _ensure_floating_size_remember_timer(main_window, dock).start(
+            _FLOATING_SIZE_REMEMBER_RETRY_MS
+        )
+        return
+    if bool(getattr(dock, "_floating_move_drag_active", False)):
+        _ensure_floating_size_remember_timer(main_window, dock).start(
+            _FLOATING_SIZE_REMEMBER_RETRY_MS
+        )
+        return
+    _remember_floating_dock_size(main_window, dock, force=True)
+
+
+def _ensure_floating_screen_fix_timer(main_window, dock: QDockWidget):
+    """screenChanged 補正の遅延実行タイマーを取得する。"""
+    timer = getattr(dock, "_floating_screen_fix_timer", None)
+    if timer is None:
+        timer = QTimer(dock)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda mw=main_window, d=dock: _on_floating_screen_fix_timer(mw, d))
+        dock._floating_screen_fix_timer = timer
+    return timer
+
+
+def _on_floating_screen_fix_timer(main_window, dock: QDockWidget) -> None:
+    """ドラッグ終了待ち後に画面跨ぎ補正を適用する。"""
+    if dock is None:
+        return
+    if not dock.isFloating() or not dock.isVisible():
+        dock._floating_screen_fix_pending = False
+        return
+    if _is_left_mouse_dragging():
+        _debug_log_floating_dock_event(
+            main_window,
+            dock,
+            "screen_fix_timer_retry_dragging",
+            throttle_sec=_FLOATING_DEBUG_EVENT_THROTTLE_SEC,
+        )
+        _ensure_floating_screen_fix_timer(main_window, dock).start(_FLOATING_SCREEN_FIX_RETRY_MS)
+        return
+    _debug_log_floating_dock_event(
+        main_window,
+        dock,
+        "screen_fix_timer_apply",
+        throttle_sec=_FLOATING_DEBUG_EVENT_THROTTLE_SEC,
+    )
+    _restore_floating_dock_size_on_screen_change(main_window, dock, clear_pending=True)
 
 
 def _schedule_floating_dock_screen_fix(main_window, dock: QDockWidget) -> None:
     """フローティングドック画面移動補正を次イベントループで予約する。"""
     if dock is None or not dock.isFloating():
         return
-    if bool(getattr(dock, "_floating_screen_fix_pending", False)):
+    pending = bool(getattr(dock, "_floating_screen_fix_pending", False))
+    left_dragging = _is_left_mouse_dragging()
+    timer = _ensure_floating_screen_fix_timer(main_window, dock)
+
+    if pending:
+        if left_dragging:
+            if not timer.isActive():
+                timer.start(_FLOATING_SCREEN_FIX_RETRY_MS)
+            _debug_log_floating_dock_event(
+                main_window,
+                dock,
+                "schedule_screen_fix_skip_pending_dragging",
+                throttle_sec=_FLOATING_DEBUG_EVENT_THROTTLE_SEC,
+            )
+            return
         _debug_log_floating_dock_event(
             main_window,
             dock,
-            "schedule_screen_fix_skip_pending",
+            "schedule_screen_fix_flush_pending",
             throttle_sec=_FLOATING_DEBUG_EVENT_THROTTLE_SEC,
         )
+        _restore_floating_dock_size_on_screen_change(main_window, dock, clear_pending=True)
         return
-    dock._floating_suspend_size_remember = True
+
     dock._floating_screen_fix_pending = True
+    if left_dragging:
+        timer.start(_FLOATING_SCREEN_FIX_RETRY_MS)
+        _debug_log_floating_dock_event(
+            main_window,
+            dock,
+            "schedule_screen_fix_deferred_dragging",
+            retry_ms=int(_FLOATING_SCREEN_FIX_RETRY_MS),
+        )
+        return
     _debug_log_floating_dock_event(
         main_window,
         dock,
-        "schedule_screen_fix",
+        "schedule_screen_fix_now",
     )
+    if timer.isActive():
+        timer.stop()
     QTimer.singleShot(
-        0,
-        lambda mw=main_window, d=dock: _restore_floating_dock_size_on_screen_change(mw, d),
+        0, lambda mw=main_window, d=dock: _restore_floating_dock_size_on_screen_change(mw, d)
     )
 
 
@@ -315,6 +664,27 @@ def _ensure_floating_dock_screen_tracking(main_window, dock: QDockWidget) -> Non
             d,
             "screen_changed",
         )
+        left_dragging = _is_left_mouse_dragging()
+        move_drag_active = bool(getattr(d, "_floating_move_drag_active", False))
+        resize_drag_active = bool(getattr(d, "_floating_resize_drag_active", False))
+        if resize_drag_active:
+            # リサイズ中は screenChanged 補正を入れない(カーソルずれ/巨大化防止)。
+            _debug_log_floating_dock_event(
+                mw,
+                d,
+                "screen_changed_skip_resize_drag",
+                throttle_sec=_FLOATING_DEBUG_EVENT_THROTTLE_SEC,
+            )
+            return
+        if not left_dragging and not move_drag_active:
+            # レイアウト適用/表示復帰などの非ドラッグ遷移では位置補正を行わない。
+            _debug_log_floating_dock_event(
+                mw,
+                d,
+                "screen_changed_skip_non_drag",
+                throttle_sec=_FLOATING_DEBUG_EVENT_THROTTLE_SEC,
+            )
+            return
         _schedule_floating_dock_screen_fix(mw, d)
 
     try:
@@ -437,6 +807,7 @@ def on_dock_top_level_changed(main_window, dock: QDockWidget, floating: bool):
     """ドックのフローティング切替時に関連状態を更新する。"""
     # フローティング切替時に制約を同期する。
     if not floating:
+        _clear_floating_runtime_state(main_window, dock, reason="dock_to_main")
         clear_force_dock_drop_active(main_window)
     update_floating_dock_dockability(main_window, dock)
     _sync_dock_options_by_floating_state(main_window)
@@ -444,7 +815,7 @@ def on_dock_top_level_changed(main_window, dock: QDockWidget, floating: bool):
     sync_dock_on_top(main_window, dock)
     if floating:
         _ensure_floating_dock_screen_tracking(main_window, dock)
-        fit_top_level_widget_to_desktop(main_window, dock)
+        fit_top_level_widget_to_desktop(main_window, dock, allow_resize=False)
         _remember_floating_dock_size(main_window, dock)
         schedule_dock_on_top_refresh(main_window, dock, delay_ms=0)
         schedule_dock_on_top_refresh(main_window, dock, delay_ms=140)
@@ -462,41 +833,51 @@ def track_floating_dock_size(
 ) -> None:
     """フローティングドックのサイズ追跡を更新する。"""
     if dock is None or not dock.isFloating():
+        _clear_floating_runtime_state(main_window, dock, reason="track_not_floating")
         return
     if not dock.isVisible():
+        _clear_floating_runtime_state(main_window, dock, reason="track_hidden")
         return
     _ensure_floating_dock_screen_tracking(main_window, dock)
-    _remember_floating_dock_size(main_window, dock)
+    left_dragging = _is_left_mouse_dragging()
+    screen_fix_pending = bool(getattr(dock, "_floating_screen_fix_pending", False))
+    _update_floating_move_drag_state(
+        main_window,
+        dock,
+        from_move=bool(from_move),
+        left_dragging=bool(left_dragging),
+        screen_fix_pending=bool(screen_fix_pending),
+    )
+    move_drag_active = bool(getattr(dock, "_floating_move_drag_active", False))
+    resize_drag_active = bool(getattr(dock, "_floating_resize_drag_active", False))
+    suppress_remember = bool(left_dragging and move_drag_active and not resize_drag_active)
+    remember_scheduled = False
+    if (not bool(from_move)) and bool(resize_drag_active) and (not suppress_remember):
+        reason = "resize_pending_fix" if screen_fix_pending else "resize"
+        _schedule_floating_dock_size_remember(main_window, dock, reason=reason)
+        remember_scheduled = True
     _debug_log_floating_dock_event(
         main_window,
         dock,
         "track_floating_size_simple",
         throttle_sec=_FLOATING_DEBUG_EVENT_THROTTLE_SEC,
         from_move=bool(from_move),
+        move_drag_active=bool(move_drag_active),
+        resize_drag_active=bool(resize_drag_active),
+        suppress_remember=bool(suppress_remember),
+        remember_scheduled=bool(remember_scheduled),
+        left_dragging=bool(left_dragging),
+        pending_screen_fix=bool(screen_fix_pending),
     )
 
 
 def desktop_available_geometry(main_window) -> QRect:
     """メインウィンドウ基準の利用可能デスクトップ領域を返す。"""
-    # 基本は現在スクリーンを優先し、取得不可時のみ全画面統合へフォールバックする。
-    try:
-        center_screen = QGuiApplication.screenAt(main_window.frameGeometry().center())
-    except Exception:
-        center_screen = None
-    if center_screen is not None:
-        rect = center_screen.availableGeometry()
-        if rect.isValid() and rect.width() > 0 and rect.height() > 0:
-            return rect
-    screen = None
-    try:
-        screen = main_window.screen()
-    except Exception:
-        screen = None
-    if screen is not None:
-        rect = screen.availableGeometry()
-        if rect.isValid() and rect.width() > 0 and rect.height() > 0:
-            return rect
-    return screen_union_geometry(available=True)
+    # 複数画面をまたぐ配置を不意に片側へ寄せないため、全画面Unionを使う。
+    rect = screen_union_geometry(available=True)
+    if rect.isValid() and rect.width() > 0 and rect.height() > 0:
+        return rect
+    return rect
 
 
 def _available_geometry_for_widget(main_window, widget: QWidget | None = None) -> QRect:
@@ -554,9 +935,8 @@ def _apply_main_window_minimum(main_window, has_visible_dock: bool) -> None:
         target_w, target_h = _MAIN_WINDOW_MIN_W, _MAIN_WINDOW_MIN_H
     else:
         target_w, target_h = _compact_main_window_min_size(main_window)
-    if (
-        int(main_window.minimumWidth()) == int(target_w)
-        and int(main_window.minimumHeight()) == int(target_h)
+    if int(main_window.minimumWidth()) == int(target_w) and int(main_window.minimumHeight()) == int(
+        target_h
     ):
         return
     main_window.setMinimumSize(int(target_w), int(target_h))
@@ -625,9 +1005,8 @@ def _capture_dock_geometry_snapshot(main_window) -> dict[str, QRect]:
     return snapshot
 
 
-def _vertical_dock_chains(main_window, snapshot: dict[str, QRect]):
-    """縦連結しているドック群をチェーン単位で抽出する。"""
-    # X座標・幅が近いドックを同じ縦チェーンとして扱う。
+def _dock_entries_from_snapshot(main_window, snapshot: dict[str, QRect]):
+    """再配分計算用に (name, dock, geometry) エントリを抽出する。"""
     entries = []
     for name, geom in snapshot.items():
         dock = getattr(main_window, "_dock_map", {}).get(name)
@@ -635,7 +1014,11 @@ def _vertical_dock_chains(main_window, snapshot: dict[str, QRect]):
             continue
         entries.append((name, dock, geom))
     entries.sort(key=lambda item: (item[2].x(), item[2].y()))
+    return entries
 
+
+def _group_entries_into_columns(entries):
+    """X座標/幅が近いエントリを同一列としてグルーピングする。"""
     columns: list[dict] = []
     for entry in entries:
         geom = entry[2]
@@ -653,25 +1036,36 @@ def _vertical_dock_chains(main_window, snapshot: dict[str, QRect]):
                 break
         if not attached:
             columns.append({"x": geom.x(), "w": geom.width(), "items": [entry]})
+    return columns
 
+
+def _build_vertical_chain(items):
+    """列内アイテムから上下連結チェーンを抽出する。"""
+    sorted_items = sorted(items, key=lambda item: item[2].y())
+    chain = []
+    last_bottom = None
+    for item in sorted_items:
+        geom = item[2]
+        if last_bottom is None or geom.y() >= (last_bottom - _REBALANCE_CHAIN_TOUCH_TOLERANCE_PX):
+            chain.append(item)
+            last_bottom = geom.bottom()
+            continue
+        # 重なっている（タブ等）場合は高さが大きい側を採用する。
+        prev = chain[-1]
+        if geom.height() > prev[2].height():
+            chain[-1] = item
+            last_bottom = geom.bottom()
+    return chain
+
+
+def _vertical_dock_chains(main_window, snapshot: dict[str, QRect]):
+    """縦連結しているドック群をチェーン単位で抽出する。"""
+    # X座標・幅が近いドックを同じ縦チェーンとして扱う。
+    entries = _dock_entries_from_snapshot(main_window, snapshot)
+    columns = _group_entries_into_columns(entries)
     chains = []
     for col in columns:
-        sorted_items = sorted(col["items"], key=lambda item: item[2].y())
-        chain = []
-        last_bottom = None
-        for item in sorted_items:
-            geom = item[2]
-            if last_bottom is None or geom.y() >= (
-                last_bottom - _REBALANCE_CHAIN_TOUCH_TOLERANCE_PX
-            ):
-                chain.append(item)
-                last_bottom = geom.bottom()
-                continue
-            # 重なっている（タブ等）場合は高さが大きい側を採用する。
-            prev = chain[-1]
-            if geom.height() > prev[2].height():
-                chain[-1] = item
-                last_bottom = geom.bottom()
+        chain = _build_vertical_chain(col["items"])
         if len(chain) >= 3:
             chains.append(chain)
     return chains
@@ -686,6 +1080,101 @@ def schedule_dock_rebalance(main_window) -> None:
     main_window._dock_rebalance_timer.start()
 
 
+def _update_rebalance_baseline(main_window, snapshot: dict[str, QRect], main_size: QSize) -> None:
+    """次回比較用の再配分基準スナップショットを更新する。"""
+    main_window._dock_geometry_snapshot = snapshot
+    main_window._dock_rebalance_last_main_size = main_size
+
+
+def _rebalance_pivot_info(changed: list[bool]) -> tuple[int, list[int]] | None:
+    """変更フラグ列から再配分対象ペアと非隣接インデックスを求める。"""
+    pivot = next((idx for idx in range(len(changed) - 1) if changed[idx]), None)
+    if pivot is None:
+        return None
+    non_adjacent = [idx for idx in range(len(changed)) if idx not in (pivot, pivot + 1)]
+    if not any(changed[idx] for idx in non_adjacent):
+        return None
+    return pivot, non_adjacent
+
+
+def _rebalance_remaining_height(
+    *,
+    mins: list[int],
+    targets: list[int],
+    non_adjacent: list[int],
+    total_height: int,
+    pair_min: int,
+) -> int | None:
+    """非隣接分を固定した後、ペアへ割り当て可能な残り高さを返す。"""
+    fixed_height = int(sum(targets[idx] for idx in non_adjacent))
+    remain = int(total_height) - fixed_height
+    if remain >= pair_min:
+        return remain
+    shortage = pair_min - remain
+    for idx in reversed(non_adjacent):
+        reducible = max(0, targets[idx] - mins[idx])
+        take = min(reducible, shortage)
+        targets[idx] -= take
+        shortage -= take
+        if shortage <= 0:
+            break
+    fixed_height = int(sum(targets[idx] for idx in non_adjacent))
+    remain = int(total_height) - fixed_height
+    if remain < pair_min:
+        return None
+    return remain
+
+
+def _calculate_rebalance_targets_for_chain(chain, previous_snapshot: dict[str, QRect]):
+    """1チェーン分の再配分先高さを計算し、必要時のみ返す。"""
+    names = [item[0] for item in chain]
+    docks = [item[1] for item in chain]
+    if any(name not in previous_snapshot for name in names):
+        return None
+
+    cur_heights = [int(item[2].height()) for item in chain]
+    prev_heights = [int(previous_snapshot[name].height()) for name in names]
+    changed = [
+        abs(c - p) >= _REBALANCE_HEIGHT_CHANGE_THRESHOLD_PX
+        for c, p in zip(cur_heights, prev_heights)
+    ]
+    if sum(changed) < 3:
+        return None
+
+    pivot_info = _rebalance_pivot_info(changed)
+    if pivot_info is None:
+        return None
+    pivot, non_adjacent = pivot_info
+
+    mins = [max(1, int(dock.minimumHeight())) for dock in docks]
+    targets = list(cur_heights)
+    for idx in non_adjacent:
+        targets[idx] = max(mins[idx], int(prev_heights[idx]))
+
+    total_height = int(sum(cur_heights))
+    pair_min = mins[pivot] + mins[pivot + 1]
+    remain = _rebalance_remaining_height(
+        mins=mins,
+        targets=targets,
+        non_adjacent=non_adjacent,
+        total_height=total_height,
+        pair_min=pair_min,
+    )
+    if remain is None:
+        return None
+
+    w0 = max(1, cur_heights[pivot])
+    w1 = max(1, cur_heights[pivot + 1])
+    pair0 = int(round(remain * (w0 / float(w0 + w1))))
+    pair0 = max(mins[pivot], min(pair0, remain - mins[pivot + 1]))
+    pair1 = remain - pair0
+    targets[pivot] = pair0
+    targets[pivot + 1] = pair1
+    if targets == cur_heights:
+        return None
+    return docks, targets
+
+
 def rebalance_dock_layout(main_window) -> None:
     """縦積みドックの高さ連動を抑えるための再配分を行う。"""
     # 3段以上の縦積みで、上側ハンドル操作時に下段まで連動する現象を抑える。
@@ -695,8 +1184,7 @@ def rebalance_dock_layout(main_window) -> None:
     current_snapshot = _capture_dock_geometry_snapshot(main_window)
     previous_snapshot = getattr(main_window, "_dock_geometry_snapshot", {})
     if len(current_snapshot) < 3:
-        main_window._dock_geometry_snapshot = current_snapshot
-        main_window._dock_rebalance_last_main_size = main_window.size()
+        _update_rebalance_baseline(main_window, current_snapshot, main_window.size())
         return
     main_size = main_window.size()
     last_main_size = getattr(main_window, "_dock_rebalance_last_main_size", None)
@@ -707,65 +1195,15 @@ def rebalance_dock_layout(main_window) -> None:
         or not current_snapshot
         or (last_main_size is not None and main_size != last_main_size)
     ):
-        main_window._dock_geometry_snapshot = current_snapshot
-        main_window._dock_rebalance_last_main_size = main_size
+        _update_rebalance_baseline(main_window, current_snapshot, main_size)
         return
 
     adjusted = False
     for chain in _vertical_dock_chains(main_window, current_snapshot):
-        names = [item[0] for item in chain]
-        docks = [item[1] for item in chain]
-        if any(name not in previous_snapshot for name in names):
+        target = _calculate_rebalance_targets_for_chain(chain, previous_snapshot)
+        if target is None:
             continue
-
-        cur_heights = [int(item[2].height()) for item in chain]
-        prev_heights = [int(previous_snapshot[name].height()) for name in names]
-        changed = [
-            abs(c - p) >= _REBALANCE_HEIGHT_CHANGE_THRESHOLD_PX
-            for c, p in zip(cur_heights, prev_heights)
-        ]
-        if sum(changed) < 3:
-            continue
-
-        pivot = next((idx for idx in range(len(changed) - 1) if changed[idx]), None)
-        if pivot is None:
-            continue
-        non_adjacent = [idx for idx in range(len(changed)) if idx not in (pivot, pivot + 1)]
-        if not any(changed[idx] for idx in non_adjacent):
-            continue
-
-        mins = [max(1, int(dock.minimumHeight())) for dock in docks]
-        targets = list(cur_heights)
-        for idx in non_adjacent:
-            targets[idx] = max(mins[idx], int(prev_heights[idx]))
-
-        total_height = int(sum(cur_heights))
-        fixed_height = int(sum(targets[idx] for idx in non_adjacent))
-        remain = total_height - fixed_height
-        pair_min = mins[pivot] + mins[pivot + 1]
-        if remain < pair_min:
-            shortage = pair_min - remain
-            for idx in reversed(non_adjacent):
-                reducible = max(0, targets[idx] - mins[idx])
-                take = min(reducible, shortage)
-                targets[idx] -= take
-                shortage -= take
-                if shortage <= 0:
-                    break
-            fixed_height = int(sum(targets[idx] for idx in non_adjacent))
-            remain = total_height - fixed_height
-            if remain < pair_min:
-                continue
-
-        w0 = max(1, cur_heights[pivot])
-        w1 = max(1, cur_heights[pivot + 1])
-        pair0 = int(round(remain * (w0 / float(w0 + w1))))
-        pair0 = max(mins[pivot], min(pair0, remain - mins[pivot + 1]))
-        pair1 = remain - pair0
-        targets[pivot] = pair0
-        targets[pivot + 1] = pair1
-        if targets == cur_heights:
-            continue
+        docks, targets = target
 
         main_window._dock_rebalance_running = True
         try:
@@ -777,8 +1215,7 @@ def rebalance_dock_layout(main_window) -> None:
 
     if adjusted:
         current_snapshot = _capture_dock_geometry_snapshot(main_window)
-    main_window._dock_geometry_snapshot = current_snapshot
-    main_window._dock_rebalance_last_main_size = main_size
+    _update_rebalance_baseline(main_window, current_snapshot, main_size)
 
 
 def fit_dialog_to_desktop(main_window, dialog: QDialog, center_on_parent: bool = False):
@@ -1008,7 +1445,9 @@ def _resolve_dock_attach_target(main_window, dock: QDockWidget, default_area):
     if preferred_anchor is not None:
         return preferred_anchor, main_window.dockWidgetArea(preferred_anchor), "preferred_anchor"
 
-    same_area_anchors = [d for d in _visible_docks_in_area(main_window, default_area) if d is not dock]
+    same_area_anchors = [
+        d for d in _visible_docks_in_area(main_window, default_area) if d is not dock
+    ]
     if same_area_anchors:
         return same_area_anchors[0], default_area, "same_area_anchor"
 
@@ -1046,7 +1485,7 @@ def toggle_dock(main_window, dock: QDockWidget, visible: bool):
         if dock.isFloating():
             dock.setVisible(True)
             sync_dock_on_top(main_window, dock)
-            fit_top_level_widget_to_desktop(main_window, dock)
+            fit_top_level_widget_to_desktop(main_window, dock, allow_resize=False)
             schedule_dock_on_top_refresh(main_window, dock, delay_ms=0)
             schedule_dock_on_top_refresh(main_window, dock, delay_ms=140)
             dock.raise_()
@@ -1055,8 +1494,7 @@ def toggle_dock(main_window, dock: QDockWidget, visible: bool):
             area = _default_area_for_dock(main_window, dock)
             attach_on_next_show = bool(getattr(dock, "_attach_on_next_show", False))
             needs_attach = bool(
-                attach_on_next_show
-                or main_window.dockWidgetArea(dock) == Qt.NoDockWidgetArea
+                attach_on_next_show or main_window.dockWidgetArea(dock) == Qt.NoDockWidgetArea
             )
             if needs_attach:
                 _attach_dock_to_area_group(main_window, dock, area)

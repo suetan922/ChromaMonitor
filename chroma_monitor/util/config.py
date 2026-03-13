@@ -1,3 +1,4 @@
+import copy
 import json
 import os
 import sys
@@ -45,6 +46,12 @@ DEFAULT_CONFIG = {
 }
 #: 設定ファイルパスの探索結果キャッシュ。
 _CONFIG_PATH_CACHE: Path | None = None
+
+
+def _fresh_default_config() -> Dict[str, Any]:
+    """DEFAULT_CONFIG から独立した新規設定辞書を作る。"""
+    # layout_current/layout_presets などの可変値参照を共有しない。
+    return copy.deepcopy(DEFAULT_CONFIG)
 
 
 def _legacy_user_config_dir() -> Path:
@@ -127,24 +134,36 @@ def config_path() -> Path:
 def load_config() -> Dict[str, Any]:
     """設定ファイルを読み込み、既定値を補完して返す。"""
     path = config_path()
+    defaults = _fresh_default_config()
     if not path.exists():
-        return DEFAULT_CONFIG.copy()
+        return defaults
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(data, dict):
-            return DEFAULT_CONFIG.copy()
-        cfg = data.copy()
-        for k, v in DEFAULT_CONFIG.items():
-            cfg.setdefault(k, v)
+            return defaults
+        cfg = defaults
+        cfg.update(data)
+        if not isinstance(cfg.get(C.CFG_LAYOUT_CURRENT), dict):
+            cfg[C.CFG_LAYOUT_CURRENT] = {}
+        if not isinstance(cfg.get(C.CFG_LAYOUT_PRESETS), dict):
+            cfg[C.CFG_LAYOUT_PRESETS] = {}
         return cfg
     except Exception:
-        return DEFAULT_CONFIG.copy()
+        return defaults
 
 
 def save_config(cfg: Dict[str, Any]) -> None:
     """設定辞書をJSONとして保存する。"""
     path = config_path()
+    temp_path = path.with_name(f"{path.name}.tmp")
     try:
-        path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps(cfg, ensure_ascii=False, indent=2)
+        temp_path.write_text(payload, encoding="utf-8")
+        temp_path.replace(path)
     except Exception:
-        pass
+        try:
+            if temp_path.exists():
+                temp_path.unlink()
+        except Exception:
+            pass

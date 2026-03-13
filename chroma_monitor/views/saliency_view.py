@@ -12,25 +12,10 @@ from .base_image_view import BaseImageLabelView
 from .image_math import normalize_map
 
 
-def _apply_composition_guides(bgr: np.ndarray, guide: str) -> np.ndarray:
-    """指定ガイド線を重ねた表示用画像を返す。"""
-    # ガイドは表示用オーバーレイなので、入力画像自体は破壊しない。
-    if bgr is None or bgr.size == 0:
-        return bgr
-    if guide not in C.COMPOSITION_GUIDES[1:]:
-        return bgr
-
-    out = bgr.copy()
-    h, w = out.shape[:2]
-    if h < 2 or w < 2:
-        return out
-
-    # 線幅を細めにして、サリエンシー本体の視認性を優先する。
-    base_thick = max(1, int(round(min(w, h) / 520.0)))
-
+def _composition_guide_primitives(guide: str, w: int, h: int):
+    """ガイド種別に応じた線分と補助点を返す。"""
     lines = []
     points = []
-
     if guide == C.COMPOSITION_GUIDE_THIRDS:
         x1, x2 = w // 3, (w * 2) // 3
         y1, y2 = h // 3, (h * 2) // 3
@@ -60,22 +45,32 @@ def _apply_composition_guides(bgr: np.ndarray, guide: str) -> np.ndarray:
                 ((0, h - 1), (w - 1, 0)),
             ]
         )
+    return lines, points
 
-    if not lines:
-        return out
 
-    # 先に細い主線マスクを作り、その外周だけを一括で縁取りする。
-    # 交点で縁取り同士が重なって四角く見える問題を避けるため。
+def _draw_composition_core_mask(
+    *,
+    h: int,
+    w: int,
+    lines: list[tuple[tuple[int, int], tuple[int, int]]],
+    points: list[tuple[int, int]],
+    base_thick: int,
+) -> np.ndarray:
+    """ガイド主線と補助点のマスクを生成する。"""
     core = np.zeros((h, w), dtype=np.uint8)
     for p1, p2 in lines:
-        cv2.line(core, p1, p2, 255, base_thick, cv2.LINE_AA)
+        cv2.line(core, p1, p2, 255, int(base_thick), cv2.LINE_AA)
 
     if points:
-        pr = max(1, base_thick - 1)
+        pr = max(1, int(base_thick) - 1)
         for p in points:
             cv2.circle(core, p, pr, 255, -1, cv2.LINE_AA)
+    return core
 
-    ring = max(1, base_thick)
+
+def _blend_composition_guide(out: np.ndarray, core: np.ndarray, base_thick: int) -> np.ndarray:
+    """主線マスクから縁取りを作り、表示画像へブレンドする。"""
+    ring = max(1, int(base_thick))
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (ring * 2 + 1, ring * 2 + 1))
     outline = cv2.subtract(cv2.dilate(core, kernel), core)
 
@@ -85,9 +80,39 @@ def _apply_composition_guides(bgr: np.ndarray, guide: str) -> np.ndarray:
     out_f = out_f * (1.0 - outline_a)  # 黒い外縁
     white = np.array([245.0, 245.0, 245.0], dtype=np.float32).reshape(1, 1, 3)
     out_f = out_f * (1.0 - core_a) + white * core_a
-    out = np.clip(out_f, 0, 255).astype(np.uint8)
+    return np.clip(out_f, 0, 255).astype(np.uint8)
 
-    return out
+
+def _apply_composition_guides(bgr: np.ndarray, guide: str) -> np.ndarray:
+    """指定ガイド線を重ねた表示用画像を返す。"""
+    # ガイドは表示用オーバーレイなので、入力画像自体は破壊しない。
+    if bgr is None or bgr.size == 0:
+        return bgr
+    if guide not in C.COMPOSITION_GUIDES[1:]:
+        return bgr
+
+    out = bgr.copy()
+    h, w = out.shape[:2]
+    if h < 2 or w < 2:
+        return out
+
+    # 線幅を細めにして、サリエンシー本体の視認性を優先する。
+    base_thick = max(1, int(round(min(w, h) / 520.0)))
+    lines, points = _composition_guide_primitives(guide, w, h)
+
+    if not lines:
+        return out
+
+    # 先に細い主線マスクを作り、その外周だけを一括で縁取りする。
+    # 交点で縁取り同士が重なって四角く見える問題を避けるため。
+    core = _draw_composition_core_mask(
+        h=h,
+        w=w,
+        lines=lines,
+        points=points,
+        base_thick=int(base_thick),
+    )
+    return _blend_composition_guide(out, core, int(base_thick))
 
 
 class SaliencyView(BaseImageLabelView):

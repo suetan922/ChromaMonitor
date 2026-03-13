@@ -27,6 +27,20 @@ _SNAPSHOT_DOCK_COLOR = "dock_color"
 _SNAPSHOT_DOCK_COLOR_BAND = "dock_color_band"
 _SNAPSHOT_DOCK_SCATTER = "dock_scatter"
 _SNAPSHOT_DOCK_HIST = "dock_hist"
+_GRAPH_COLOR_DOCKS = (_SNAPSHOT_DOCK_COLOR, _SNAPSHOT_DOCK_COLOR_BAND)
+_GRAPH_DOCK_ORDER = (
+    _SNAPSHOT_DOCK_COLOR,
+    _SNAPSHOT_DOCK_COLOR_BAND,
+    _SNAPSHOT_DOCK_SCATTER,
+    _SNAPSHOT_DOCK_HIST,
+)
+_GRAPH_DOCK_REQUIREMENTS = {
+    _SNAPSHOT_DOCK_COLOR: (True, False, False, False),
+    _SNAPSHOT_DOCK_COLOR_BAND: (True, True, False, False),
+    _SNAPSHOT_DOCK_SCATTER: (False, False, True, False),
+    _SNAPSHOT_DOCK_HIST: (False, False, False, True),
+}
+
 
 def _new_empty_result_snapshot() -> dict:
     """解析結果スナップショットの初期値を返す。"""
@@ -76,6 +90,7 @@ def _store_result_snapshot(
     snap = dict(main_window._latest_result_snapshot)
 
     if update_bgr:
+        # 生画像は必要なときだけ更新する。
         bgr_preview = res.get("bgr_preview")
         if bgr_preview is not None:
             snap["bgr_preview"] = bgr_preview
@@ -85,6 +100,7 @@ def _store_result_snapshot(
         snap["dt_ms"] = float(res.get("dt_ms", 0.0))
 
     if bool(res.get("graph_update")):
+        # 再計算される派生値は毎回クリアする。
         snap["top_colors_full"] = None
         snap["top_colors_filtered"] = None
         snap["top_colors_key"] = None
@@ -147,8 +163,7 @@ def _render_scatter_dock_from_snapshot(main_window, snapshot: dict) -> bool:
 def _has_hsv_channel_data(snapshot: dict, channel: str) -> bool:
     """指定HSVチャネルの描画に必要なデータがあるか判定する。"""
     return (
-        snapshot.get(f"{channel}_hist") is not None
-        or snapshot.get(f"{channel}_plane") is not None
+        snapshot.get(f"{channel}_hist") is not None or snapshot.get(f"{channel}_plane") is not None
     )
 
 
@@ -301,7 +316,7 @@ def update_image_docks_from_frame(main_window, bgr_preview) -> set[str]:
 
 def _snapshot_has_graph_data_for_dock(snapshot: dict, dock_name: str) -> bool:
     """指定ドックに必要なグラフデータが snapshot 内に揃っているか判定する。"""
-    if dock_name in (_SNAPSHOT_DOCK_COLOR, _SNAPSHOT_DOCK_COLOR_BAND):
+    if dock_name in _GRAPH_COLOR_DOCKS:
         return snapshot.get("hist") is not None
     if dock_name == _SNAPSHOT_DOCK_SCATTER:
         return snapshot.get("sv") is not None and snapshot.get("rgb") is not None
@@ -312,11 +327,7 @@ def _snapshot_has_graph_data_for_dock(snapshot: dict, dock_name: str) -> bool:
 
 def _graph_requirements_for_dock(dock_name: str) -> tuple[bool, bool, bool, bool]:
     """ドック種別から必要なグラフ計算種別を返す。"""
-    need_color = dock_name in (_SNAPSHOT_DOCK_COLOR, _SNAPSHOT_DOCK_COLOR_BAND)
-    need_color_band = dock_name == _SNAPSHOT_DOCK_COLOR_BAND
-    need_scatter = dock_name == _SNAPSHOT_DOCK_SCATTER
-    need_hsv_hist = dock_name == _SNAPSHOT_DOCK_HIST
-    return need_color, need_color_band, need_scatter, need_hsv_hist
+    return _GRAPH_DOCK_REQUIREMENTS.get(dock_name, (False, False, False, False))
 
 
 def _compute_graph_subset_from_bgr(
@@ -385,13 +396,16 @@ def _ensure_snapshot_graph_data_for_dock(main_window, dock_name: str) -> bool:
     """停止中に不足したドック用グラフデータを都度補完する。"""
     _ensure_snapshot_state(main_window)
     snapshot = main_window._latest_result_snapshot
+    # 既に足りていれば再計算しない。
     if _snapshot_has_graph_data_for_dock(snapshot, dock_name):
         return True
+    # 稼働中はワーカーの更新を待つ。
     if _is_worker_running(main_window):
         return False
 
     bgr_preview = snapshot.get("bgr_preview")
     if bgr_preview is None:
+        # 停止中は1回だけ手動キャプチャする。
         bgr_preview, cap, err = main_window.worker.capture_once()
         if bgr_preview is None:
             if err:
@@ -410,6 +424,7 @@ def _ensure_snapshot_graph_data_for_dock(main_window, dock_name: str) -> bool:
     if not (need_color or need_color_band or need_scatter or need_hsv_hist):
         return True
     try:
+        # 必要な項目だけ部分再計算。
         graph_res = _compute_graph_subset_from_bgr(
             main_window,
             bgr_preview,
@@ -425,48 +440,80 @@ def _ensure_snapshot_graph_data_for_dock(main_window, dock_name: str) -> bool:
     return _snapshot_has_graph_data_for_dock(main_window._latest_result_snapshot, dock_name)
 
 
-def restore_dock_from_snapshot(main_window, dock) -> None:
-    """ドック表示時に必要な内容を最新スナップショットから復元する。"""
+def _resolve_restore_target_dock_name(main_window, dock) -> str | None:
+    """復元対象ドック名を検証し、復元不要なら None を返す。"""
     if dock is None or not dock.isVisible():
-        return
+        return None
     dock_name = _dock_name_from_object(main_window, dock)
     if dock_name is None:
-        return
+        return None
 
     _ensure_snapshot_state(main_window)
     snapshot_version = int(main_window._latest_result_version)
     if snapshot_version <= 0:
-        return
+        return None
     rendered_version = int(main_window._dock_rendered_version.get(dock_name, 0))
     if rendered_version == snapshot_version:
-        return
+        return None
+    return str(dock_name)
 
-    if dock_name in (
-        _SNAPSHOT_DOCK_COLOR,
-        _SNAPSHOT_DOCK_COLOR_BAND,
-        _SNAPSHOT_DOCK_SCATTER,
-        _SNAPSHOT_DOCK_HIST,
-    ):
-        if not _ensure_snapshot_graph_data_for_dock(main_window, dock_name):
-            return
 
-    snapshot = main_window._latest_result_snapshot
-    updated = False
+def _ensure_graph_snapshot_for_restore(main_window, dock_name: str) -> bool:
+    """グラフ系ドック復元に必要なスナップショット補完を行う。"""
+    if dock_name not in _GRAPH_DOCK_ORDER:
+        return True
+    return bool(_ensure_snapshot_graph_data_for_dock(main_window, dock_name))
+
+
+def _render_graph_dock_by_name(main_window, dock_name: str, snapshot: dict) -> bool | None:
+    """グラフ系ドック名なら描画し、非グラフ系なら None を返す。"""
     if dock_name == _SNAPSHOT_DOCK_COLOR:
-        updated = _render_color_dock_from_snapshot(main_window, snapshot)
-    elif dock_name == _SNAPSHOT_DOCK_COLOR_BAND:
-        updated = render_color_band_dock_from_snapshot(main_window, snapshot)
-    elif dock_name == _SNAPSHOT_DOCK_SCATTER:
-        updated = _render_scatter_dock_from_snapshot(main_window, snapshot)
-    elif dock_name == _SNAPSHOT_DOCK_HIST:
-        updated = _render_hist_dock_from_snapshot(main_window, snapshot)
-    else:
-        updated = _update_single_image_dock_from_frame(
+        return bool(_render_color_dock_from_snapshot(main_window, snapshot))
+    if dock_name == _SNAPSHOT_DOCK_COLOR_BAND:
+        return bool(render_color_band_dock_from_snapshot(main_window, snapshot))
+    if dock_name == _SNAPSHOT_DOCK_SCATTER:
+        return bool(_render_scatter_dock_from_snapshot(main_window, snapshot))
+    if dock_name == _SNAPSHOT_DOCK_HIST:
+        return bool(_render_hist_dock_from_snapshot(main_window, snapshot))
+    return None
+
+
+def _render_dock_from_snapshot_by_name(main_window, dock_name: str, dock, snapshot: dict) -> bool:
+    """ドック名に対応する復元描画を実行し、更新成否を返す。"""
+    graph_updated = _render_graph_dock_by_name(main_window, dock_name, snapshot)
+    if graph_updated is not None:
+        return bool(graph_updated)
+    return bool(
+        _update_single_image_dock_from_frame(
             main_window,
             dock,
             snapshot.get("bgr_preview"),
         )
+    )
 
+
+def _render_all_graph_docks(main_window, snapshot: dict) -> set[str]:
+    """グラフ系ドックを順番に描画し、更新済み名を返す。"""
+    rendered: set[str] = set()
+    # 依存関係が弱い順で描画する。
+    for dock_name in _GRAPH_DOCK_ORDER:
+        updated = _render_graph_dock_by_name(main_window, dock_name, snapshot)
+        if updated:
+            # 成功したドックだけ記録。
+            rendered.add(dock_name)
+    return rendered
+
+
+def restore_dock_from_snapshot(main_window, dock) -> None:
+    """ドック表示時に必要な内容を最新スナップショットから復元する。"""
+    dock_name = _resolve_restore_target_dock_name(main_window, dock)
+    if dock_name is None:
+        return
+    if not _ensure_graph_snapshot_for_restore(main_window, dock_name):
+        return
+
+    snapshot = main_window._latest_result_snapshot
+    updated = _render_dock_from_snapshot_by_name(main_window, dock_name, dock, snapshot)
     if updated:
         _mark_docks_rendered(main_window, int(main_window._latest_result_version), {dock_name})
 
@@ -481,17 +528,11 @@ def on_result(main_window, res: dict):
         if main_window.preview_window.isVisible() and bgr_preview is not None:
             main_window.preview_window.update_preview(bgr_preview)
 
-        # graph_update が False の場合は、グラフ系ビュー更新をスキップする。
+        # graph_update=False ならグラフ再描画は行わない。
         if res["graph_update"]:
-            if _render_color_dock_from_snapshot(main_window, snapshot):
-                rendered_docks.add(_SNAPSHOT_DOCK_COLOR)
-            if render_color_band_dock_from_snapshot(main_window, snapshot):
-                rendered_docks.add(_SNAPSHOT_DOCK_COLOR_BAND)
-            if _render_scatter_dock_from_snapshot(main_window, snapshot):
-                rendered_docks.add(_SNAPSHOT_DOCK_SCATTER)
-            if _render_hist_dock_from_snapshot(main_window, snapshot):
-                rendered_docks.add(_SNAPSHOT_DOCK_HIST)
+            rendered_docks.update(_render_all_graph_docks(main_window, snapshot))
 
+        # 画像系ドックは常に可視分だけ更新する。
         rendered_docks.update(update_image_docks_from_frame(main_window, bgr_preview))
         _mark_docks_rendered(main_window, snapshot_version, rendered_docks)
     finally:

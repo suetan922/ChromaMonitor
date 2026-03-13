@@ -194,6 +194,82 @@ def _event_pos(event):
     return None
 
 
+def _active_tab_index_for_press(bar: QTabBar, event) -> int:
+    """タブ押下イベントから対象タブインデックスを解決する。"""
+    pos = _event_pos(event)
+    idx = bar.tabAt(pos) if pos is not None else -1
+    if idx < 0:
+        idx = bar.currentIndex()
+    return int(idx)
+
+
+def _set_tab_drag_state(main_window, bar: QTabBar, idx: int, event) -> None:
+    """タブドラッグ状態を初期化して保存する。"""
+    main_window._dock_tab_drag_state = {
+        "bar": bar,
+        "index": int(idx),
+        "text": bar.tabText(int(idx)),
+        "start_global": _global_pos_from_event(event),
+        "triggered": False,
+    }
+
+
+def _handle_tab_drag_press(main_window, bar: QTabBar, event) -> bool:
+    """タブドラッグの開始状態を処理する。"""
+    if getattr(event, "button", lambda: None)() != Qt.LeftButton:
+        return False
+    idx = _active_tab_index_for_press(bar, event)
+    if idx < 0:
+        main_window._dock_tab_drag_state = None
+        return False
+    _set_tab_drag_state(main_window, bar, idx, event)
+    return False
+
+
+def _detach_dock_if_vertical_drag(main_window, bar: QTabBar, state: dict, event) -> bool:
+    """縦方向ドラッグ時のみタブをドックから切り離す。"""
+    current = _global_pos_from_event(event)
+    start = state.get("start_global")
+    if current is None or start is None:
+        return False
+    dx = int(current.x() - start.x())
+    dy = int(current.y() - start.y())
+    # 横方向ドラッグはタブ並べ替えへ任せ、縦方向に引いたときだけ切り離す。
+    if abs(dy) < _TAB_DETACH_VERTICAL_DRAG_PX or abs(dy) <= abs(dx):
+        return False
+    dock = _dock_for_tab_text(main_window, str(state.get("text", "")))
+    if dock is None:
+        return False
+    state["triggered"] = True
+    _set_force_dock_drop_active(main_window, True)
+    _float_dock_from_tab_drag(main_window, dock, current)
+    _start_system_move_for_dock(dock)
+    main_window._dock_tab_drag_state = None
+    return True
+
+
+def _handle_tab_drag_move(main_window, bar: QTabBar, event) -> bool:
+    """タブドラッグ中の切り離し判定を処理する。"""
+    state = getattr(main_window, "_dock_tab_drag_state", None)
+    if not isinstance(state, dict):
+        return False
+    if state.get("bar") is not bar:
+        return False
+    if state.get("triggered"):
+        return False
+    return _detach_dock_if_vertical_drag(main_window, bar, state, event)
+
+
+def _handle_tab_drag_end(main_window, event_type) -> bool:
+    """タブドラッグ終了時の状態リセットを処理する。"""
+    state = getattr(main_window, "_dock_tab_drag_state", None)
+    if isinstance(state, dict) and not state.get("triggered"):
+        main_window._dock_tab_drag_state = None
+    if event_type == QEvent.MouseButtonRelease:
+        clear_force_dock_drop_active(main_window)
+    return False
+
+
 def _float_dock_from_tab_drag(main_window, dock: QDockWidget, global_pos) -> None:
     """タブドラッグでドックをフローティング化する。"""
     if dock is None:
@@ -284,56 +360,12 @@ def _is_tabbed_dock(
 def handle_dock_tab_bar_event(_main_window, _bar: QTabBar, _event) -> bool:
     """ドックタブバーイベントを監視する。"""
     et = _event.type()
-    if et == QEvent.MouseButtonPress and getattr(_event, "button", lambda: None)() == Qt.LeftButton:
-        pos = _event_pos(_event)
-        idx = _bar.tabAt(pos) if pos is not None else -1
-        if idx < 0:
-            idx = _bar.currentIndex()
-        if idx < 0:
-            _main_window._dock_tab_drag_state = None
-            return False
-        _main_window._dock_tab_drag_state = {
-            "bar": _bar,
-            "index": int(idx),
-            "text": _bar.tabText(idx),
-            "start_global": _global_pos_from_event(_event),
-            "triggered": False,
-        }
-        return False
-
+    if et == QEvent.MouseButtonPress:
+        return _handle_tab_drag_press(_main_window, _bar, _event)
     if et == QEvent.MouseMove:
-        state = getattr(_main_window, "_dock_tab_drag_state", None)
-        if not isinstance(state, dict):
-            return False
-        if state.get("bar") is not _bar:
-            return False
-        if state.get("triggered"):
-            return False
-        current = _global_pos_from_event(_event)
-        start = state.get("start_global")
-        if current is None or start is None:
-            return False
-        dx = int(current.x() - start.x())
-        dy = int(current.y() - start.y())
-        # 横方向ドラッグはタブ並べ替えへ任せ、縦方向に引いたときだけ切り離す。
-        if abs(dy) < _TAB_DETACH_VERTICAL_DRAG_PX or abs(dy) <= abs(dx):
-            return False
-        dock = _dock_for_tab_text(_main_window, str(state.get("text", "")))
-        if dock is None:
-            return False
-        state["triggered"] = True
-        _set_force_dock_drop_active(_main_window, True)
-        _float_dock_from_tab_drag(_main_window, dock, current)
-        _start_system_move_for_dock(dock)
-        _main_window._dock_tab_drag_state = None
-        return True
-
+        return _handle_tab_drag_move(_main_window, _bar, _event)
     if et in (QEvent.MouseButtonRelease, QEvent.Leave):
-        state = getattr(_main_window, "_dock_tab_drag_state", None)
-        if isinstance(state, dict) and not state.get("triggered"):
-            _main_window._dock_tab_drag_state = None
-        if et == QEvent.MouseButtonRelease:
-            clear_force_dock_drop_active(_main_window)
+        return _handle_tab_drag_end(_main_window, et)
     return False
 
 

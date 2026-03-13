@@ -45,47 +45,60 @@ else:
     win32gui = None
 
 
+def _list_windows_pywin32() -> list[tuple[int, str]]:
+    """pywin32 バックエンドでウィンドウ一覧を取得する。"""
+    if not win32gui:
+        return []
+    out: list[tuple[int, str]] = []
+
+    def enum_proc(hwnd, _):
+        if not win32gui.IsWindowVisible(hwnd):
+            return
+        title = win32gui.GetWindowText(hwnd)
+        if not title or not title.strip():
+            return
+        out.append((hwnd, title))
+
+    win32gui.EnumWindows(enum_proc, None)
+    return out
+
+
+def _list_windows_ctypes() -> list[tuple[int, str]]:
+    """ctypes バックエンドでウィンドウ一覧を取得する。"""
+    if not ctypes_win_api:
+        return []
+    import ctypes
+    from ctypes import wintypes
+
+    out: list[tuple[int, str]] = []
+    enum_windows = ctypes_win_api["EnumWindows"]
+    is_window_visible = ctypes_win_api["IsWindowVisible"]
+    get_window_text_length = ctypes_win_api["GetWindowTextLengthW"]
+    get_window_text = ctypes_win_api["GetWindowTextW"]
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+    def enum_proc(hwnd, _lparam):
+        if not is_window_visible(hwnd):
+            return True
+        length = get_window_text_length(hwnd)
+        if length == 0:
+            return True
+        buf = ctypes.create_unicode_buffer(length + 1)
+        get_window_text(hwnd, buf, length + 1)
+        title = buf.value
+        if title and title.strip():
+            out.append((hwnd, title))
+        return True
+
+    enum_windows(enum_proc, 0)
+    return out
+
+
 def list_windows():
     """表示中のトップレベルウィンドウ一覧 `(hwnd, title)` を返す。"""
     if not HAS_WIN32:
         return []
 
-    out = []
-    if win32gui:
-
-        def enum_proc(hwnd, _):
-            if not win32gui.IsWindowVisible(hwnd):
-                return
-            title = win32gui.GetWindowText(hwnd)
-            if not title or not title.strip():
-                return
-            out.append((hwnd, title))
-
-        win32gui.EnumWindows(enum_proc, None)
-    elif ctypes_win_api:
-        import ctypes
-        from ctypes import wintypes
-
-        enum_windows = ctypes_win_api["EnumWindows"]
-        is_window_visible = ctypes_win_api["IsWindowVisible"]
-        get_window_text_length = ctypes_win_api["GetWindowTextLengthW"]
-        get_window_text = ctypes_win_api["GetWindowTextW"]
-
-        @ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
-        def enum_proc(hwnd, _lparam):
-            if not is_window_visible(hwnd):
-                return True
-            length = get_window_text_length(hwnd)
-            if length == 0:
-                return True
-            buf = ctypes.create_unicode_buffer(length + 1)
-            get_window_text(hwnd, buf, length + 1)
-            title = buf.value
-            if title and title.strip():
-                out.append((hwnd, title))
-            return True
-
-        enum_windows(enum_proc, 0)
-
+    out = _list_windows_pywin32() if win32gui else _list_windows_ctypes()
     out.sort(key=lambda x: x[1].lower())
     return out

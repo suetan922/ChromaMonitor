@@ -1,6 +1,6 @@
 """解析処理の補助関数。"""
 
-from typing import Callable, Optional
+from typing import Callable, Optional, TypeAlias
 
 import cv2
 import numpy as np
@@ -29,6 +29,10 @@ _HUE_NAME_12 = (
 )
 _TOP_COLOR_MEDOID_CANDIDATE_LIMIT = 64
 _TOP_COLOR_MEDOID_MAX_PIXELS_PER_SEGMENT = 120_000
+_SAMPLE_RGB_DIRECT_GATHER_THRESHOLD = 180_000
+TopColorBar: TypeAlias = tuple[str, float, tuple[int, int, int]]
+ProgressCb: TypeAlias = Optional[Callable[[int, str], None]]
+CancelCb: TypeAlias = Optional[Callable[[], bool]]
 
 
 def _normalize_bgr_to_float01(bgr: np.ndarray) -> np.ndarray:
@@ -101,9 +105,7 @@ def _compute_wheel_stats(h_wheel: np.ndarray) -> tuple[np.ndarray, float, float,
     if h_wheel.size == 0:
         return np.zeros(180, dtype=np.int64), 0.0, 0.0, 0.0
 
-    hist_raw = (
-        cv2.calcHist([h_wheel], [0], None, [180], [0, 180]).reshape(180).astype(np.int64)
-    )
+    hist_raw = cv2.calcHist([h_wheel], [0], None, [180], [0, 180]).reshape(180).astype(np.int64)
 
     total_color = float(h_wheel.size)
     # OpenCV Hue(0..179)基準:
@@ -209,14 +211,13 @@ def _build_top_color_bars(
     rgb_source: np.ndarray,
     max_count: int,
     label_for_idx: Callable[[int], str],
-) -> list[tuple[str, float, tuple[int, int, int]]]:
+) -> list[TopColorBar]:
     """集計済みセグメント情報から上位色バー配列を構築する。"""
     total = int(np.asarray(counts, dtype=np.int64).sum())
     if total <= 0:
         return []
-
     order = np.argsort(counts)[::-1]
-    bars: list[tuple[str, float, tuple[int, int, int]]] = []
+    bars: list[TopColorBar] = []
     for idx in order:
         seg_idx = int(idx)
         cnt = int(counts[seg_idx])
@@ -236,12 +237,18 @@ def _build_top_color_bars(
     return bars
 
 
+def _segment_hue_to_12bin(h_u16: np.ndarray) -> np.ndarray:
+    """Hue(0..179) を 12 区分インデックスへ変換する。"""
+    # 30度刻み (360/12)。OpenCV Hue は 0..179 なので *2 して割る。
+    return (((h_u16 * 2) // 30) % 12).astype(np.uint8, copy=False)
+
+
 def compute_top_bars_chromatic_medoid(
     bgr_preview: np.ndarray | None,
     *,
     sat_threshold: int = 0,
     top_count: int = 8,
-) -> list[tuple[str, float, tuple[int, int, int]]]:
+) -> list[TopColorBar]:
     """配色比率表示用の上位色を返す。
 
     Returns:
@@ -260,7 +267,8 @@ def compute_top_bars_chromatic_medoid(
         return []
 
     sat_th = int(max(0, min(255, int(sat_threshold))))
-    rgb_all = bgr_u8.reshape(-1, 3)[:, ::-1]
+    bgr_all = bgr_u8.reshape(-1, 3)
+    rgb_all = bgr_all[:, ::-1]
     max_count = max(1, int(top_count))
 
     if sat_th <= 0:
@@ -268,7 +276,7 @@ def compute_top_bars_chromatic_medoid(
         seg = np.full(h_flat.shape, achro_bin, dtype=np.uint8)
         chroma_mask = s_flat > 0
         h_chroma = h_flat[chroma_mask].astype(np.uint16, copy=False)
-        seg[chroma_mask] = (((h_chroma * 2) // 30) % 12).astype(np.uint8, copy=False)
+        seg[chroma_mask] = _segment_hue_to_12bin(h_chroma)
         counts = np.bincount(seg, minlength=13)[:13]
         return _build_top_color_bars(
             counts=counts,
@@ -286,7 +294,7 @@ def compute_top_bars_chromatic_medoid(
         return []
 
     h_chroma = h_flat[chroma_mask].astype(np.uint16, copy=False)
-    seg = (((h_chroma * 2) // 30) % 12).astype(np.uint8, copy=False)
+    seg = _segment_hue_to_12bin(h_chroma)
     counts = np.bincount(seg, minlength=12)[:12]
     rgb_chroma = rgb_all[chroma_mask]
     return _build_top_color_bars(
@@ -296,6 +304,49 @@ def compute_top_bars_chromatic_medoid(
         max_count=max_count,
         label_for_idx=lambda idx: _HUE_NAME_12[int(idx) % 12],
     )
+
+
+def _gather_hsv_by_indices(
+    flat_h: np.ndarray,
+    flat_s: np.ndarray,
+    flat_v: np.ndarray,
+    idx: np.ndarray,
+) -> np.ndarray:
+    """平坦化済み H/S/V からインデックス指定でサンプルを集める。"""
+    k = int(idx.size)
+    hsv = np.empty((k, 3), dtype=np.uint8)
+    np.take(flat_h, idx, out=hsv[:, 0])
+    np.take(flat_s, idx, out=hsv[:, 1])
+    np.take(flat_v, idx, out=hsv[:, 2])
+    return hsv
+
+
+def _gather_rgb_from_bgr_indices(bgr_flat: np.ndarray, idx: np.ndarray) -> np.ndarray:
+    """平坦化済み BGR からインデックス指定で RGB サンプルを集める。"""
+    k = int(idx.size)
+    rgb = np.empty((k, 3), dtype=np.uint8)
+    # 低サンプル時は axis=0 まとめ取得が速く、高サンプル時はチャネル直取得が有利。
+    if k >= _SAMPLE_RGB_DIRECT_GATHER_THRESHOLD:
+        np.take(bgr_flat[:, 2], idx, out=rgb[:, 0])
+        np.take(bgr_flat[:, 1], idx, out=rgb[:, 1])
+        np.take(bgr_flat[:, 0], idx, out=rgb[:, 2])
+        return rgb
+
+    bgr_sel = np.empty((k, 3), dtype=np.uint8)
+    np.take(bgr_flat, idx, axis=0, out=bgr_sel)
+    rgb[:, 0] = bgr_sel[:, 2]
+    rgb[:, 1] = bgr_sel[:, 1]
+    rgb[:, 2] = bgr_sel[:, 0]
+    return rgb
+
+
+def _convert_bgr_flat_to_rgb(bgr_flat: np.ndarray) -> np.ndarray:
+    """平坦化済み BGR 配列を同サイズの RGB 配列へ変換する。"""
+    rgb = np.empty_like(bgr_flat)
+    rgb[:, 0] = bgr_flat[:, 2]
+    rgb[:, 1] = bgr_flat[:, 1]
+    rgb[:, 2] = bgr_flat[:, 0]
+    return rgb
 
 
 def _sample_sv_and_rgb(
@@ -312,96 +363,65 @@ def _sample_sv_and_rgb(
     bgr_flat = bgr.reshape(-1, 3)
     if k < n:
         idx = np.random.randint(0, n, size=k, dtype=np.int32)
-        hsv = np.empty((k, 3), dtype=np.uint8)
-        np.take(flat_h, idx, out=hsv[:, 0])
-        np.take(flat_s, idx, out=hsv[:, 1])
-        np.take(flat_v, idx, out=hsv[:, 2])
-
-        bgr_sel = np.empty((k, 3), dtype=np.uint8)
-        np.take(bgr_flat, idx, axis=0, out=bgr_sel)
-        rgb = np.empty((k, 3), dtype=np.uint8)
-        rgb[:, 0] = bgr_sel[:, 2]
-        rgb[:, 1] = bgr_sel[:, 1]
-        rgb[:, 2] = bgr_sel[:, 0]
+        hsv = _gather_hsv_by_indices(flat_h, flat_s, flat_v, idx)
+        rgb = _gather_rgb_from_bgr_indices(bgr_flat, idx)
     else:
         hsv = np.empty((n, 3), dtype=np.uint8)
         hsv[:, 0] = flat_h
         hsv[:, 1] = flat_s
         hsv[:, 2] = flat_v
-        rgb = np.empty((n, 3), dtype=np.uint8)
-        rgb[:, 0] = bgr_flat[:, 2]
-        rgb[:, 1] = bgr_flat[:, 1]
-        rgb[:, 2] = bgr_flat[:, 0]
+        rgb = _convert_bgr_flat_to_rgb(bgr_flat)
     return hsv, rgb
 
 
-def analyze_bgr_frame(
-    bgr: np.ndarray,
-    sample_points: int,
-    wheel_sat_threshold: int,
-    color_band_sat_threshold: int | None = None,
-    max_dim: int = 0,
-    progress_cb: Optional[Callable[[int, str], None]] = None,
-    cancel_cb: Optional[Callable[[], bool]] = None,
-) -> Optional[dict]:
-    """1フレーム分の解析結果をUI連携用フォーマットで返す。"""
+def _emit_progress_if_needed(
+    progress_cb: ProgressCb,
+    percent: int,
+    text: str,
+) -> None:
+    """進捗コールバックが設定されている場合のみ通知する。"""
+    if progress_cb is not None:
+        progress_cb(int(percent), text)
 
-    def _emit_progress(percent: int, text: str):
-        # 進捗通知コールバックは任意指定なので None を許容する。
-        if progress_cb is not None:
-            progress_cb(int(percent), text)
 
-    def _is_canceled() -> bool:
-        # キャンセル判定は例外で処理を止めない方針。
-        if cancel_cb is None:
-            return False
-        try:
-            return bool(cancel_cb())
-        except Exception:
-            return False
+def _is_canceled_safe(cancel_cb: CancelCb) -> bool:
+    """キャンセルコールバックを安全に評価する。"""
+    if cancel_cb is None:
+        return False
+    try:
+        return bool(cancel_cb())
+    except Exception:
+        return False
 
-    if bgr is None or bgr.size == 0:
-        raise ValueError("empty frame")
-    bgr_work = resize_by_long_edge(np.asarray(bgr), int(max_dim))
 
-    _emit_progress(15, "HSVへ変換中…")
-    if _is_canceled():
-        return None
-    bgr_u8, h, s, v = _prepare_hsv8_and_bgr8(bgr_work)
+def _emit_step_and_check_cancel(
+    progress_cb: ProgressCb,
+    cancel_cb: CancelCb,
+    *,
+    percent: int,
+    text: str,
+) -> bool:
+    """進捗通知を行い、その直後にキャンセル要求を確認する。"""
+    _emit_progress_if_needed(progress_cb, int(percent), str(text))
+    return _is_canceled_safe(cancel_cb)
 
-    # 色相環側は設定可能な彩度しきい値で集計
-    sat_th = clamp_int(wheel_sat_threshold, C.WHEEL_SAT_THRESHOLD_MIN, C.WHEEL_SAT_THRESHOLD_MAX)
-    wheel_mask = s >= sat_th
 
-    _emit_progress(30, "色相ヒストグラム集計中…")
-    if _is_canceled():
-        return None
-    # h_wheel は色相環表示用。
-    h_wheel = h[wheel_mask]
-    hist, warm_ratio, cool_ratio, other_ratio = _compute_wheel_stats(h_wheel)
-    h_hist, s_hist, v_hist = _compute_hsv_histograms(h, s, v)
-
-    _emit_progress(45, "散布図サンプル生成中…")
-    if _is_canceled():
-        return None
-    sv, rgb = _sample_sv_and_rgb(h, s, v, bgr_u8, sample_points)
-
-    _emit_progress(65, "統計を仕上げ中…")
-    if _is_canceled():
-        return None
-    top_colors = None
-    if color_band_sat_threshold is not None:
-        top_colors = compute_top_bars_chromatic_medoid(
-            bgr_u8,
-            sat_threshold=int(color_band_sat_threshold),
-            top_count=int(C.TOP_COLORS_COUNT),
-        )
-
+def _build_analysis_result(
+    *,
+    bgr_u8: np.ndarray,
+    hist: np.ndarray,
+    sv: np.ndarray,
+    rgb: np.ndarray,
+    h_hist: np.ndarray,
+    s_hist: np.ndarray,
+    v_hist: np.ndarray,
+    top_colors: list[TopColorBar] | None,
+    warm_ratio: float,
+    cool_ratio: float,
+    other_ratio: float,
+) -> dict:
+    """解析結果を UI 互換の辞書形式で構築する。"""
     h_img, w_img = bgr_u8.shape[:2]
-    _emit_progress(85, "結果を反映中…")
-    if _is_canceled():
-        return None
-    # 呼び出し側と互換のキーを返す（UI側 on_result がこの形を前提にする）。
     return {
         "bgr_preview": bgr_u8,
         "hist": hist,
@@ -422,3 +442,93 @@ def analyze_bgr_frame(
         "cap": (0, 0, int(w_img), int(h_img)),
         "graph_update": True,
     }
+
+
+def analyze_bgr_frame(
+    bgr: np.ndarray,
+    sample_points: int,
+    wheel_sat_threshold: int,
+    color_band_sat_threshold: int | None = None,
+    max_dim: int = 0,
+    progress_cb: ProgressCb = None,
+    cancel_cb: CancelCb = None,
+) -> Optional[dict]:
+    """1フレーム分の解析結果をUI連携用フォーマットで返す。"""
+
+    # 空入力は早期エラー。
+    if bgr is None or bgr.size == 0:
+        raise ValueError("empty frame")
+    # 設定サイズで前処理。
+    bgr_work = resize_by_long_edge(np.asarray(bgr), int(max_dim))
+
+    if _emit_step_and_check_cancel(
+        progress_cb,
+        cancel_cb,
+        percent=15,
+        text="HSVへ変換中…",
+    ):
+        return None
+    bgr_u8, h, s, v = _prepare_hsv8_and_bgr8(bgr_work)
+
+    # 色相環側の彩度しきい値。
+    sat_th = clamp_int(wheel_sat_threshold, C.WHEEL_SAT_THRESHOLD_MIN, C.WHEEL_SAT_THRESHOLD_MAX)
+    wheel_mask = s >= sat_th
+
+    if _emit_step_and_check_cancel(
+        progress_cb,
+        cancel_cb,
+        percent=30,
+        text="色相ヒストグラム集計中…",
+    ):
+        return None
+    # h_wheel は色相環表示用。
+    h_wheel = h[wheel_mask]
+    hist, warm_ratio, cool_ratio, other_ratio = _compute_wheel_stats(h_wheel)
+    h_hist, s_hist, v_hist = _compute_hsv_histograms(h, s, v)
+
+    if _emit_step_and_check_cancel(
+        progress_cb,
+        cancel_cb,
+        percent=45,
+        text="散布図サンプル生成中…",
+    ):
+        return None
+    sv, rgb = _sample_sv_and_rgb(h, s, v, bgr_u8, sample_points)
+
+    if _emit_step_and_check_cancel(
+        progress_cb,
+        cancel_cb,
+        percent=65,
+        text="統計を仕上げ中…",
+    ):
+        return None
+    top_colors = None
+    if color_band_sat_threshold is not None:
+        # 配色比率は必要時のみ計算。
+        top_colors = compute_top_bars_chromatic_medoid(
+            bgr_u8,
+            sat_threshold=int(color_band_sat_threshold),
+            top_count=int(C.TOP_COLORS_COUNT),
+        )
+
+    if _emit_step_and_check_cancel(
+        progress_cb,
+        cancel_cb,
+        percent=85,
+        text="結果を反映中…",
+    ):
+        return None
+    # 呼び出し側と互換のキーを返す（UI側 on_result がこの形を前提にする）。
+    return _build_analysis_result(
+        bgr_u8=bgr_u8,
+        hist=hist,
+        sv=sv,
+        rgb=rgb,
+        h_hist=h_hist,
+        s_hist=s_hist,
+        v_hist=v_hist,
+        top_colors=top_colors,
+        warm_ratio=float(warm_ratio),
+        cool_ratio=float(cool_ratio),
+        other_ratio=float(other_ratio),
+    )

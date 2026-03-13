@@ -5,7 +5,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QPoint, QSize, Qt, Signal, QTimer
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, Signal, QTimer
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QLabel, QSizePolicy, QWidget
 
@@ -16,6 +16,7 @@ from ..util.value_utils import clamp_int, safe_choice
 _SCATTER_HUE_FILTER_HALF_WIDTH = 10
 _SCATTER_RESIZE_RECALC_DEBOUNCE_MS = 160
 _SCATTER_RESIZE_TRANSFORM_MODE = Qt.FastTransformation
+_SCATTER_LAYOUT_SYNC_DEBOUNCE_MS = 24
 _MUNSELL_HUE_LABELS = (
     "2.5R",
     "5R",
@@ -520,6 +521,10 @@ class ScatterRasterWidget(QLabel):
         self._resize_recalc_timer.setSingleShot(True)
         self._resize_recalc_timer.setInterval(_SCATTER_RESIZE_RECALC_DEBOUNCE_MS)
         self._resize_recalc_timer.timeout.connect(self._rerender_after_resize_idle)
+        self._layout_sync_timer = QTimer(self)
+        self._layout_sync_timer.setSingleShot(True)
+        self._layout_sync_timer.setInterval(_SCATTER_LAYOUT_SYNC_DEBOUNCE_MS)
+        self._layout_sync_timer.timeout.connect(self._sync_after_layout_change)
         self._shape = C.SCATTER_SHAPE_SQUARE
         self._render_mode = C.DEFAULT_SCATTER_RENDER_MODE
         self._hue_filter_enabled = bool(C.DEFAULT_SCATTER_HUE_FILTER_ENABLED)
@@ -527,6 +532,10 @@ class ScatterRasterWidget(QLabel):
             C.DEFAULT_SCATTER_HUE_CENTER, C.SCATTER_HUE_MIN, C.SCATTER_HUE_MAX
         )
         self._show_scatter_frame_only()
+
+    def request_layout_sync(self):
+        """外部レイアウト変更後に散布図表示のサイズ同期を予約する。"""
+        self._layout_sync_timer.start()
 
     def set_shape(self, shape: str):
         """散布図の表示形状(四角/三角)を切り替える。"""
@@ -658,6 +667,20 @@ class ScatterRasterWidget(QLabel):
             return
         if self._last_sv is not None and self._last_rgb is not None:
             self.update_scatter(self._last_sv, self._last_rgb)
+
+    def _sync_after_layout_change(self):
+        """レイアウト変更後に現在サイズへ再スケールして見切れを防ぐ。"""
+        if not self.isVisible() or self.isHidden():
+            return
+        if self.width() <= 1 or self.height() <= 1:
+            return
+        if self._present_scatter_from_base(smooth=False):
+            self._resize_recalc_timer.start()
+            return
+        if self._last_sv is not None and self._last_rgb is not None:
+            self.update_scatter(self._last_sv, self._last_rgb)
+            return
+        self._show_scatter_frame_only()
 
     def _compute_scatter_xy(self, sv_arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
         """S/V配列を散布図座標(x,y)へ変換する。"""
@@ -847,6 +870,124 @@ class ScatterRasterWidget(QLabel):
         out[:, :, 3] = alpha
         return out
 
+    def _validated_scatter_arrays(
+        self,
+        sv: np.ndarray,
+        rgb: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray, int] | None:
+        """散布図入力配列を検証し、正規化済み配列と件数を返す。"""
+        sv_arr = np.asarray(sv)
+        rgb_arr = np.asarray(rgb)
+        if sv_arr.ndim != 2 or sv_arr.shape[1] < 2:
+            return None
+        if rgb_arr.ndim != 2 or rgb_arr.shape[1] < 3:
+            return None
+        n = min(int(sv_arr.shape[0]), int(rgb_arr.shape[0]))
+        if n <= 0:
+            return None
+        return sv_arr, rgb_arr, int(n)
+
+    def _prepare_scatter_samples(
+        self,
+        sv_arr: np.ndarray,
+        rgb_arr: np.ndarray,
+        *,
+        n: int,
+        need_rgb_for_render: bool,
+    ) -> tuple[np.ndarray, np.ndarray | None] | None:
+        """描画用の SV / RGB サンプルを抽出・フィルタして返す。"""
+        need_rgb_for_hue = bool(self._hue_filter_enabled and sv_arr.shape[1] < 3)
+        need_rgb = bool(need_rgb_for_render or need_rgb_for_hue)
+        rgb_u8 = self._to_rgb_u8(rgb_arr, int(n)) if need_rgb else None
+        if sv_arr.shape[1] >= 3:
+            # [H,S,V] 形式なら Hue を直接利用する。
+            h_arr = sv_arr[:n, 0]
+            if self._hue_filter_enabled:
+                h_arr = np.clip(h_arr, C.SCATTER_HUE_MIN, C.SCATTER_HUE_MAX)
+            sv_used = sv_arr[:n, 1:3]
+        else:
+            # [S,V] 形式なら必要時のみ RGB から Hue を復元する。
+            h_arr = (
+                self._extract_hue_from_rgb(rgb_u8)
+                if self._hue_filter_enabled and rgb_u8 is not None
+                else None
+            )
+            sv_used = sv_arr[:n, :2]
+
+        if self._hue_filter_enabled:
+            if h_arr is None or h_arr.size == 0:
+                return None
+            keep = self._apply_hue_filter_mask(h_arr)
+            if not np.any(keep):
+                return None
+            sv_used = sv_used[keep]
+            if rgb_u8 is not None:
+                rgb_u8 = rgb_u8[keep]
+            if sv_used.size == 0 or (rgb_u8 is not None and rgb_u8.size == 0):
+                return None
+        return sv_used, rgb_u8
+
+    def _resolved_render_mode(self) -> str:
+        """現在設定に対する有効な散布図描画モードを返す。"""
+        return safe_choice(
+            self._render_mode,
+            C.SCATTER_RENDER_MODES,
+            C.DEFAULT_SCATTER_RENDER_MODE,
+        )
+
+    def _render_scatter_image(
+        self,
+        *,
+        render_mode: str,
+        sv_used: np.ndarray,
+        rgb_u8: np.ndarray | None,
+    ) -> np.ndarray | None:
+        """現在の描画モード設定に従って散布図画像を生成する。"""
+        x, y = self._compute_scatter_xy(sv_used)
+        if render_mode == C.SCATTER_RENDER_MODE_HEATMAP:
+            return self._render_scatter_heatmap(x, y)
+        if rgb_u8 is None:
+            return None
+        return self._render_scatter_dominant(x, y, rgb_u8)
+
+    def _build_scatter_image(self, sv: np.ndarray, rgb: np.ndarray) -> np.ndarray | None:
+        """通常経路で散布図画像を構築して返す。"""
+        validated = self._validated_scatter_arrays(sv, rgb)
+        if validated is None:
+            return None
+        sv_arr, rgb_arr, n = validated
+        render_mode = self._resolved_render_mode()
+        need_rgb_for_render = render_mode != C.SCATTER_RENDER_MODE_HEATMAP
+        prepared = self._prepare_scatter_samples(
+            sv_arr,
+            rgb_arr,
+            n=n,
+            need_rgb_for_render=bool(need_rgb_for_render),
+        )
+        if prepared is None:
+            return None
+        sv_used, rgb_u8 = prepared
+        return self._render_scatter_image(
+            render_mode=render_mode,
+            sv_used=sv_used,
+            rgb_u8=rgb_u8,
+        )
+
+    def _build_scatter_image_square_fallback(
+        self,
+        sv: np.ndarray,
+        rgb: np.ndarray,
+    ) -> np.ndarray | None:
+        """例外時のフォールバック経路(四角・最頻色)で散布図画像を構築する。"""
+        validated = self._validated_scatter_arrays(sv, rgb)
+        if validated is None:
+            return None
+        sv_arr, rgb_arr, n = validated
+        sv_used = sv_arr[:n, 1:3] if sv_arr.shape[1] >= 3 else sv_arr[:n, :2]
+        rgb_u8 = self._to_rgb_u8(rgb_arr, n)
+        x, y = self._compute_scatter_xy(sv_used)
+        return self._render_scatter_dominant(x, y, rgb_u8)
+
     def update_scatter(self, sv: np.ndarray, rgb: np.ndarray):
         """S/V・RGBサンプルから散布図表示を更新する。"""
         self._last_sv = sv
@@ -856,73 +997,19 @@ class ScatterRasterWidget(QLabel):
             return
 
         try:
-            sv_arr = np.asarray(sv)
-            rgb_arr = np.asarray(rgb)
-            if sv_arr.ndim != 2 or sv_arr.shape[1] < 2 or rgb_arr.ndim != 2 or rgb_arr.shape[1] < 3:
+            img = self._build_scatter_image(sv, rgb)
+            if img is None:
                 self._show_scatter_frame_only()
                 return
-
-            n = min(int(sv_arr.shape[0]), int(rgb_arr.shape[0]))
-            if n <= 0:
-                self._show_scatter_frame_only()
-                return
-
-            rgb_u8 = self._to_rgb_u8(rgb_arr, n)
-            if sv_arr.shape[1] >= 3:
-                # [H,S,V] 形式なら Hue を直接利用する。
-                h_arr = np.clip(
-                    sv_arr[:n, 0].astype(np.int16),
-                    C.SCATTER_HUE_MIN,
-                    C.SCATTER_HUE_MAX,
-                )
-                sv_used = sv_arr[:n, 1:3]
-            else:
-                # [S,V] 形式なら必要時のみ RGB から Hue を復元する。
-                h_arr = self._extract_hue_from_rgb(rgb_u8) if self._hue_filter_enabled else None
-                sv_used = sv_arr[:n, :2]
-
-            if self._hue_filter_enabled:
-                if h_arr is None or h_arr.size == 0:
-                    self._show_scatter_frame_only()
-                    return
-                keep = self._apply_hue_filter_mask(h_arr)
-                if not np.any(keep):
-                    self._show_scatter_frame_only()
-                    return
-                sv_used = sv_used[keep]
-                rgb_u8 = rgb_u8[keep]
-                if sv_used.size == 0 or rgb_u8.size == 0:
-                    self._show_scatter_frame_only()
-                    return
-
-            x, y = self._compute_scatter_xy(sv_used)
-            render_mode = safe_choice(
-                self._render_mode,
-                C.SCATTER_RENDER_MODES,
-                C.DEFAULT_SCATTER_RENDER_MODE,
-            )
-            if render_mode == C.SCATTER_RENDER_MODE_HEATMAP:
-                img = self._render_scatter_heatmap(x, y)
-            else:
-                img = self._render_scatter_dominant(x, y, rgb_u8)
         except Exception:
             # 描画エラー時は四角モードへフォールバックして継続
             self._shape = C.SCATTER_SHAPE_SQUARE
             self._render_mode = C.SCATTER_RENDER_MODE_DOMINANT
             try:
-                sv_arr = np.asarray(sv)
-                rgb_arr = np.asarray(rgb)
-                n = min(int(sv_arr.shape[0]), int(rgb_arr.shape[0]))
-                if n <= 0:
+                img = self._build_scatter_image_square_fallback(sv, rgb)
+                if img is None:
                     self._show_scatter_frame_only()
                     return
-                if sv_arr.ndim != 2 or sv_arr.shape[1] < 2:
-                    self._show_scatter_frame_only()
-                    return
-                sv_used = sv_arr[:n, 1:3] if sv_arr.shape[1] >= 3 else sv_arr[:n, :2]
-                rgb_u8 = self._to_rgb_u8(rgb_arr, n)
-                x, y = self._compute_scatter_xy(sv_used)
-                img = self._render_scatter_dominant(x, y, rgb_u8)
             except Exception:
                 self._show_scatter_frame_only()
                 return
@@ -953,3 +1040,16 @@ class ScatterRasterWidget(QLabel):
             self.update_scatter(self._last_sv, self._last_rgb)
         else:
             self._show_scatter_frame_only()
+
+    def showEvent(self, event):
+        """表示開始時にレイアウト同期を予約する。"""
+        super().showEvent(event)
+        self.request_layout_sync()
+
+    def event(self, event):
+        """レイアウト要求時に散布図サイズ同期を予約する。"""
+        handled = super().event(event)
+        et = event.type()
+        if et in (QEvent.LayoutRequest, QEvent.ShowToParent, QEvent.ParentChange):
+            self.request_layout_sync()
+        return handled

@@ -3,7 +3,7 @@
 import threading
 import time
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, TypedDict
 
 import cv2
 import mss
@@ -14,8 +14,8 @@ from PySide6.QtGui import QGuiApplication
 from .analysis.frame_analysis import (
     _compute_hsv_histograms,
     _compute_wheel_stats,
-    compute_top_bars_chromatic_medoid,
     _sample_sv_and_rgb,
+    compute_top_bars_chromatic_medoid,
 )
 from .capture.win32_windows import HAS_WIN32, ctypes_win_api, win32gui
 from .util import constants as C
@@ -24,7 +24,7 @@ from .util.value_utils import clamp_int
 
 _ctypes_win = ctypes_win_api
 _CAPTURE_SELECTION_KEEP = object()
-_EMPTY_GRAPH_DATA = {
+_EMPTY_GRAPH_DATA: "GraphData" = {
     "hist": None,
     "sv": None,
     "rgb": None,
@@ -42,6 +42,26 @@ _ANALYZER_MIN_GRAPH_EVERY = 1
 _ANALYZER_CHANGE_POLL_SEC = 0.08
 _ANALYZER_CHANGE_COOLDOWN_SEC = 0.12
 _ANALYZER_CHANGE_DETECT_DIM = 120
+_CAPTURE_SLEEP_SEC_DEFAULT = 0.5
+_CAPTURE_SLEEP_SEC_RETRY = 0.3
+_WIN_BI_RGB = 0
+_WIN_DIB_RGB_COLORS = 0
+_WIN_PRINTWINDOW_FULL = 0x00000002
+
+
+class GraphData(TypedDict):
+    """1フレーム分のグラフ計算結果。"""
+
+    hist: Optional[np.ndarray]
+    sv: Optional[np.ndarray]
+    rgb: Optional[np.ndarray]
+    h_hist: Optional[np.ndarray]
+    s_hist: Optional[np.ndarray]
+    v_hist: Optional[np.ndarray]
+    top_colors: Optional[list]
+    warm_ratio: float
+    cool_ratio: float
+    other_ratio: float
 
 
 @dataclass
@@ -267,15 +287,11 @@ class AnalyzerWorker(QObject):
         except Exception:
             return False
 
-    def _build_screen_monitor_map(self):
-        """Qt画面とmssモニタの対応表を構築/再利用する。"""
-        # Qt画面情報（論理座標）と mss 画面情報（物理座標）を近似マッチングする。
-        qt_screens = QGuiApplication.screens()
-        if not qt_screens:
-            return {}
-        screen_sig = tuple(
+    def _screen_signature(self, qt_screens) -> tuple:
+        """Qt画面構成の比較用シグネチャを作る。"""
+        return tuple(
             (
-                int(id(screen)),
+                id(screen),
                 str(screen.name()),
                 int(screen.geometry().left()),
                 int(screen.geometry().top()),
@@ -285,48 +301,65 @@ class AnalyzerWorker(QObject):
             )
             for screen in qt_screens
         )
-        if (
-            isinstance(self._screen_monitor_map_cache, dict)
-            and self._screen_monitor_map_cache
-            and self._screen_monitor_map_signature == screen_sig
-        ):
-            return self._screen_monitor_map_cache
 
+    @staticmethod
+    def _load_native_monitors() -> list[dict]:
+        """mss から実モニタ一覧を取得する。"""
         try:
             with mss.mss() as sct:
-                native_monitors = [m for m in sct.monitors[1:]]
+                return [m for m in sct.monitors[1:]]
         except Exception:
-            native_monitors = []
+            return []
 
-        if not native_monitors:
-            return {}
-
-        qt_infos = []
+    @staticmethod
+    def _qt_screen_infos(qt_screens) -> list[dict]:
+        """Qt画面一覧をマッチング用の情報辞書へ変換する。"""
+        infos: list[dict] = []
         for screen in qt_screens:
             g = screen.geometry()
-            qt_infos.append(
+            infos.append(
                 {
                     "screen": screen,
                     "rect": g,
                     "dpr": max(0.5, float(screen.devicePixelRatio())),
                 }
             )
+        return infos
 
+    @staticmethod
+    def _qt_bounds(qt_infos: list[dict]) -> tuple[float, float, float, float]:
+        """Qt画面群の境界を返す。"""
         q_left = min(info["rect"].left() for info in qt_infos)
         q_top = min(info["rect"].top() for info in qt_infos)
         q_right = max(info["rect"].left() + info["rect"].width() for info in qt_infos)
         q_bottom = max(info["rect"].top() + info["rect"].height() for info in qt_infos)
         q_w = max(1.0, float(q_right - q_left))
         q_h = max(1.0, float(q_bottom - q_top))
+        return float(q_left), float(q_top), float(q_w), float(q_h)
 
+    @staticmethod
+    def _native_bounds(native_monitors: list[dict]) -> tuple[float, float, float, float]:
+        """実モニタ群の境界を返す。"""
         m_left = min(m["left"] for m in native_monitors)
         m_top = min(m["top"] for m in native_monitors)
         m_right = max(m["left"] + m["width"] for m in native_monitors)
         m_bottom = max(m["top"] + m["height"] for m in native_monitors)
         m_w = max(1.0, float(m_right - m_left))
         m_h = max(1.0, float(m_bottom - m_top))
+        return float(m_left), float(m_top), float(m_w), float(m_h)
 
-        pairs = []
+    @staticmethod
+    def _monitor_match_pairs(
+        qt_infos: list[dict],
+        native_monitors: list[dict],
+        *,
+        q_bounds: tuple[float, float, float, float],
+        m_bounds: tuple[float, float, float, float],
+    ) -> list[tuple[float, int, int]]:
+        """Qt画面と実モニタの対応候補スコア一覧を作る。"""
+        q_left, q_top, q_w, q_h = q_bounds
+        m_left, m_top, m_w, m_h = m_bounds
+        pairs: list[tuple[float, int, int]] = []
         for qi, q in enumerate(qt_infos):
             qrect = q["rect"]
             qw = max(1.0, float(qrect.width()))
@@ -342,7 +375,6 @@ class AnalyzerWorker(QObject):
                 mcy = mon["top"] + mon["height"] * 0.5
                 mx_norm = (mcx - m_left) / m_w
                 my_norm = (mcy - m_top) / m_h
-
                 score = (
                     abs(sx - sy) * 300.0
                     + abs(sx - q["dpr"]) * 80.0
@@ -351,8 +383,16 @@ class AnalyzerWorker(QObject):
                     + abs(qy_norm - my_norm) * 60.0
                 )
                 pairs.append((score, qi, mi))
-
         pairs.sort(key=lambda x: x[0])
+        return pairs
+
+    @staticmethod
+    def _resolve_monitor_mapping(
+        qt_infos: list[dict],
+        native_monitors: list[dict],
+        pairs: list[tuple[float, int, int]],
+    ) -> dict:
+        """候補スコアから画面対応表を解決する。"""
         used_q = set()
         used_m = set()
         mapping = {}
@@ -369,6 +409,35 @@ class AnalyzerWorker(QObject):
                 continue
             fallback = native_monitors[min(i, len(native_monitors) - 1)]
             mapping[info["screen"]] = fallback
+        return mapping
+
+    def _build_screen_monitor_map(self):
+        """Qt画面とmssモニタの対応表を構築/再利用する。"""
+        # Qt画面情報（論理座標）と mss 画面情報（物理座標）を近似マッチングする。
+        qt_screens = QGuiApplication.screens()
+        if not qt_screens:
+            return {}
+        screen_sig = self._screen_signature(qt_screens)
+        if (
+            isinstance(self._screen_monitor_map_cache, dict)
+            and self._screen_monitor_map_cache
+            and self._screen_monitor_map_signature == screen_sig
+        ):
+            return self._screen_monitor_map_cache
+
+        native_monitors = self._load_native_monitors()
+        if not native_monitors:
+            return {}
+        qt_infos = self._qt_screen_infos(qt_screens)
+        q_bounds = self._qt_bounds(qt_infos)
+        m_bounds = self._native_bounds(native_monitors)
+        pairs = self._monitor_match_pairs(
+            qt_infos,
+            native_monitors,
+            q_bounds=q_bounds,
+            m_bounds=m_bounds,
+        )
+        mapping = self._resolve_monitor_mapping(qt_infos, native_monitors, pairs)
         self._screen_monitor_map_cache = mapping
         self._screen_monitor_map_signature = screen_sig
         return mapping
@@ -486,6 +555,105 @@ class AnalyzerWorker(QObject):
             )
         return self.roi_abs
 
+    def _capture_window_size(self, hwnd: int) -> Optional[tuple[int, int]]:
+        """対象ウィンドウのキャプチャ寸法を返す。"""
+        wrect = self._get_window_rect(hwnd)
+        if wrect is None:
+            return None
+        width = int(wrect.width())
+        height = int(wrect.height())
+        if width <= 1 or height <= 1:
+            return None
+        return int(width), int(height)
+
+    @staticmethod
+    def _create_window_capture_dc(user32, gdi32, hwnd: int):
+        """WindowDC と互換メモリDCを作成して返す。"""
+        hwnd_dc = user32.GetWindowDC(hwnd)
+        if not hwnd_dc:
+            return None, None
+        mem_dc = gdi32.CreateCompatibleDC(hwnd_dc)
+        if not mem_dc:
+            user32.ReleaseDC(hwnd, hwnd_dc)
+            return None, None
+        return hwnd_dc, mem_dc
+
+    @staticmethod
+    def _release_window_capture_dc(user32, gdi32, hwnd: int, hwnd_dc, mem_dc) -> None:
+        """WindowDC とメモリDCを解放する。"""
+        if mem_dc:
+            gdi32.DeleteDC(mem_dc)
+        if hwnd_dc:
+            user32.ReleaseDC(hwnd, hwnd_dc)
+
+    @staticmethod
+    def _create_dib_section(
+        *,
+        ctypes_mod,
+        wintypes_mod,
+        gdi32,
+        mem_dc,
+        width: int,
+        height: int,
+    ):
+        """32bit top-down DIB を作成し、メモリDCへ選択して返す。"""
+
+        class BITMAPINFOHEADER(ctypes_mod.Structure):
+            _fields_ = [
+                ("biSize", wintypes_mod.DWORD),
+                ("biWidth", wintypes_mod.LONG),
+                ("biHeight", wintypes_mod.LONG),
+                ("biPlanes", wintypes_mod.WORD),
+                ("biBitCount", wintypes_mod.WORD),
+                ("biCompression", wintypes_mod.DWORD),
+                ("biSizeImage", wintypes_mod.DWORD),
+                ("biXPelsPerMeter", wintypes_mod.LONG),
+                ("biYPelsPerMeter", wintypes_mod.LONG),
+                ("biClrUsed", wintypes_mod.DWORD),
+                ("biClrImportant", wintypes_mod.DWORD),
+            ]
+
+        class BITMAPINFO(ctypes_mod.Structure):
+            _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes_mod.DWORD * 3)]
+
+        bmi = BITMAPINFO()
+        bmi.bmiHeader.biSize = ctypes_mod.sizeof(BITMAPINFOHEADER)
+        bmi.bmiHeader.biWidth = int(width)
+        bmi.bmiHeader.biHeight = -int(height)  # top-down
+        bmi.bmiHeader.biPlanes = 1
+        bmi.bmiHeader.biBitCount = 32
+        bmi.bmiHeader.biCompression = _WIN_BI_RGB
+
+        bits = ctypes_mod.c_void_p()
+        h_bitmap = gdi32.CreateDIBSection(
+            mem_dc,
+            ctypes_mod.byref(bmi),
+            _WIN_DIB_RGB_COLORS,
+            ctypes_mod.byref(bits),
+            None,
+            0,
+        )
+        if not h_bitmap or not bits:
+            return None, None, None
+        old_obj = gdi32.SelectObject(mem_dc, h_bitmap)
+        return h_bitmap, old_obj, bits
+
+    @staticmethod
+    def _print_window_to_dc(user32, hwnd: int, mem_dc) -> bool:
+        """PrintWindow を実行してメモリDCへ描画する。"""
+        ok = user32.PrintWindow(hwnd, mem_dc, _WIN_PRINTWINDOW_FULL)
+        if ok:
+            return True
+        return bool(user32.PrintWindow(hwnd, mem_dc, 0))
+
+    @staticmethod
+    def _dib_bits_to_bgr(*, ctypes_mod, bits, width: int, height: int) -> np.ndarray:
+        """DIB先頭ポインタから BGR 画像を取り出す。"""
+        size = int(width) * int(height) * 4
+        buf = (ctypes_mod.c_ubyte * size).from_address(bits.value)
+        bgra = np.frombuffer(buf, dtype=np.uint8).reshape((int(height), int(width), 4)).copy()
+        return cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
+
     def _capture_window_bgr(self, hwnd: int) -> Optional[np.ndarray]:
         """Win32 APIで対象ウィンドウ全体を BGR 画像として取得する。"""
         if not HAS_WIN32:
@@ -494,83 +662,45 @@ class AnalyzerWorker(QObject):
             import ctypes
             from ctypes import wintypes
 
-            class BITMAPINFOHEADER(ctypes.Structure):
-                _fields_ = [
-                    ("biSize", wintypes.DWORD),
-                    ("biWidth", wintypes.LONG),
-                    ("biHeight", wintypes.LONG),
-                    ("biPlanes", wintypes.WORD),
-                    ("biBitCount", wintypes.WORD),
-                    ("biCompression", wintypes.DWORD),
-                    ("biSizeImage", wintypes.DWORD),
-                    ("biXPelsPerMeter", wintypes.LONG),
-                    ("biYPelsPerMeter", wintypes.LONG),
-                    ("biClrUsed", wintypes.DWORD),
-                    ("biClrImportant", wintypes.DWORD),
-                ]
-
-            class BITMAPINFO(ctypes.Structure):
-                _fields_ = [("bmiHeader", BITMAPINFOHEADER), ("bmiColors", wintypes.DWORD * 3)]
-
-            BI_RGB = 0
-            DIB_RGB_COLORS = 0
-            PW_RENDERFULLCONTENT = 0x00000002
-
-            wrect = self._get_window_rect(hwnd)
-            if wrect is None:
+            size = self._capture_window_size(hwnd)
+            if size is None:
                 return None
-            width = int(wrect.width())
-            height = int(wrect.height())
-            if width <= 1 or height <= 1:
-                return None
+            width, height = size
 
             user32 = ctypes.windll.user32
             gdi32 = ctypes.windll.gdi32
 
-            hwnd_dc = user32.GetWindowDC(hwnd)
-            if not hwnd_dc:
-                return None
-            mem_dc = gdi32.CreateCompatibleDC(hwnd_dc)
-            if not mem_dc:
-                user32.ReleaseDC(hwnd, hwnd_dc)
+            hwnd_dc, mem_dc = self._create_window_capture_dc(user32, gdi32, hwnd)
+            if not hwnd_dc or not mem_dc:
                 return None
 
             h_bitmap = None
             old_obj = None
             try:
-                bmi = BITMAPINFO()
-                bmi.bmiHeader.biSize = ctypes.sizeof(BITMAPINFOHEADER)
-                bmi.bmiHeader.biWidth = width
-                bmi.bmiHeader.biHeight = -height  # top-down
-                bmi.bmiHeader.biPlanes = 1
-                bmi.bmiHeader.biBitCount = 32
-                bmi.bmiHeader.biCompression = BI_RGB
-
-                bits = ctypes.c_void_p()
-                h_bitmap = gdi32.CreateDIBSection(
-                    mem_dc, ctypes.byref(bmi), DIB_RGB_COLORS, ctypes.byref(bits), None, 0
+                h_bitmap, old_obj, bits = self._create_dib_section(
+                    ctypes_mod=ctypes,
+                    wintypes_mod=wintypes,
+                    gdi32=gdi32,
+                    mem_dc=mem_dc,
+                    width=width,
+                    height=height,
                 )
                 if not h_bitmap or not bits:
                     return None
-
-                old_obj = gdi32.SelectObject(mem_dc, h_bitmap)
-                ok = user32.PrintWindow(hwnd, mem_dc, PW_RENDERFULLCONTENT)
-                if not ok:
-                    ok = user32.PrintWindow(hwnd, mem_dc, 0)
-                    if not ok:
-                        return None
-
-                size = width * height * 4
-                buf = (ctypes.c_ubyte * size).from_address(bits.value)
-                bgra = np.frombuffer(buf, dtype=np.uint8).reshape((height, width, 4)).copy()
-                return cv2.cvtColor(bgra, cv2.COLOR_BGRA2BGR)
+                if not self._print_window_to_dc(user32, hwnd, mem_dc):
+                    return None
+                return self._dib_bits_to_bgr(
+                    ctypes_mod=ctypes,
+                    bits=bits,
+                    width=width,
+                    height=height,
+                )
             finally:
                 if old_obj:
                     gdi32.SelectObject(mem_dc, old_obj)
                 if h_bitmap:
                     gdi32.DeleteObject(h_bitmap)
-                gdi32.DeleteDC(mem_dc)
-                user32.ReleaseDC(hwnd, hwnd_dc)
+                self._release_window_capture_dc(user32, gdi32, hwnd, hwnd_dc, mem_dc)
         except Exception:
             return None
 
@@ -728,6 +858,74 @@ class AnalyzerWorker(QObject):
             emit_now = True
         return emit_now
 
+    @staticmethod
+    def _extract_hsv_channels(
+        bgr: np.ndarray,
+        *,
+        enabled: bool,
+    ) -> tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+        """必要時のみ HSV を生成し、チャネルビューを返す。"""
+        if not enabled:
+            return None, None, None
+        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
+        # split はチャネルごとに配列コピーするため、ビュー参照で取り出す。
+        return hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2]
+
+    @staticmethod
+    def _optional_hsv_histograms(
+        *,
+        enabled: bool,
+        h: Optional[np.ndarray],
+        s: Optional[np.ndarray],
+        v: Optional[np.ndarray],
+    ) -> tuple[Optional[np.ndarray], Optional[np.ndarray], Optional[np.ndarray]]:
+        """HSVヒストグラムが必要なときだけ集計結果を返す。"""
+        if not enabled or h is None or s is None or v is None:
+            return None, None, None
+        return _compute_hsv_histograms(h, s, v)
+
+    def _optional_wheel_stats(
+        self,
+        *,
+        enabled: bool,
+        h: Optional[np.ndarray],
+        s: Optional[np.ndarray],
+    ) -> tuple[Optional[np.ndarray], float, float, float]:
+        """色相環ヒストグラムと暖寒比率を必要時のみ計算する。"""
+        if not enabled or h is None or s is None:
+            return None, 0.0, 0.0, 0.0
+        sat_th = clamp_int(
+            self.cfg.wheel_sat_threshold,
+            C.WHEEL_SAT_THRESHOLD_MIN,
+            C.WHEEL_SAT_THRESHOLD_MAX,
+        )
+        h_wheel = h[s >= sat_th]
+        return _compute_wheel_stats(h_wheel)
+
+    def _optional_scatter_samples(
+        self,
+        *,
+        enabled: bool,
+        h: Optional[np.ndarray],
+        s: Optional[np.ndarray],
+        v: Optional[np.ndarray],
+        bgr: np.ndarray,
+    ) -> tuple[Optional[np.ndarray], Optional[np.ndarray]]:
+        """散布図サンプルが必要なときだけ SV/RGB を生成する。"""
+        if not enabled or h is None or s is None or v is None:
+            return None, None
+        return _sample_sv_and_rgb(h, s, v, bgr, self.cfg.sample_points)
+
+    def _optional_top_colors(self, *, enabled: bool, bgr: np.ndarray):
+        """配色比率の代表色を必要時のみ計算する。"""
+        if not enabled:
+            return None
+        return compute_top_bars_chromatic_medoid(
+            bgr,
+            sat_threshold=int(self.cfg.color_band_sat_threshold),
+            top_count=int(C.TOP_COLORS_COUNT),
+        )
+
     def _collect_graph_data(
         self,
         bgr: np.ndarray,
@@ -735,49 +933,32 @@ class AnalyzerWorker(QObject):
         need_color_band: bool,
         need_scatter: bool,
         need_hsv_hist: bool,
-    ) -> dict:
+    ) -> GraphData:
         """現在フレームから要求されたグラフ項目だけを計算する。"""
         # 設定された解析上限（max_dim）で縮小してから重い集計を行う。
         bgr_small = resize_by_long_edge(bgr, self.cfg.max_dim)
-        hsv = cv2.cvtColor(bgr_small, cv2.COLOR_BGR2HSV)
-        # split はチャネルごとに配列コピーするため、ビュー参照で取り出す。
-        h = hsv[:, :, 0]
-        s = hsv[:, :, 1]
-        v = hsv[:, :, 2]
-
-        h_hist = None
-        s_hist = None
-        v_hist = None
-        if need_hsv_hist:
-            h_hist, s_hist, v_hist = _compute_hsv_histograms(h, s, v)
-
-        hist = None
-        warm_ratio = 0.0
-        cool_ratio = 0.0
-        other_ratio = 0.0
-        if need_color:
-            sat_th = clamp_int(
-                self.cfg.wheel_sat_threshold,
-                C.WHEEL_SAT_THRESHOLD_MIN,
-                C.WHEEL_SAT_THRESHOLD_MAX,
-            )
-            wheel_mask = s >= sat_th
-            h_wheel = h[wheel_mask]
-            hist, warm_ratio, cool_ratio, other_ratio = _compute_wheel_stats(h_wheel)
-
-        sv = None
-        rgb = None
-        if need_scatter:
-            sv, rgb = _sample_sv_and_rgb(h, s, v, bgr_small, self.cfg.sample_points)
-
-        top_colors = None
-        if need_color_band:
-            # 配色比率の代表色計算は解析解像度(max_dim適用後)で行い、負荷を抑える。
-            top_colors = compute_top_bars_chromatic_medoid(
-                bgr_small,
-                sat_threshold=int(self.cfg.color_band_sat_threshold),
-                top_count=int(C.TOP_COLORS_COUNT),
-            )
+        need_hsv_channels = need_hsv_hist or need_color or need_scatter
+        h, s, v = self._extract_hsv_channels(bgr_small, enabled=need_hsv_channels)
+        h_hist, s_hist, v_hist = self._optional_hsv_histograms(
+            enabled=need_hsv_hist,
+            h=h,
+            s=s,
+            v=v,
+        )
+        hist, warm_ratio, cool_ratio, other_ratio = self._optional_wheel_stats(
+            enabled=need_color,
+            h=h,
+            s=s,
+        )
+        sv, rgb = self._optional_scatter_samples(
+            enabled=need_scatter,
+            h=h,
+            s=s,
+            v=v,
+            bgr=bgr_small,
+        )
+        # 配色比率の代表色計算は解析解像度(max_dim適用後)で行い、負荷を抑える。
+        top_colors = self._optional_top_colors(enabled=need_color_band, bgr=bgr_small)
 
         return {
             "hist": hist,
@@ -792,123 +973,208 @@ class AnalyzerWorker(QObject):
             "other_ratio": other_ratio,
         }
 
+    def _emit_status_and_sleep(self, message: Optional[str], sleep_sec: float) -> None:
+        """必要時だけステータス通知して待機する。"""
+        if message:
+            self.status.emit(message)
+        time.sleep(float(sleep_sec))
+
+    @staticmethod
+    def _screen_capture_retry_sleep(err: Optional[str]) -> float:
+        """画面キャプチャ失敗時の待機秒を返す。"""
+        if err and err.startswith("領域が画面外"):
+            return _CAPTURE_SLEEP_SEC_RETRY
+        return _CAPTURE_SLEEP_SEC_DEFAULT
+
+    @staticmethod
+    def _loop_interval_sec(cfg: AnalyzerConfig) -> float:
+        """現在モードに応じた1ループの待機秒数を返す。"""
+        if cfg.mode == C.UPDATE_MODE_INTERVAL:
+            return float(cfg.interval_sec)
+        return float(_ANALYZER_CHANGE_POLL_SEC)
+
+    @staticmethod
+    def _view_requirements(cfg: AnalyzerConfig) -> tuple[bool, bool, bool, bool, bool, bool]:
+        """現在設定からビュー更新要件フラグを返す。"""
+        need_color = cfg.view_color
+        need_color_band = cfg.view_color_band
+        need_scatter = cfg.view_scatter
+        need_hsv_hist = cfg.view_hsv_hist
+        need_graph_data = need_color or need_color_band or need_scatter or need_hsv_hist
+        need_bgr_emit = cfg.view_image or cfg.want_preview
+        return (
+            need_color,
+            need_color_band,
+            need_scatter,
+            need_hsv_hist,
+            need_graph_data,
+            need_bgr_emit,
+        )
+
+    def _capture_frame_for_loop(self, sct) -> tuple[Optional[np.ndarray], Optional[QRect]]:
+        """メインループ1回分のキャプチャを実行して返す。"""
+        # windowモードは ROI未指定でもウィンドウ全体を直接取得する。
+        if self.target_hwnd is not None and HAS_WIN32:
+            if self._is_window_minimized(self.target_hwnd):
+                self._emit_status_and_sleep(
+                    "ターゲットウィンドウが最小化されています（色を取得できません）",
+                    _CAPTURE_SLEEP_SEC_DEFAULT,
+                )
+                return None, None
+            bgr, cap = self._capture_target_window_region()
+            if bgr is None or cap is None:
+                self._emit_status_and_sleep(
+                    "選択ウィンドウのキャプチャに失敗しました",
+                    _CAPTURE_SLEEP_SEC_RETRY,
+                )
+                return None, None
+            return bgr, cap
+
+        bgr, cap, err = self._capture_screen_region(sct, self._compute_capture_rect())
+        if bgr is None or cap is None:
+            self._emit_status_and_sleep(err, self._screen_capture_retry_sleep(err))
+            return None, None
+        return bgr, cap
+
+    def _emit_and_graph_update_flags(
+        self, cfg: AnalyzerConfig, bgr: np.ndarray
+    ) -> tuple[bool, bool]:
+        """更新モードに応じて通知可否とグラフ更新可否を返す。"""
+        if cfg.mode == C.UPDATE_MODE_CHANGE:
+            emit_now = self._should_emit_in_change_mode(bgr, now=time.perf_counter())
+            # changeモードで発火したときは全ビューを同じタイミングで更新
+            return bool(emit_now), bool(emit_now)
+
+        # intervalモードでは graph_every 間隔でグラフ更新する。
+        self._frame += 1
+        graph_update = self._frame % cfg.graph_every == 0
+        return True, bool(graph_update)
+
+    @staticmethod
+    def _build_result_payload(
+        *,
+        bgr: np.ndarray,
+        cap: QRect,
+        graph_data: GraphData,
+        graph_update: bool,
+        need_bgr_emit: bool,
+        dt_ms: float,
+    ) -> dict:
+        """UI通知用ペイロードを組み立てる。"""
+        return {
+            "bgr_preview": bgr if need_bgr_emit else None,
+            "hist": graph_data["hist"] if graph_update else None,
+            "sv": graph_data["sv"] if graph_update else None,
+            "rgb": graph_data["rgb"] if graph_update else None,
+            # ヒストグラムを返すため平面データは送らない。
+            "h_plane": None,
+            "s_plane": None,
+            "v_plane": None,
+            "h_hist": graph_data["h_hist"] if graph_update else None,
+            "s_hist": graph_data["s_hist"] if graph_update else None,
+            "v_hist": graph_data["v_hist"] if graph_update else None,
+            "top_colors": graph_data["top_colors"] if graph_update else None,
+            "warm_ratio": graph_data["warm_ratio"],
+            "cool_ratio": graph_data["cool_ratio"],
+            "other_ratio": graph_data["other_ratio"],
+            "dt_ms": float(dt_ms),
+            "cap": (cap.left(), cap.top(), cap.width(), cap.height()),
+            "graph_update": bool(graph_update),
+        }
+
+    def _graph_data_for_frame(
+        self,
+        *,
+        emit_now: bool,
+        graph_update: bool,
+        need_graph_data: bool,
+        bgr: np.ndarray,
+        need_color: bool,
+        need_color_band: bool,
+        need_scatter: bool,
+        need_hsv_hist: bool,
+    ) -> GraphData:
+        """必要なときだけグラフ計算を実行する。"""
+        if not (emit_now and graph_update and need_graph_data):
+            return _EMPTY_GRAPH_DATA
+        return self._collect_graph_data(
+            bgr,
+            need_color=need_color,
+            need_color_band=need_color_band,
+            need_scatter=need_scatter,
+            need_hsv_hist=need_hsv_hist,
+        )
+
+    def _emit_result_if_possible(self, payload: dict, *, cfg: AnalyzerConfig) -> None:
+        """未消費キューが空いている場合のみ結果を通知する。"""
+        if self._result_inflight.is_set():
+            return
+        # UI側が未消費の間は次結果を積まず、キュー膨張を防ぐ。
+        self._result_inflight.set()
+        self.resultReady.emit(payload)
+        if cfg.mode == C.UPDATE_MODE_CHANGE:
+            # 連続発火を抑える短いクールダウン
+            self._cooldown_until = time.perf_counter() + _ANALYZER_CHANGE_COOLDOWN_SEC
+
     def _run(self):
         """キャプチャ/解析/通知を繰り返すメインループ。"""
         # mss は with 内で使い回し、毎フレーム初期化コストを避ける。
         with mss.mss() as sct:
             while not self._stop.is_set():
                 t0 = time.perf_counter()
-                cap: Optional[QRect] = None
-                bgr: Optional[np.ndarray] = None
 
                 cfg = self.cfg
-                need_color = bool(cfg.view_color)
-                need_color_band = bool(cfg.view_color_band)
-                need_scatter = bool(cfg.view_scatter)
-                need_hsv_hist = bool(cfg.view_hsv_hist)
-                need_graph_data = need_color or need_color_band or need_scatter or need_hsv_hist
-                need_image = bool(cfg.view_image)
-                need_preview = bool(cfg.want_preview)
-                need_bgr_emit = need_image or need_preview
+                # 可視ビューから必要計算を決める。
+                (
+                    need_color,
+                    need_color_band,
+                    need_scatter,
+                    need_hsv_hist,
+                    need_graph_data,
+                    need_bgr_emit,
+                ) = self._view_requirements(cfg)
                 if not need_graph_data and not need_bgr_emit:
                     # 表示先が1つもない間はキャプチャ/解析を休止してCPU使用率を下げる。
-                    loop_interval = (
-                        cfg.interval_sec
-                        if cfg.mode == C.UPDATE_MODE_INTERVAL
-                        else _ANALYZER_CHANGE_POLL_SEC
-                    )
-                    time.sleep(max(0.01, float(loop_interval)))
+                    time.sleep(max(0.01, self._loop_interval_sec(cfg)))
                     continue
 
-                # ウィンドウ取得モードでは、ROI未指定時もウィンドウ全体を直接キャプチャする
-                # （画面領域選択とは排他的に扱う）
-                if self.target_hwnd is not None and HAS_WIN32:
-                    if self._is_window_minimized(self.target_hwnd):
-                        self.status.emit(
-                            "ターゲットウィンドウが最小化されています（色を取得できません）"
-                        )
-                        time.sleep(0.5)
-                        continue
-                    bgr, cap = self._capture_target_window_region()
-                    if bgr is None or cap is None:
-                        self.status.emit("選択ウィンドウのキャプチャに失敗しました")
-                        time.sleep(0.3)
-                        continue
-                else:
-                    bgr, cap, err = self._capture_screen_region(sct, self._compute_capture_rect())
-                    if bgr is None or cap is None:
-                        if err:
-                            self.status.emit(err)
-                            time.sleep(0.3 if err.startswith("領域が画面外") else 0.5)
-                        else:
-                            time.sleep(0.5)
-                        continue
-
+                # 1フレーム取得。
+                bgr, cap = self._capture_frame_for_loop(sct)
                 if bgr is None or cap is None:
-                    time.sleep(0.2)
                     continue
 
-                emit_now = True
-                graph_update = False
-                if cfg.mode == C.UPDATE_MODE_CHANGE:
-                    emit_now = self._should_emit_in_change_mode(bgr, now=time.perf_counter())
-                    # changeモードで発火したときは全ビューを同じタイミングで更新
-                    graph_update = emit_now
-                else:
-                    # intervalモードでは graph_every 間隔でグラフ更新する。
-                    self._frame += 1
-                    graph_update = self._frame % cfg.graph_every == 0
+                # 今回フレームを通知するか判定。
+                emit_now, graph_update = self._emit_and_graph_update_flags(cfg, bgr)
 
                 dt_ms = (time.perf_counter() - t0) * 1000.0
-                graph_data = _EMPTY_GRAPH_DATA
-
-                if emit_now and graph_update and need_graph_data:
-                    graph_data = self._collect_graph_data(
-                        bgr,
-                        need_color=need_color,
-                        need_color_band=need_color_band,
-                        need_scatter=need_scatter,
-                        need_hsv_hist=need_hsv_hist,
-                    )
+                # 必要時のみ重い集計を走らせる。
+                graph_data = self._graph_data_for_frame(
+                    emit_now=emit_now,
+                    graph_update=graph_update,
+                    need_graph_data=need_graph_data,
+                    bgr=bgr,
+                    need_color=need_color,
+                    need_color_band=need_color_band,
+                    need_scatter=need_scatter,
+                    need_hsv_hist=need_hsv_hist,
+                )
 
                 if emit_now:
+                    # グラフ更新なしでも画像プレビューが必要なら通知する。
                     should_emit_payload = need_bgr_emit or (graph_update and need_graph_data)
-                    if should_emit_payload and not self._result_inflight.is_set():
-                        # UI側が未消費の間は次結果を積まず、キュー膨張を防ぐ。
-                        self._result_inflight.set()
-                        self.resultReady.emit(
-                            {
-                                "bgr_preview": bgr if need_bgr_emit else None,
-                                "hist": graph_data["hist"] if graph_update else None,
-                                "sv": graph_data["sv"] if graph_update else None,
-                                "rgb": graph_data["rgb"] if graph_update else None,
-                                # ヒストグラムを返すため平面データは送らない。
-                                "h_plane": None,
-                                "s_plane": None,
-                                "v_plane": None,
-                                "h_hist": graph_data["h_hist"] if graph_update else None,
-                                "s_hist": graph_data["s_hist"] if graph_update else None,
-                                "v_hist": graph_data["v_hist"] if graph_update else None,
-                                "top_colors": graph_data["top_colors"] if graph_update else None,
-                                "warm_ratio": graph_data["warm_ratio"],
-                                "cool_ratio": graph_data["cool_ratio"],
-                                "other_ratio": graph_data["other_ratio"],
-                                "dt_ms": dt_ms,
-                                "cap": (cap.left(), cap.top(), cap.width(), cap.height()),
-                                "graph_update": graph_update,
-                            }
+                    if should_emit_payload:
+                        payload = self._build_result_payload(
+                            bgr=bgr,
+                            cap=cap,
+                            graph_data=graph_data,
+                            graph_update=bool(graph_update),
+                            need_bgr_emit=bool(need_bgr_emit),
+                            dt_ms=float(dt_ms),
                         )
-                        if cfg.mode == C.UPDATE_MODE_CHANGE:
-                            # 連続発火を抑える短いクールダウン
-                            self._cooldown_until = (
-                                time.perf_counter() + _ANALYZER_CHANGE_COOLDOWN_SEC
-                            )
+                        self._emit_result_if_possible(payload, cfg=cfg)
 
-                loop_interval = (
-                    cfg.interval_sec
-                    if cfg.mode == C.UPDATE_MODE_INTERVAL
-                    else _ANALYZER_CHANGE_POLL_SEC
-                )
+                # ループ周期を維持。
+                loop_interval = self._loop_interval_sec(cfg)
                 remain = loop_interval - (time.perf_counter() - t0)
                 if remain > 0:
                     time.sleep(remain)

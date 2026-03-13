@@ -298,18 +298,32 @@ VIEW_MIN_HEIGHT = 48
 """ドック/ビューの共通最小高さ(px)。"""
 
 # Debug logging
-DEBUG_WINDOW_LAYOUT_LOG_ENABLED = True
-"""window_layout デバッグログの既定有効状態。"""
-DEBUG_WINDOW_LAYOUT_LOG_FILE = "window_layout_debug.log"
-"""window_layout デバッグログの既定ファイル名。"""
-DEBUG_WINDOW_LAYOUT_LOG_MAX_BYTES = 5 * 1024 * 1024
-"""window_layout デバッグログ1ファイルあたりの最大サイズ。"""
-DEBUG_WINDOW_LAYOUT_LOG_BACKUP_COUNT = 3
-"""window_layout デバッグログの世代数。"""
+DEBUG_UI_LOG_ENABLED = True
+"""UI デバッグログの既定有効状態。"""
+DEBUG_UI_LOG_FILE = "ui_debug.log"
+"""UI デバッグログの既定ファイル名。"""
+DEBUG_UI_LOG_MAX_BYTES = 5 * 1024 * 1024
+"""UI デバッグログ1ファイルあたりの最大サイズ。"""
+DEBUG_UI_LOG_BACKUP_COUNT = 3
+"""UI デバッグログの世代数。"""
+DEBUG_UI_LOG_ENV = "CHROMA_MONITOR_DEBUG_UI_LOG"
+"""UI デバッグログ有効化を上書きする環境変数名。"""
+DEBUG_UI_LOG_PATH_ENV = "CHROMA_MONITOR_DEBUG_UI_LOG_PATH"
+"""UI デバッグログ出力先を上書きする環境変数名。"""
+
+# Backward-compatible aliases (legacy names)
+DEBUG_WINDOW_LAYOUT_LOG_ENABLED = DEBUG_UI_LOG_ENABLED
+"""互換用: UI デバッグログ有効状態。"""
+DEBUG_WINDOW_LAYOUT_LOG_FILE = DEBUG_UI_LOG_FILE
+"""互換用: UI デバッグログ既定ファイル名。"""
+DEBUG_WINDOW_LAYOUT_LOG_MAX_BYTES = DEBUG_UI_LOG_MAX_BYTES
+"""互換用: UI デバッグログ最大サイズ。"""
+DEBUG_WINDOW_LAYOUT_LOG_BACKUP_COUNT = DEBUG_UI_LOG_BACKUP_COUNT
+"""互換用: UI デバッグログ世代数。"""
 DEBUG_WINDOW_LAYOUT_LOG_ENV = "CHROMA_MONITOR_DEBUG_WINDOW_LAYOUT_LOG"
-"""window_layout デバッグログ有効化を上書きする環境変数名。"""
+"""互換用: 旧デバッグログ有効化環境変数名。"""
 DEBUG_WINDOW_LAYOUT_LOG_PATH_ENV = "CHROMA_MONITOR_DEBUG_WINDOW_LAYOUT_LOG_PATH"
-"""window_layout デバッグログ出力先を上書きする環境変数名。"""
+"""互換用: 旧デバッグログ出力先環境変数名。"""
 
 # Settings page indices
 SETTINGS_PAGE_CAPTURE = 0

@@ -12,8 +12,8 @@ from PySide6.QtWidgets import (
     QMainWindow,
     QScrollArea,
     QSizePolicy,
-    QSplitter,
     QSlider,
+    QSplitter,
     QTabWidget,
     QVBoxLayout,
     QWidget,
@@ -66,15 +66,14 @@ def _create_dock(
     title: str,
     object_name: str,
     content: QWidget,
-    area: Qt.DockWidgetArea = Qt.RightDockWidgetArea,
 ) -> QDockWidget:
-    """指定内容のドックを生成し、初期エリアへ追加して返す。"""
-    # タイトル・ObjectName・初期配置をまとめて設定する。
+    """指定内容のドックを生成して返す。"""
+    # タイトル・ObjectName・コンテンツ設定までを担当し、
+    # 実際の配置は setup_view_docks 側で一括して行う。
     dock = UniformMinDockWidget(title, main_window)
     dock.setObjectName(object_name)
     dock.setWidget(content)
     dock.setAllowedAreas(Qt.AllDockWidgetAreas)
-    main_window.addDockWidget(area, dock)
     return dock
 
 
@@ -355,7 +354,6 @@ def setup_view_docks(main_window) -> None:
         "配色比率",
         "dock_color_band",
         color_band_widget,
-        area=Qt.LeftDockWidgetArea,
     )
     # 再表示時は色相環ドックへ優先的にタブ合流させる。
     color_band_dock._preferred_tab_anchor_name = "dock_color"
@@ -381,6 +379,11 @@ def setup_view_docks(main_window) -> None:
     sctrl_l.addStretch(2)
     sc_l.addWidget(scatter_controls, 0)
     scatter_dock = _create_dock(main_window, "S-V 散布図", "dock_scatter", scatter_container)
+    # 外出し/再ドック直後は散布図の再スケールを予約して見切れを防ぐ。
+    scatter_dock.topLevelChanged.connect(lambda _v, w=main_window.scatter: w.request_layout_sync())
+    scatter_dock.dockLocationChanged.connect(
+        lambda _area, w=main_window.scatter: w.request_layout_sync()
+    )
 
     hist_container = QWidget()
     hg_l = QHBoxLayout(hist_container)
@@ -395,7 +398,6 @@ def setup_view_docks(main_window) -> None:
         "H/S/V ヒストグラム",
         "dock_hist",
         hist_container,
-        area=Qt.LeftDockWidgetArea,
     )
     # 初期レイアウトから再表示したときは、色相環グループへ優先的にタブ合流させる。
     hist_dock._preferred_tab_anchor_name = "dock_color"
@@ -410,7 +412,6 @@ def setup_view_docks(main_window) -> None:
         "R/G/B ヒストグラム",
         "dock_rgb_hist",
         rgb_hist_container,
-        area=Qt.LeftDockWidgetArea,
     )
     # RGBヒストグラムも色相環グループへ合流する。
     rgb_hist_dock._preferred_tab_anchor_name = "dock_color"

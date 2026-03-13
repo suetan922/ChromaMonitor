@@ -101,9 +101,14 @@ def _preferred_field_width(widget: QWidget) -> int:
     return max(220, min(460, width))
 
 
-def _wrap_setting_field(widget: QWidget) -> QWidget:
+def _wrap_setting_field(widget: QWidget, *, field_width: int | None = None) -> QWidget:
     """入力欄を左寄せのコンテナへ包み、必要なら単位ラベルも添える。"""
-    field_width = _preferred_field_width(widget)
+    field_width = (
+        int(field_width)
+        if field_width is not None
+        else int(_preferred_field_width(widget))
+    )
+    field_width = max(80, min(_SETTINGS_FIELD_SLOT_WIDTH, field_width))
     widget.setFixedWidth(int(field_width))
 
     policy = widget.sizePolicy()
@@ -131,7 +136,12 @@ def _wrap_setting_field(widget: QWidget) -> QWidget:
     return holder
 
 
-def _make_labeled_row(label_text: str, widget: QWidget) -> QWidget:
+def _make_labeled_row(
+    label_text: str,
+    widget: QWidget,
+    *,
+    field_width: int | None = None,
+) -> QWidget:
     """左ラベルと入力ウィジェットを並べた設定行を作る。"""
     # 左ラベル + 右入力ウィジェットの共通行を作る。
     row = QWidget()
@@ -144,7 +154,7 @@ def _make_labeled_row(label_text: str, widget: QWidget) -> QWidget:
     label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
     label.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
     layout.addWidget(label, 0)
-    layout.addWidget(_wrap_setting_field(widget), 0)
+    layout.addWidget(_wrap_setting_field(widget, field_width=field_width), 0)
     row.setFixedWidth(_settings_row_width())
     return row
 
@@ -213,11 +223,27 @@ def show_settings_window(main_window, page_index: int = 0):
 
         # --- キャプチャ設定ページ ---
         page_capture, lc = _create_settings_page()
+        capture_field_width = _preferred_field_width(main_window.combo_win)
         _add_left_aligned_widget(lc, _make_labeled_row("取得元", main_window.combo_capture_source))
-        main_window._row_target_settings = _make_labeled_row("ターゲット", main_window.combo_win)
+        main_window._row_target_settings = _make_labeled_row(
+            "ターゲット",
+            main_window.combo_win,
+            field_width=capture_field_width,
+        )
         _add_left_aligned_widget(lc, main_window._row_target_settings)
-        lc.addWidget(main_window.btn_pick_roi_win)
-        lc.addWidget(main_window.btn_pick_roi_screen)
+        # 領域選択行は行コンテナ単位で表示切替し、余白崩れを防ぐ。
+        main_window._row_pick_roi_win_settings = _make_labeled_row(
+            "",
+            main_window.btn_pick_roi_win,
+            field_width=capture_field_width,
+        )
+        main_window._row_pick_roi_screen_settings = _make_labeled_row(
+            "",
+            main_window.btn_pick_roi_screen,
+            field_width=capture_field_width,
+        )
+        _add_left_aligned_widget(lc, main_window._row_pick_roi_win_settings)
+        _add_left_aligned_widget(lc, main_window._row_pick_roi_screen_settings)
         _add_left_aligned_widget(
             lc,
             _make_labeled_row("解析解像度", main_window.combo_analysis_resolution_mode),
@@ -265,7 +291,9 @@ def show_settings_window(main_window, page_index: int = 0):
         page_scatter, ls = _create_settings_page()
         ls.addWidget(_make_hint_label("散布図のサンプル数を設定します"))
         _add_left_aligned_widget(ls, _make_labeled_row("表示形状", main_window.combo_scatter_shape))
-        _add_left_aligned_widget(ls, _make_labeled_row("表示モード", main_window.combo_scatter_render_mode))
+        _add_left_aligned_widget(
+            ls, _make_labeled_row("表示モード", main_window.combo_scatter_render_mode)
+        )
         _add_left_aligned_widget(ls, _make_labeled_row("サンプル数", main_window.spin_points))
         ls.addStretch(1)
         pages.addWidget(page_scatter)
@@ -274,7 +302,9 @@ def show_settings_window(main_window, page_index: int = 0):
         page_wheel, lw = _create_settings_page()
         lw.addWidget(_make_hint_label("色相環の色相分類方式を設定します"))
         _add_left_aligned_widget(lw, _make_labeled_row("表示方式", main_window.combo_wheel_mode))
-        _add_left_aligned_widget(lw, _make_labeled_row("彩度しきい値", main_window.spin_wheel_sat_threshold))
+        _add_left_aligned_widget(
+            lw, _make_labeled_row("彩度しきい値", main_window.spin_wheel_sat_threshold)
+        )
         lw.addWidget(
             _make_hint_label(
                 "色相環: 0 のときは無彩色も含みます。1 以上では「しきい値未満」を除外します。",
@@ -293,7 +323,9 @@ def show_settings_window(main_window, page_index: int = 0):
         # --- エッジ/2値/3値ページ ---
         page_image, li = _create_settings_page()
         li.addWidget(QLabel("エッジ・2値化・3値化の見え方を調整できます"))
-        _add_left_aligned_widget(li, _make_labeled_row("エッジ感度", main_window.spin_edge_sensitivity))
+        _add_left_aligned_widget(
+            li, _make_labeled_row("エッジ感度", main_window.spin_edge_sensitivity)
+        )
         _add_left_aligned_widget(li, _make_labeled_row("2値化", main_window.combo_binary_preset))
         _add_left_aligned_widget(li, _make_labeled_row("3値化", main_window.combo_ternary_preset))
         li.addStretch(1)
@@ -302,17 +334,27 @@ def show_settings_window(main_window, page_index: int = 0):
         # --- サリエンシーページ ---
         page_saliency, lsal = _create_settings_page()
         lsal.addWidget(QLabel("サリエンシーマップ（スペクトル残差）を調整します"))
-        _add_left_aligned_widget(lsal, _make_labeled_row("重ね具合", main_window.spin_saliency_alpha))
-        _add_left_aligned_widget(lsal, _make_labeled_row("構図ガイド", main_window.combo_composition_guide))
+        _add_left_aligned_widget(
+            lsal, _make_labeled_row("重ね具合", main_window.spin_saliency_alpha)
+        )
+        _add_left_aligned_widget(
+            lsal, _make_labeled_row("構図ガイド", main_window.combo_composition_guide)
+        )
         lsal.addStretch(1)
         pages.addWidget(page_saliency)
 
         # --- フォーカスピーキングページ ---
         page_focus, lfocus = _create_settings_page()
         lfocus.addWidget(QLabel("フォーカスピーキングを調整します"))
-        _add_left_aligned_widget(lfocus, _make_labeled_row("感度", main_window.spin_focus_peak_sensitivity))
-        _add_left_aligned_widget(lfocus, _make_labeled_row("色", main_window.combo_focus_peak_color))
-        _add_left_aligned_widget(lfocus, _make_labeled_row("線幅", main_window.spin_focus_peak_thickness))
+        _add_left_aligned_widget(
+            lfocus, _make_labeled_row("感度", main_window.spin_focus_peak_sensitivity)
+        )
+        _add_left_aligned_widget(
+            lfocus, _make_labeled_row("色", main_window.combo_focus_peak_color)
+        )
+        _add_left_aligned_widget(
+            lfocus, _make_labeled_row("線幅", main_window.spin_focus_peak_thickness)
+        )
         lfocus.addStretch(1)
         pages.addWidget(page_focus)
 
@@ -345,8 +387,27 @@ def show_settings_window(main_window, page_index: int = 0):
         # --- レイアウトページ ---
         page_layout, ll = _create_settings_page()
         ll.addWidget(QLabel("現在の表示配置をプリセットとして保存できます"))
-        _add_left_aligned_widget(ll, _make_labeled_row("プリセット", main_window.combo_layout_presets))
-        _add_left_aligned_widget(ll, _make_labeled_row("新規名", main_window.edit_preset_name))
+        # 「プリセット」と「新規名」は同じ入力幅に固定して視線移動を減らす。
+        layout_field_width = max(
+            _preferred_field_width(main_window.combo_layout_presets),
+            _preferred_field_width(main_window.edit_preset_name),
+        )
+        _add_left_aligned_widget(
+            ll,
+            _make_labeled_row(
+                "プリセット",
+                main_window.combo_layout_presets,
+                field_width=layout_field_width,
+            ),
+        )
+        _add_left_aligned_widget(
+            ll,
+            _make_labeled_row(
+                "新規名",
+                main_window.edit_preset_name,
+                field_width=layout_field_width,
+            ),
+        )
         row_btn = QHBoxLayout()
         row_btn.setContentsMargins(0, 0, 0, 0)
         row_btn.addWidget(main_window.btn_load_preset)
@@ -359,7 +420,9 @@ def show_settings_window(main_window, page_index: int = 0):
         # --- RGBヒストグラムページ ---
         page_rgb_hist, lrgb = _create_settings_page()
         lrgb.addWidget(QLabel("R/G/Bヒストグラムの表示方式を切り替えます"))
-        _add_left_aligned_widget(lrgb, _make_labeled_row("表示方式", main_window.combo_rgb_hist_mode))
+        _add_left_aligned_widget(
+            lrgb, _make_labeled_row("表示方式", main_window.combo_rgb_hist_mode)
+        )
         lrgb.addStretch(1)
         pages.addWidget(page_rgb_hist)
 

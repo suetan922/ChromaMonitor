@@ -4,8 +4,8 @@ from ...util import constants as C
 from ...util.config import load_config, save_config
 from ...util.qt_helpers import (
     blocked_signals,
-    set_enabled_if,
     set_checked_blocked,
+    set_enabled_if,
     set_visible_if,
 )
 from .settings_values import (
@@ -41,6 +41,7 @@ _LEGACY_REMOVED_CONFIG_KEYS = (
     "graph_every",
     "preview_window",
 )
+
 
 def sync_mode_dependent_rows(main_window):
     """更新モードに応じて関連入力行の表示状態を切り替える。"""
@@ -100,9 +101,55 @@ def sync_color_band_controls(main_window):
     own_harmony_enabled = selected_color_band_harmony_guide_enabled(main_window)
     set_enabled_if(main_window.chk_color_band_harmony_guide, not use_wheel_harmony)
     set_enabled_if(
-        main_window.combo_color_band_harmony_guide,
-        (not use_wheel_harmony) and own_harmony_enabled
+        main_window.combo_color_band_harmony_guide, (not use_wheel_harmony) and own_harmony_enabled
     )
+
+
+def _apply_scatter_view_from_ui(main_window) -> None:
+    """散布図ビューへ現在UI値を反映する。"""
+    main_window.scatter.set_shape(selected_scatter_shape(main_window))
+    main_window.scatter.set_render_mode(selected_scatter_render_mode(main_window))
+    main_window.scatter.set_hue_filter(
+        selected_scatter_hue_filter_enabled(main_window),
+        selected_scatter_hue_center(main_window),
+    )
+    sync_scatter_filter_controls(main_window)
+
+
+def _invalidate_color_band_snapshot_cache(main_window) -> None:
+    """配色比率再計算が必要なスナップショット項目を無効化する。"""
+    snapshot = getattr(main_window, "_latest_result_snapshot", None)
+    if not isinstance(snapshot, dict):
+        return
+    for key in ("top_colors", "top_colors_full", "top_colors_filtered", "top_colors_key"):
+        snapshot[key] = None
+    main_window._latest_result_snapshot = snapshot
+
+
+def _refresh_color_band_related_views(main_window) -> None:
+    """配色比率関連ビューを現在設定で再同期する。"""
+    if hasattr(main_window, "_restore_dock_from_snapshot"):
+        main_window._restore_dock_from_snapshot(getattr(main_window, "dock_color_band", None))
+    if hasattr(main_window, "_on_color_chip_selected") and hasattr(main_window, "list_color_chips"):
+        main_window._on_color_chip_selected(int(main_window.list_color_chips.currentRow()))
+
+
+def _apply_composition_guide_to_views(main_window, guide: str) -> None:
+    """構図ガイド設定を関連ビューへ反映する。"""
+    main_window.saliency_view.set_composition_guide(guide)
+    main_window.preview_window.set_composition_guide(guide)
+
+
+def _apply_vectorscope_view_state(
+    main_window,
+    *,
+    show_skin_line: bool,
+    warn_threshold: int,
+) -> None:
+    """ベクトルスコープ表示設定をビューへ反映する。"""
+    main_window.vectorscope_view.set_show_skin_tone_line(bool(show_skin_line))
+    main_window.vectorscope_view.set_warn_threshold(int(warn_threshold))
+    update_vectorscope_warning_label(main_window)
 
 
 def apply_sample_points_settings(main_window, *_):
@@ -115,13 +162,7 @@ def apply_sample_points_settings(main_window, *_):
 def apply_scatter_settings(main_window, *_):
     """散布図表示設定をビューへ反映する。"""
     # 散布図の形状・表示モード・色相フィルター条件をまとめて反映。
-    main_window.scatter.set_shape(selected_scatter_shape(main_window))
-    main_window.scatter.set_render_mode(selected_scatter_render_mode(main_window))
-    main_window.scatter.set_hue_filter(
-        selected_scatter_hue_filter_enabled(main_window),
-        selected_scatter_hue_center(main_window),
-    )
-    sync_scatter_filter_controls(main_window)
+    _apply_scatter_view_from_ui(main_window)
     main_window._request_save_settings()
 
 
@@ -166,17 +207,8 @@ def apply_color_band_settings(main_window, *_args, save: bool = True):
     main_window.worker.set_color_band_sat_threshold(
         selected_effective_color_band_sat_threshold(main_window)
     )
-    snapshot = getattr(main_window, "_latest_result_snapshot", None)
-    if isinstance(snapshot, dict):
-        snapshot["top_colors"] = None
-        snapshot["top_colors_full"] = None
-        snapshot["top_colors_filtered"] = None
-        snapshot["top_colors_key"] = None
-        main_window._latest_result_snapshot = snapshot
-    if hasattr(main_window, "_restore_dock_from_snapshot"):
-        main_window._restore_dock_from_snapshot(getattr(main_window, "dock_color_band", None))
-    if hasattr(main_window, "_on_color_chip_selected") and hasattr(main_window, "list_color_chips"):
-        main_window._on_color_chip_selected(int(main_window.list_color_chips.currentRow()))
+    _invalidate_color_band_snapshot_cache(main_window)
+    _refresh_color_band_related_views(main_window)
     if save:
         main_window._request_save_settings()
 
@@ -221,8 +253,7 @@ def apply_composition_guide_settings(main_window, *_):
     """構図ガイド設定を関連ビューへ反映する。"""
     # サリエンシーとプレビューで同じ構図ガイドを使う。
     guide = selected_composition_guide(main_window)
-    main_window.saliency_view.set_composition_guide(guide)
-    main_window.preview_window.set_composition_guide(guide)
+    _apply_composition_guide_to_views(main_window, guide)
     main_window._request_save_settings()
 
 
@@ -267,13 +298,11 @@ def update_vectorscope_warning_label(main_window):
 
 def apply_vectorscope_settings(main_window, *_):
     """ベクトルスコープ設定を反映する。"""
-    main_window.vectorscope_view.set_show_skin_tone_line(
-        bool(main_window.chk_vectorscope_skin_line.isChecked())
+    _apply_vectorscope_view_state(
+        main_window,
+        show_skin_line=bool(main_window.chk_vectorscope_skin_line.isChecked()),
+        warn_threshold=int(main_window.spin_vectorscope_warn_threshold.value()),
     )
-    main_window.vectorscope_view.set_warn_threshold(
-        int(main_window.spin_vectorscope_warn_threshold.value())
-    )
-    update_vectorscope_warning_label(main_window)
     main_window._request_save_settings()
 
 
@@ -357,14 +386,7 @@ def _load_scatter_settings(main_window, cfg: dict) -> None:
         C.SCATTER_HUE_MAX,
     )
     _set_value_blocked(main_window.slider_scatter_hue_center, scatter_hue_center)
-    main_window.scatter.set_shape(selected_scatter_shape(main_window))
-    main_window.scatter.set_render_mode(selected_scatter_render_mode(main_window))
-    # フィルター状態は UI 側の現在値から再適用する。
-    main_window.scatter.set_hue_filter(
-        selected_scatter_hue_filter_enabled(main_window),
-        selected_scatter_hue_center(main_window),
-    )
-    sync_scatter_filter_controls(main_window)
+    _apply_scatter_view_from_ui(main_window)
 
 
 def _load_wheel_and_capture_settings(main_window, cfg: dict) -> None:
@@ -450,7 +472,9 @@ def _load_wheel_and_capture_settings(main_window, cfg: dict) -> None:
         C.CFG_COLOR_BAND_HARMONY_GUIDE_TYPE,
         C.DEFAULT_COLOR_BAND_HARMONY_GUIDE_TYPE,
     )
-    set_checked_blocked(main_window.chk_color_band_use_wheel_sat_threshold, color_band_use_wheel_sat)
+    set_checked_blocked(
+        main_window.chk_color_band_use_wheel_sat_threshold, color_band_use_wheel_sat
+    )
     _set_value_blocked(main_window.spin_color_band_sat_threshold, color_band_sat_threshold)
     set_checked_blocked(main_window.chk_color_band_use_wheel_harmony, color_band_use_wheel_harmony)
     set_checked_blocked(main_window.chk_color_band_harmony_guide, color_band_harmony_enabled)
@@ -479,9 +503,7 @@ def _load_composition_and_window_flags(main_window, cfg: dict) -> None:
         C.COMPOSITION_GUIDES,
         C.DEFAULT_COMPOSITION_GUIDE,
     )
-    composition_guide = selected_composition_guide(main_window)
-    main_window.saliency_view.set_composition_guide(composition_guide)
-    main_window.preview_window.set_composition_guide(composition_guide)
+    _apply_composition_guide_to_views(main_window, selected_composition_guide(main_window))
 
     # 領域プレビューは起動時の表示復元対象外にする（常に非表示開始）。
     set_checked_blocked(main_window.chk_preview_window, False)
@@ -622,9 +644,11 @@ def _load_vectorscope_settings(main_window, cfg: dict) -> None:
         C.VECTORSCOPE_WARN_THRESHOLD_MAX,
     )
     _set_value_blocked(main_window.spin_vectorscope_warn_threshold, warn_threshold)
-    main_window.vectorscope_view.set_show_skin_tone_line(show_skin_line)
-    main_window.vectorscope_view.set_warn_threshold(warn_threshold)
-    update_vectorscope_warning_label(main_window)
+    _apply_vectorscope_view_state(
+        main_window,
+        show_skin_line=show_skin_line,
+        warn_threshold=warn_threshold,
+    )
 
 
 def _finalize_loaded_settings(main_window, cfg: dict) -> None:

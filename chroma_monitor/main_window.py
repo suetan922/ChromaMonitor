@@ -117,6 +117,8 @@ class MainWindow(QMainWindow):
         self._settings_save_pending = False
         self._settings_load_in_progress = False
         self._startup_finished = False
+        # 同一画面構成時は起動直後の位置補正を抑止する。
+        self._startup_should_fit_window = True
         self._release_page_url = C.APP_RELEASES_URL
         self._update_check_started = False
         self._update_reply = None
@@ -475,6 +477,8 @@ class MainWindow(QMainWindow):
         self.btn_load_preset = QPushButton("適用")
         self.btn_delete_preset = QPushButton("削除")
         self._row_target_settings = None
+        self._row_pick_roi_win_settings = None
+        self._row_pick_roi_screen_settings = None
         self._row_analysis_max_dim_settings = None
         self._hint_analysis_max_dim_settings = None
         self._row_interval_settings = None
@@ -652,7 +656,8 @@ class MainWindow(QMainWindow):
         self.apply_analysis_resolution_settings(save=False)
         self.worker.set_wheel_sat_threshold(self.spin_wheel_sat_threshold.value())
         self.worker.set_graph_every(C.DEFAULT_GRAPH_EVERY)
-        QTimer.singleShot(0, self._finish_startup)
+        # 初回表示前に設定/レイアウトを反映して、表示後の位置ジャンプを避ける。
+        self._finish_startup()
 
     def _finish_startup(self):
         """設定ロード後の初期描画同期と自動処理開始を行う。"""
@@ -669,15 +674,15 @@ class MainWindow(QMainWindow):
         for dock in self._dock_map.values():
             self._on_dock_top_level_changed(dock, dock.isFloating())
         self._sync_tabbed_dock_title_bars()
-        self._fit_window_to_desktop()
         self.sync_window_menu_checks()
         self.update_placeholder()
         self._schedule_dock_rebalance()
         self._layout_autosave_enabled = True
         self._schedule_layout_autosave()
         self._start_release_check_once()
-        # 起動直後のレイアウト収束後に、画面外へのはみ出しを最終補正する。
-        QTimer.singleShot(260, self._fit_window_to_desktop)
+        # 構成差分時のみ、起動直後に最終補正する。
+        if bool(self._startup_should_fit_window):
+            QTimer.singleShot(260, self._fit_window_to_desktop)
 
     _setup_help_menu = mw_help.setup_help_menu
     _start_release_check_once = mw_help.start_release_check_once
@@ -704,7 +709,8 @@ class MainWindow(QMainWindow):
         super().showEvent(event)
         if not self._did_initial_screen_fit:
             self._did_initial_screen_fit = True
-            self._fit_window_to_desktop()
+            if bool(self._startup_should_fit_window):
+                self._fit_window_to_desktop()
 
     def event(self, event):
         """レイアウト・表示状態変化イベントに応じて同期処理を行う。"""
@@ -719,55 +725,95 @@ class MainWindow(QMainWindow):
             self._refresh_topmost_if_enabled()
         return super().event(event)
 
-    def eventFilter(self, obj, event):
-        """ドック/タブ/カラーバーの共通イベントを捕捉して処理する。"""
+    def _handle_top_colors_bar_resize_event(self, obj, event) -> bool:
+        """配色比率バーのリサイズイベントを処理したか返す。"""
         if obj is getattr(self, "top_colors_bar", None) and event.type() == QEvent.Resize:
             self._refresh_top_color_bar()
-            return super().eventFilter(obj, event)
+            return True
+        return False
+
+    def _handle_color_band_layout_event(self, obj, event) -> None:
+        """配色比率ドックの表示/サイズ変更イベントを処理する。"""
         if obj is getattr(self, "dock_color_band", None) and event.type() in (
             QEvent.Resize,
             QEvent.Show,
         ):
             self._update_color_band_compact_visibility()
+
+    def _remember_last_docked_size(self, dock) -> None:
+        """フロートでないドックの直近サイズを必要時のみ記録する。"""
+        if bool(dock.isFloating()):
+            return
+        size = dock.size()
+        if size.width() <= 0 or size.height() <= 0:
+            return
+        try:
+            is_tabbed = len(self.tabifiedDockWidgets(dock)) > 0
+        except Exception:
+            is_tabbed = False
+        # タブ内の非アクティブ状態では高さが極端に小さく見えることがあるため、
+        # その瞬間値は次回フロート基準へ学習しない。
+        if (not is_tabbed) or int(size.height()) >= 96:
+            dock._last_docked_size = (int(size.width()), int(size.height()))
+
+    @staticmethod
+    def _should_pause_for_dock_event(event_type, *, is_floating: bool) -> bool:
+        """ドックイベントで解析一時停止を入れるべきかを返す。"""
+        return bool(
+            event_type == QEvent.Resize
+            or (event_type in (QEvent.Move, QEvent.Show) and not bool(is_floating))
+        )
+
+    def _handle_floating_state_dock_event(self, dock, event_type) -> None:
+        """フローティング状態に応じたドックイベント処理を行う。"""
+        if not dock.isFloating():
+            self._schedule_dock_rebalance()
+            return
+        if event_type == QEvent.Move:
+            self._notify_floating_dock_moved(dock)
+            self._track_floating_dock_size(dock, from_move=True)
+            return
+        if event_type == QEvent.Resize:
+            self._track_floating_dock_size(dock, from_move=False)
+
+    def _maybe_restore_dock_snapshot_after_event(self, dock, event_type) -> None:
+        """表示/リサイズ後に必要ならドックスナップショットを復元する。"""
+        if event_type not in (QEvent.Show, QEvent.Resize):
+            return
+        # 初回表示直後にサイズが確定してからスナップショット復元できるようにする。
+        if not bool(getattr(self, "_layout_interaction_pause_active", False)):
+            self._restore_dock_from_snapshot(dock)
+
+    def _handle_dock_layout_event(self, dock, event_type) -> None:
+        """共通ドックレイアウトイベントを処理する。"""
+        self._remember_last_docked_size(dock)
+        is_floating = bool(dock.isFloating())
+        should_pause = self._should_pause_for_dock_event(event_type, is_floating=is_floating)
+        if should_pause:
+            self._begin_layout_interaction_pause("dock_layout")
+        self._update_floating_dock_dockability(dock)
+        self._handle_floating_state_dock_event(dock, event_type)
+        self._maybe_restore_dock_snapshot_after_event(dock, event_type)
+        if should_pause:
+            self._schedule_layout_interaction_resume("dock_layout")
+
+    def _is_managed_dock(self, obj) -> bool:
+        """イベント対象が管理中ドックか判定する。"""
+        return obj in getattr(self, "_dock_map", {}).values()
+
+    def eventFilter(self, obj, event):
+        """ドック/タブ/カラーバーの共通イベントを捕捉して処理する。"""
+        if self._handle_top_colors_bar_resize_event(obj, event):
+            return super().eventFilter(obj, event)
+        self._handle_color_band_layout_event(obj, event)
         if mw_tabs.is_dock_tab_bar(self, obj):
             if mw_tabs.handle_dock_tab_bar_event(self, obj, event):
                 return True
             return super().eventFilter(obj, event)
-        if obj in getattr(self, "_dock_map", {}).values():
-            if event.type() in (QEvent.Move, QEvent.Show, QEvent.Resize):
-                # ドック内再配置/リサイズ中のみ更新を一時停止し、操作後に自動再開する。
-                is_floating = bool(obj.isFloating())
-                if not is_floating:
-                    size = obj.size()
-                    if size.width() > 0 and size.height() > 0:
-                        try:
-                            is_tabbed = len(self.tabifiedDockWidgets(obj)) > 0
-                        except Exception:
-                            is_tabbed = False
-                        # タブ内の非アクティブ状態では高さが極端に小さく見えることがあるため、
-                        # その瞬間値は次回フロート基準へ学習しない。
-                        if (not is_tabbed) or int(size.height()) >= 96:
-                            obj._last_docked_size = (int(size.width()), int(size.height()))
-                should_pause = bool(
-                    event.type() == QEvent.Resize
-                    or (event.type() in (QEvent.Move, QEvent.Show) and not is_floating)
-                )
-                if should_pause:
-                    self._begin_layout_interaction_pause("dock_layout")
-                self._update_floating_dock_dockability(obj)
-                if not obj.isFloating():
-                    self._schedule_dock_rebalance()
-                elif event.type() == QEvent.Move:
-                    self._notify_floating_dock_moved(obj)
-                    self._track_floating_dock_size(obj, from_move=True)
-                elif event.type() == QEvent.Resize:
-                    self._track_floating_dock_size(obj, from_move=False)
-                if event.type() in (QEvent.Show, QEvent.Resize):
-                    # 初回表示直後にサイズが確定してからスナップショット復元できるようにする。
-                    if not bool(getattr(self, "_layout_interaction_pause_active", False)):
-                        self._restore_dock_from_snapshot(obj)
-                if should_pause:
-                    self._schedule_layout_interaction_resume("dock_layout")
+        if self._is_managed_dock(obj):
+            event_type = event.type()
+            if event_type in (QEvent.Move, QEvent.Show, QEvent.Resize):
+                self._handle_dock_layout_event(obj, event_type)
         return super().eventFilter(obj, event)
 
     def moveEvent(self, event):

@@ -4,6 +4,7 @@ from PySide6.QtCore import QRect, Qt, QTimer
 from PySide6.QtWidgets import QDockWidget, QWidget
 
 from ...capture.win32_windows import HAS_WIN32
+from ...util.debug_log import write_window_layout_debug_log
 from ...util.qt_helpers import blocked_signals
 
 _WIN_SWP_NOSIZE = 0x0001
@@ -51,6 +52,19 @@ def _dock_window_handle(dock: QDockWidget):
         return None
 
 
+def _widget_debug_name(widget: QWidget | None) -> str | None:
+    """ログ向けにウィジェット名を安全に取得する。"""
+    if widget is None:
+        return None
+    try:
+        name = str(widget.objectName())
+    except Exception:
+        name = ""
+    if name:
+        return name
+    return f"{type(widget).__name__}@{id(widget):x}"
+
+
 def is_always_on_top_enabled(main_window) -> bool:
     """常に最前面表示が有効かを返す。"""
     return bool(
@@ -88,6 +102,57 @@ def _set_native_window_topmost(widget: QWidget | None, enabled: bool) -> bool:
         return False
 
 
+def _native_topmost_state_matches(widget: QWidget | None, desired: bool) -> bool:
+    """直近で同一状態を同一HWNDへ適用済みか判定する。"""
+    if widget is None:
+        return False
+    try:
+        hwnd = int(widget.winId())
+    except Exception:
+        return False
+    if hwnd <= 0:
+        return False
+    cached_state = getattr(widget, "_native_topmost_applied_state", None)
+    cached_hwnd = int(getattr(widget, "_native_topmost_applied_hwnd", 0))
+    return (
+        (cached_state is not None) and bool(cached_state) == bool(desired) and cached_hwnd == hwnd
+    )
+
+
+def _set_native_window_topmost_if_needed(
+    widget: QWidget | None,
+    enabled: bool,
+    *,
+    force: bool = False,
+) -> bool:
+    """必要な場合のみネイティブ最前面APIを呼び出す。"""
+    if widget is None or not widget.isWindow() or not widget.isVisible():
+        return False
+    desired = bool(enabled)
+    if (not force) and _native_topmost_state_matches(widget, desired):
+        write_window_layout_debug_log(
+            "topmost_native_skip_cached",
+            widget=_widget_debug_name(widget),
+            desired=bool(desired),
+        )
+        return True
+    ok = _set_native_window_topmost(widget, desired)
+    if ok:
+        try:
+            widget._native_topmost_applied_state = desired
+            widget._native_topmost_applied_hwnd = int(widget.winId())
+        except Exception:
+            pass
+    write_window_layout_debug_log(
+        "topmost_native_apply",
+        widget=_widget_debug_name(widget),
+        desired=bool(desired),
+        force=bool(force),
+        ok=bool(ok),
+    )
+    return ok
+
+
 def _iter_top_level_targets_for_topmost(main_window):
     """最前面同期対象となるトップレベルウィジェットを列挙する。"""
     yield main_window
@@ -115,7 +180,7 @@ def _refresh_native_topmost_windows(main_window) -> None:
             continue
         seen.add(key)
         if widget.isVisible():
-            _set_native_window_topmost(widget, True)
+            _set_native_window_topmost_if_needed(widget, True, force=True)
 
 
 def schedule_widget_on_top_refresh(
@@ -127,9 +192,13 @@ def schedule_widget_on_top_refresh(
     """次イベントループ以降に対象ウィジェットの最前面状態を再同期する。"""
     if widget is None:
         return
+    seq = int(getattr(widget, "_on_top_refresh_seq", 0)) + 1
+    widget._on_top_refresh_seq = seq
 
-    def _apply() -> None:
+    def _apply(expected_seq: int = seq) -> None:
         if widget is None:
+            return
+        if int(getattr(widget, "_on_top_refresh_seq", 0)) != int(expected_seq):
             return
         try:
             desired = is_always_on_top_enabled(main_window)
@@ -142,11 +211,68 @@ def schedule_widget_on_top_refresh(
     QTimer.singleShot(max(0, int(delay_ms)), _apply)
 
 
-def schedule_dock_on_top_refresh(main_window, dock: QDockWidget | None, *, delay_ms: int = 0) -> None:
+def schedule_dock_on_top_refresh(
+    main_window, dock: QDockWidget | None, *, delay_ms: int = 0
+) -> None:
     """次イベントループ以降にフローティングドックの最前面状態を再同期する。"""
     if dock is None:
         return
     schedule_widget_on_top_refresh(main_window, dock, delay_ms=delay_ms)
+
+
+def _resolve_widget_window_handle(widget: QWidget):
+    """通常ウィンドウ/ドック差異を吸収して windowHandle を返す。"""
+    return _dock_window_handle(widget) if isinstance(widget, QDockWidget) else widget.windowHandle()
+
+
+def _read_on_top_flag_state(widget: QWidget) -> tuple[bool, bool, object]:
+    """ウィジェット本体と windowHandle の最前面フラグ状態を返す。"""
+    widget_flag = bool(widget.windowFlags() & Qt.WindowStaysOnTopHint)
+    win = _resolve_widget_window_handle(widget)
+    window_flag = bool(win.flags() & Qt.WindowStaysOnTopHint) if win is not None else widget_flag
+    return widget_flag, window_flag, win
+
+
+def _apply_qt_on_top_flags(
+    widget: QWidget,
+    *,
+    desired: bool,
+    widget_flag: bool,
+    window_flag: bool,
+    win,
+) -> None:
+    """Qt 側の最前面フラグ差分だけを適用する。"""
+    if widget_flag != desired:
+        widget.setWindowFlag(Qt.WindowStaysOnTopHint, desired)
+    if win is not None and window_flag != desired:
+        try:
+            win.setFlag(Qt.WindowStaysOnTopHint, desired)
+        except Exception:
+            pass
+
+
+def _restore_visibility_after_flag_change(
+    widget: QWidget,
+    *,
+    desired: bool,
+    was_active: bool,
+    saved_geometry: QRect,
+) -> None:
+    """WindowFlag 切替後の表示状態を復元する。"""
+    widget.show()
+    if (
+        widget.isWindow()
+        and saved_geometry.isValid()
+        and widget.geometry() != saved_geometry
+        and not isinstance(widget, QDockWidget)
+    ):
+        widget.setGeometry(saved_geometry)
+    if HAS_WIN32 and widget.isWindow():
+        _set_native_window_topmost_if_needed(widget, desired, force=True)
+    if desired or was_active:
+        widget.raise_()
+    if was_active:
+        widget.activateWindow()
 
 
 def set_widget_on_top(_main_window, widget: QWidget | None, enabled: bool) -> None:
@@ -154,46 +280,33 @@ def set_widget_on_top(_main_window, widget: QWidget | None, enabled: bool) -> No
     if widget is None:
         return
     desired = bool(enabled)
-    if HAS_WIN32 and isinstance(widget, QDockWidget) and widget.isFloating():
-        # フローティングドックで Qt の WindowFlag を頻繁に切り替えると、
-        # 混在DPI環境でサイズ再計算ループが起きやすいため native API を優先する。
-        if widget.isWindow() and widget.isVisible():
-            _set_native_window_topmost(widget, desired)
-            return
-    current_widget_flag = bool(widget.windowFlags() & Qt.WindowStaysOnTopHint)
-    win = _dock_window_handle(widget) if isinstance(widget, QDockWidget) else widget.windowHandle()
-    current_window_flag = (
-        bool(win.flags() & Qt.WindowStaysOnTopHint) if win is not None else current_widget_flag
-    )
-    if current_widget_flag == desired and current_window_flag == desired:
+    if HAS_WIN32 and widget.isWindow() and widget.isVisible():
+        # Windows では WindowFlag 切替で一瞬非表示になるため、可視トップレベルは
+        # ネイティブ API のみで最前面状態を切り替える。
+        _set_native_window_topmost_if_needed(widget, desired, force=False)
+        return
+    widget_flag, window_flag, win = _read_on_top_flag_state(widget)
+    if widget_flag == desired and window_flag == desired:
         if HAS_WIN32 and widget.isWindow() and widget.isVisible():
-            _set_native_window_topmost(widget, desired)
+            _set_native_window_topmost_if_needed(widget, desired, force=False)
         return
     was_visible = widget.isVisible()
     was_active = bool(widget.isActiveWindow())
     saved_geometry = QRect(widget.geometry()) if widget.isWindow() else QRect()
-    if current_widget_flag != desired:
-        widget.setWindowFlag(Qt.WindowStaysOnTopHint, desired)
-    if win is not None and current_window_flag != desired:
-        try:
-            win.setFlag(Qt.WindowStaysOnTopHint, desired)
-        except Exception:
-            pass
+    _apply_qt_on_top_flags(
+        widget,
+        desired=desired,
+        widget_flag=bool(widget_flag),
+        window_flag=bool(window_flag),
+        win=win,
+    )
     if was_visible:
-        widget.show()
-        if (
-            widget.isWindow()
-            and saved_geometry.isValid()
-            and widget.geometry() != saved_geometry
-            and not isinstance(widget, QDockWidget)
-        ):
-            widget.setGeometry(saved_geometry)
-        if HAS_WIN32 and widget.isWindow():
-            _set_native_window_topmost(widget, desired)
-        if desired or was_active:
-            widget.raise_()
-        if was_active:
-            widget.activateWindow()
+        _restore_visibility_after_flag_change(
+            widget,
+            desired=desired,
+            was_active=bool(was_active),
+            saved_geometry=saved_geometry,
+        )
 
 
 def sync_dock_on_top(main_window, dock: QDockWidget):
@@ -226,14 +339,25 @@ def refresh_topmost_if_enabled(main_window) -> None:
     _refresh_native_topmost_windows(main_window)
 
 
+def _sync_on_top_widgets_after_toggle(main_window, *, desired: bool) -> None:
+    """最前面切替後の全ウィンドウ状態を同期する。"""
+    sync_all_on_top_widgets(main_window)
+    if bool(desired):
+        _refresh_native_topmost_windows(main_window)
+
+
 def apply_always_on_top(main_window, checked: bool, save: bool = True):
     """常に最前面設定を切り替え、必要なら保存する。"""
     desired = bool(checked)
     current = is_always_on_top_enabled(main_window)
+    write_window_layout_debug_log(
+        "topmost_toggle_requested",
+        desired=bool(desired),
+        current=bool(current),
+        save=bool(save),
+    )
     if desired == current:
-        sync_all_on_top_widgets(main_window)
-        if desired:
-            _refresh_native_topmost_windows(main_window)
+        _sync_on_top_widgets_after_toggle(main_window, desired=desired)
         if save:
             main_window._request_save_settings()
         return
@@ -242,9 +366,7 @@ def apply_always_on_top(main_window, checked: bool, save: bool = True):
         main_window.act_always_on_top.setChecked(desired)
     if hasattr(main_window, "_dock_rebalance_timer"):
         main_window._dock_rebalance_timer.stop()
-    sync_all_on_top_widgets(main_window)
-    if desired:
-        _refresh_native_topmost_windows(main_window)
+    _sync_on_top_widgets_after_toggle(main_window, desired=desired)
     main_window._dock_geometry_snapshot = {}
     main_window._dock_rebalance_last_main_size = main_window.size()
     if save:

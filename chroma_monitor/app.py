@@ -71,9 +71,7 @@ def main() -> None:
     """アプリケーションを初期化し、メインウィンドウを起動する。"""
     # Qt6既定のPassThroughは混在DPI環境でWidgetsの描画/幾何が不安定になることがある。
     # 先にRoundを指定してQt5相当の丸めに寄せ、画面跨ぎ時の揺れを抑える。
-    QGuiApplication.setHighDpiScaleFactorRoundingPolicy(
-        Qt.HighDpiScaleFactorRoundingPolicy.Round
-    )
+    QGuiApplication.setHighDpiScaleFactorRoundingPolicy(Qt.HighDpiScaleFactorRoundingPolicy.Round)
     app = QApplication(sys.argv)
     app.setApplicationName(C.APP_NAME)
     app.setOrganizationName(C.APP_NAME)

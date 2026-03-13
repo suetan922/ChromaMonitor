@@ -1,8 +1,9 @@
 """配色比率ドックの描画と詳細UI更新を扱う補助処理。"""
 
+from functools import lru_cache
+
 import cv2
 import numpy as np
-from functools import lru_cache
 from PySide6.QtCore import QRect, QSize, Qt
 from PySide6.QtGui import QColor, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import (
@@ -19,10 +20,7 @@ from PySide6.QtWidgets import (
 from ...analysis.frame_analysis import compute_top_bars_chromatic_medoid
 from ...util import constants as C
 from ...util.image_ops import clamp_render_size
-from ...util.qt_helpers import (
-    is_widget_renderable,
-    set_visible_if_changed,
-)
+from ...util.qt_helpers import is_widget_renderable, set_visible_if_changed
 from .settings_values import (
     selected_color_band_harmony_guide_enabled,
     selected_color_band_harmony_guide_type,
@@ -98,9 +96,7 @@ def _is_visible_color_band_ratio(ratio: float) -> bool:
 def _filter_invisible_percent_bars(bars: list[tuple]) -> list[tuple]:
     """最小表示割合(%)未満の項目を除外する。"""
     return [
-        item
-        for item in bars
-        if _is_visible_color_band_ratio(_top_bar_item_ratio_color(item)[0])
+        item for item in bars if _is_visible_color_band_ratio(_top_bar_item_ratio_color(item)[0])
     ]
 
 
@@ -145,7 +141,9 @@ def render_top_color_bar(
                 painter.fillRect(QRect(x, 0, w, pm.height()), QColor(*color))
                 if show_text and w >= _TOP_BAR_TEXT_MIN_SEGMENT_PX:
                     pct = f"{ratio*100:.1f}%"
-                    painter.setPen(QColor(255, 255, 255) if sum(color) < 400 else QColor(40, 40, 40))
+                    painter.setPen(
+                        QColor(255, 255, 255) if sum(color) < 400 else QColor(40, 40, 40)
+                    )
                     painter.drawText(QRect(x + 2, 0, w - 4, pm.height()), Qt.AlignCenter, pct)
                 x += w
         painter.setPen(QPen(QColor(200, 200, 200), 1))
@@ -891,8 +889,7 @@ def _color_chip_entries_signature(main_window, entries) -> tuple:
     if sig is not None:
         return sig
     return tuple(
-        (str(e["hex"]), round(float(e["ratio"]), _COLOR_BAND_KEY_RATIO_DECIMALS))
-        for e in entries
+        (str(e["hex"]), round(float(e["ratio"]), _COLOR_BAND_KEY_RATIO_DECIMALS)) for e in entries
     )
 
 

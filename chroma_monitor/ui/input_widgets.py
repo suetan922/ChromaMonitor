@@ -2,8 +2,7 @@
 
 import time
 
-from PySide6.QtCore import QTimer, Qt
-from PySide6.QtCore import QEvent
+from PySide6.QtCore import QEvent, Qt, QTimer
 from PySide6.QtWidgets import QAbstractSpinBox, QComboBox, QLineEdit, QSpinBox
 
 

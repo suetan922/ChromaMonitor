@@ -3,10 +3,22 @@
 from typing import Optional
 
 import numpy as np
-from PySide6.QtCore import Qt, Signal
-from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
+from PySide6.QtCore import QSize, Qt, Signal
+from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
 from ..util.image_ops import bgr_to_qpixmap
+
+
+class _PreviewImageLabel(QLabel):
+    """領域プレビュー画像用ラベル。"""
+
+    def minimumSizeHint(self):
+        """画像サイズに引っ張られない最小ヒントを返す。"""
+        return QSize(0, 0)
+
+    def sizeHint(self):
+        """画像未表示時の標準ヒントを返す。"""
+        return QSize(320, 200)
 
 
 class PreviewWindow(QWidget):
@@ -22,9 +34,12 @@ class PreviewWindow(QWidget):
         self._last_bgr: Optional[np.ndarray] = None
         self._last_render_key: Optional[tuple[int, int, int]] = None
 
-        self.lbl = QLabel("領域プレビュー")
+        self.lbl = _PreviewImageLabel("領域プレビュー")
         self.lbl.setAlignment(Qt.AlignCenter)
         self.lbl.setStyleSheet("background:#111; border:1px solid #333; color:#AAA;")
+        # QLabel の pixmap sizeHint 肥大化でウィンドウ最小サイズが増えるのを防ぐ。
+        self.lbl.setMinimumSize(0, 0)
+        self.lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)

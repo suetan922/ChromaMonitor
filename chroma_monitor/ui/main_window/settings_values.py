@@ -2,12 +2,7 @@
 
 from ...util import constants as C
 from ...util.qt_helpers import blocked_signals
-from ...util.value_utils import (
-    clamp_float,
-    clamp_int,
-    safe_choice,
-    safe_int,
-)
+from ...util.value_utils import clamp_float, clamp_int, safe_choice, safe_int
 
 
 def _cfg_int(cfg: dict, key: str, default: int, low: int, high: int) -> int:
@@ -64,6 +59,16 @@ def _apply_combo_choice(combo, raw_value, allowed, default) -> None:
 def _selected_combo_data(combo, allowed, default):
     """コンボ選択値を許容値へ正規化して返す。"""
     return safe_choice(combo.currentData(), allowed, default)
+
+
+def _selected_checked(widget) -> bool:
+    """チェック系ウィジェットの選択状態を返す。"""
+    return bool(widget.isChecked())
+
+
+def _selected_int_in_range(widget, low: int, high: int) -> int:
+    """数値入力ウィジェット値を範囲内へ丸めて返す。"""
+    return clamp_int(int(widget.value()), int(low), int(high))
 
 
 def _collect_settings_payload(main_window) -> dict:
@@ -145,8 +150,8 @@ def selected_analysis_resolution_mode(main_window) -> str:
 
 def selected_analysis_max_dim(main_window) -> int:
     """解析最大辺(px)の入力値を範囲内で返す。"""
-    return clamp_int(
-        int(main_window.edit_analysis_max_dim.value()),
+    return _selected_int_in_range(
+        main_window.edit_analysis_max_dim,
         C.ANALYZER_MAX_DIM_MIN,
         C.ANALYZER_MAX_DIM_MAX,
     )
@@ -154,8 +159,8 @@ def selected_analysis_max_dim(main_window) -> int:
 
 def selected_wheel_sat_threshold(main_window) -> int:
     """色相環用彩度しきい値を範囲内で返す。"""
-    return clamp_int(
-        main_window.spin_wheel_sat_threshold.value(),
+    return _selected_int_in_range(
+        main_window.spin_wheel_sat_threshold,
         C.WHEEL_SAT_THRESHOLD_MIN,
         C.WHEEL_SAT_THRESHOLD_MAX,
     )
@@ -163,7 +168,7 @@ def selected_wheel_sat_threshold(main_window) -> int:
 
 def selected_wheel_harmony_guide_enabled(main_window) -> bool:
     """色相環の色彩調和ガイド表示状態を返す。"""
-    return bool(main_window.chk_wheel_harmony_guide.isChecked())
+    return _selected_checked(main_window.chk_wheel_harmony_guide)
 
 
 def selected_wheel_harmony_guide_type(main_window) -> str:
@@ -188,13 +193,13 @@ def selected_wheel_harmony_guide_rotation(main_window) -> float:
 
 def selected_color_band_use_wheel_sat_threshold(main_window) -> bool:
     """配色比率が色相環の彩度しきい値を共有するか返す。"""
-    return bool(main_window.chk_color_band_use_wheel_sat_threshold.isChecked())
+    return _selected_checked(main_window.chk_color_band_use_wheel_sat_threshold)
 
 
 def selected_color_band_sat_threshold(main_window) -> int:
     """配色比率専用の彩度しきい値を範囲内で返す。"""
-    return clamp_int(
-        main_window.spin_color_band_sat_threshold.value(),
+    return _selected_int_in_range(
+        main_window.spin_color_band_sat_threshold,
         C.WHEEL_SAT_THRESHOLD_MIN,
         C.WHEEL_SAT_THRESHOLD_MAX,
     )
@@ -210,12 +215,12 @@ def selected_effective_color_band_sat_threshold(main_window) -> int:
 
 def selected_color_band_use_wheel_harmony(main_window) -> bool:
     """配色比率が色相環の調和設定を共有するか返す。"""
-    return bool(main_window.chk_color_band_use_wheel_harmony.isChecked())
+    return _selected_checked(main_window.chk_color_band_use_wheel_harmony)
 
 
 def selected_color_band_harmony_guide_enabled(main_window) -> bool:
     """配色比率側の色彩調和ガイド表示状態を返す。"""
-    return bool(main_window.chk_color_band_harmony_guide.isChecked())
+    return _selected_checked(main_window.chk_color_band_harmony_guide)
 
 
 def selected_color_band_harmony_guide_type(main_window) -> str:
@@ -229,13 +234,13 @@ def selected_color_band_harmony_guide_type(main_window) -> str:
 
 def selected_scatter_hue_filter_enabled(main_window) -> bool:
     """散布図の色相フィルター有効状態を返す。"""
-    return bool(main_window.chk_scatter_hue_filter.isChecked())
+    return _selected_checked(main_window.chk_scatter_hue_filter)
 
 
 def selected_scatter_hue_center(main_window) -> int:
     """散布図フィルター中心色相を範囲内で返す。"""
-    return clamp_int(
-        main_window.slider_scatter_hue_center.value(),
+    return _selected_int_in_range(
+        main_window.slider_scatter_hue_center,
         C.SCATTER_HUE_MIN,
         C.SCATTER_HUE_MAX,
     )
@@ -302,4 +307,3 @@ def selected_squint_mode(main_window) -> str:
         C.SQUINT_MODES,
         C.DEFAULT_SQUINT_MODE,
     )
-

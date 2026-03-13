@@ -12,7 +12,7 @@ from typing import Any
 from . import constants as C
 from .config import config_path
 
-_LOGGER_NAME = "chroma_monitor.window_layout_debug"
+_LOGGER_NAME = "chroma_monitor.ui_debug"
 _LOGGER_CONFIG_LOCK = threading.Lock()
 _LOGGER_ANNOUNCED_PATHS: set[str] = set()
 
@@ -30,18 +30,22 @@ def _parse_env_bool(value: str | None) -> bool | None:
 
 def is_window_layout_debug_enabled() -> bool:
     """Return whether window_layout debug logging is enabled."""
-    env_value = _parse_env_bool(os.environ.get(C.DEBUG_WINDOW_LAYOUT_LOG_ENV))
+    env_value = _parse_env_bool(os.environ.get(C.DEBUG_UI_LOG_ENV))
+    if env_value is None:
+        env_value = _parse_env_bool(os.environ.get(C.DEBUG_WINDOW_LAYOUT_LOG_ENV))
     if env_value is not None:
         return bool(env_value)
-    return bool(C.DEBUG_WINDOW_LAYOUT_LOG_ENABLED)
+    return bool(C.DEBUG_UI_LOG_ENABLED)
 
 
 def window_layout_debug_log_path() -> Path:
     """Resolve the output path for window_layout debug logs."""
-    override = os.environ.get(C.DEBUG_WINDOW_LAYOUT_LOG_PATH_ENV)
+    override = os.environ.get(C.DEBUG_UI_LOG_PATH_ENV)
+    if not override:
+        override = os.environ.get(C.DEBUG_WINDOW_LAYOUT_LOG_PATH_ENV)
     if override:
         return Path(override).expanduser()
-    return config_path().parent / C.DEBUG_WINDOW_LAYOUT_LOG_FILE
+    return config_path().parent / C.DEBUG_UI_LOG_FILE
 
 
 def _format_field(value: Any) -> str:
@@ -69,8 +73,8 @@ def _configured_window_layout_logger() -> logging.Logger:
             handler = RotatingFileHandler(
                 abs_path,
                 mode="a",
-                maxBytes=int(C.DEBUG_WINDOW_LAYOUT_LOG_MAX_BYTES),
-                backupCount=int(C.DEBUG_WINDOW_LAYOUT_LOG_BACKUP_COUNT),
+                maxBytes=int(C.DEBUG_UI_LOG_MAX_BYTES),
+                backupCount=int(C.DEBUG_UI_LOG_BACKUP_COUNT),
                 encoding="utf-8",
             )
             handler.setLevel(logging.DEBUG)

@@ -11,9 +11,9 @@ from ...util import constants as C
 from ...util.qt_helpers import (
     blocked_signals,
     is_widget_renderable,
-    set_enabled_if,
     set_checked_blocked,
     set_current_index_blocked,
+    set_enabled_if,
     set_visible_if_changed,
 )
 from ...util.value_utils import safe_choice
@@ -28,6 +28,86 @@ _WORKER_VIEW_FLAGS_DISABLED = {
     "image": False,
     "preview": False,
 }
+
+
+def _safe_call(func, *args, **kwargs) -> bool:
+    """例外を握りつぶして関数を呼び、成功可否を返す。"""
+    try:
+        # 後始末での例外伝播を防ぐ。
+        func(*args, **kwargs)
+        return True
+    except Exception:
+        return False
+
+
+def _safe_is_visible(widget) -> bool:
+    """isVisible を安全に評価する。"""
+    if widget is None:
+        return False
+    try:
+        return bool(widget.isVisible())
+    except Exception:
+        return False
+
+
+def _find_combo_index_by_data(combo, data) -> int:
+    """コンボボックス内で data が一致する最初のインデックスを返す。"""
+    if data is None:
+        return -1
+    for idx in range(combo.count()):
+        if combo.itemData(idx) == data:
+            return int(idx)
+    return -1
+
+
+def _find_combo_index_by_text_casefold(combo, text: str) -> int:
+    """コンボボックス内で大文字小文字を無視して text を検索する。"""
+    needle = str(text).casefold()
+    if not needle:
+        return -1
+    for idx in range(combo.count()):
+        if combo.itemText(idx).casefold() == needle:
+            return int(idx)
+    return -1
+
+
+def _preserved_window_editor_text(combo, editor) -> str:
+    """ウィンドウ一覧更新前に保持すべき編集テキストを返す。"""
+    if editor is None:
+        return ""
+    if editor.hasFocus() or combo.hasFocus():
+        return str(editor.text())
+    return ""
+
+
+def _rebuild_window_combo_items(combo, wins: list[tuple[int, str]]) -> None:
+    """ウィンドウ候補一覧でコンボ項目を再構築する。"""
+    combo.clear()
+    for hwnd, title in wins[:_WINDOW_LIST_MAX_ITEMS]:
+        combo.addItem(title, hwnd)
+
+
+def _restore_window_combo_selection(combo, editor, *, prev_hwnd, preserved_text: str) -> int:
+    """更新後コンボへ選択状態と編集テキストを復元し、選択インデックスを返す。"""
+    selected_idx = _find_combo_index_by_data(combo, prev_hwnd)
+    combo.setCurrentIndex(int(selected_idx))
+    if editor is not None:
+        if preserved_text:
+            combo.setEditText(preserved_text)
+        elif selected_idx < 0:
+            combo.clearEditText()
+    return int(selected_idx)
+
+
+def _clear_window_selection(main_window, combo, editor, *, text_to_keep: str | None = None) -> None:
+    """現在のウィンドウ選択を解除し、必要に応じて入力文字列を維持する。"""
+    set_current_index_blocked(combo, -1)
+    if editor is not None:
+        if text_to_keep is None:
+            combo.clearEditText()
+        else:
+            editor.setText(str(text_to_keep))
+    on_window_changed(main_window, -1)
 
 
 def _set_worker_view_flags_if_changed(
@@ -66,12 +146,9 @@ def _safe_close_widget(widget, *, only_if_visible: bool = False) -> None:
     """例外を握りつぶして安全にウィジェットを閉じる。"""
     if widget is None:
         return
-    try:
-        if only_if_visible and not widget.isVisible():
-            return
-        widget.close()
-    except Exception:
-        pass
+    if only_if_visible and not _safe_is_visible(widget):
+        return
+    _safe_call(widget.close)
 
 
 def _is_window_capture_source(main_window) -> bool:
@@ -107,17 +184,18 @@ def cleanup_image_analysis(main_window):
     """画像解析用スレッド/ワーカー/進捗UIを後始末する。"""
     # 進捗ダイアログ／スレッド／ワーカー参照をまとめて解放する。
     if main_window._image_progress is not None:
-        try:
-            main_window._image_progress.close()
-        except Exception:
-            pass
+        # 進捗ダイアログは閉じるだけ。
+        _safe_call(main_window._image_progress.close)
         main_window._image_progress = None
     if main_window._image_thread is not None:
-        try:
+        # スレッド終了は quit -> wait の順で固定。
+        def _stop_image_thread() -> None:
+            # スレッド停止要求。
             main_window._image_thread.quit()
+            # 最大1.5秒だけ待つ。
             main_window._image_thread.wait(1500)
-        except Exception:
-            pass
+
+        _safe_call(_stop_image_thread)
     main_window._image_worker = None
     main_window._image_thread = None
     set_image_analysis_busy(main_window, False)
@@ -127,10 +205,7 @@ def cancel_image_analysis(main_window):
     """画像解析ワーカーへキャンセル要求を出す。"""
     # 実処理はワーカー側フラグで安全停止させる。
     if main_window._image_worker is not None:
-        try:
-            main_window._image_worker.request_cancel()
-        except Exception:
-            pass
+        _safe_call(main_window._image_worker.request_cancel)
 
 
 def on_load_image(main_window):
@@ -204,18 +279,14 @@ def on_image_analysis_finished(main_window, res: dict):
 
 def _restore_visible_docks_from_snapshot(main_window) -> None:
     """可視ドックを最新スナップショットで再描画する。"""
+    # 見えているドックだけ復元する。
     for dock in getattr(main_window, "_dock_map", {}).values():
         if dock is None:
             continue
-        try:
-            if not dock.isVisible():
-                continue
-        except Exception:
+        if not _safe_is_visible(dock):
             continue
-        try:
-            main_window._restore_dock_from_snapshot(dock)
-        except Exception:
-            pass
+        # 1ドックずつ安全に復元。
+        _safe_call(main_window._restore_dock_from_snapshot, dock)
 
 
 def _schedule_snapshot_restore(main_window, *delays_ms: int) -> None:
@@ -275,10 +346,8 @@ def close_event(main_window, event):
     main_window.worker.stop()
     _safe_close_widget(getattr(main_window, "preview_window", None), only_if_visible=True)
     _safe_close_widget(getattr(main_window, "_settings_window", None))
-    try:
-        main_window._close_roi_selectors()
-    except Exception:
-        pass
+    # ROI選択窓が残っていれば閉じる。
+    _safe_call(main_window._close_roi_selectors)
     QMainWindow.closeEvent(main_window, event)
 
 
@@ -289,25 +358,15 @@ def refresh_windows(main_window, announce: bool = True):
     editor = combo.lineEdit()
     wins = list_windows() if HAS_WIN32 else []
     prev_hwnd = combo.currentData()
-    preserved_text = ""
-    if editor is not None and (editor.hasFocus() or combo.hasFocus()):
-        preserved_text = editor.text()
+    preserved_text = _preserved_window_editor_text(combo, editor)
     with blocked_signals(combo):
-        combo.clear()
-        for hwnd, title in wins[: _WINDOW_LIST_MAX_ITEMS]:
-            combo.addItem(title, hwnd)
-        selected_idx = -1
-        if prev_hwnd is not None:
-            for i in range(combo.count()):
-                if combo.itemData(i) == prev_hwnd:
-                    selected_idx = i
-                    break
-        combo.setCurrentIndex(selected_idx)
-        if editor is not None:
-            if preserved_text:
-                combo.setEditText(preserved_text)
-            elif selected_idx < 0:
-                combo.clearEditText()
+        _rebuild_window_combo_items(combo, wins)
+        selected_idx = _restore_window_combo_selection(
+            combo,
+            editor,
+            prev_hwnd=prev_hwnd,
+            preserved_text=preserved_text,
+        )
     new_hwnd = combo.itemData(selected_idx) if selected_idx >= 0 else None
     if announce and not HAS_WIN32:
         on_status(main_window, "この環境ではウィンドウ選択は使えません（画面の領域選択を使用）")
@@ -325,12 +384,30 @@ def selected_capture_source(main_window) -> str:
     return safe_choice(source, C.CAPTURE_SOURCES, C.DEFAULT_CAPTURE_SOURCE)
 
 
+def _capture_source_row_widget(main_window, row_attr: str, fallback_widget):
+    """設定行ウィジェットがあれば優先し、無ければ本体ウィジェットを返す。"""
+    row = getattr(main_window, row_attr, None)
+    return row if row is not None else fallback_widget
+
+
 def sync_capture_source_ui(main_window):
     """取得元に応じて関連UIの表示/有効状態を切り替える。"""
     # 取得元に応じて、表示すべき操作ボタンと入力欄を切り替える。
     is_window = selected_capture_source(main_window) == C.CAPTURE_SOURCE_WINDOW
-    window_widgets = (main_window.btn_pick_roi_win,)
-    screen_widgets = (main_window.btn_pick_roi_screen,)
+    window_widgets = (
+        _capture_source_row_widget(
+            main_window,
+            "_row_pick_roi_win_settings",
+            main_window.btn_pick_roi_win,
+        ),
+    )
+    screen_widgets = (
+        _capture_source_row_widget(
+            main_window,
+            "_row_pick_roi_screen_settings",
+            main_window.btn_pick_roi_screen,
+        ),
+    )
 
     # 設定ダイアログ生成前はこれらのウィジェットが親なし(top-level)のため、
     # setVisible(True) を呼ぶと単独ウィンドウとして出てしまう。
@@ -425,25 +502,14 @@ def on_window_text_committed(main_window):
     text = combo.currentText().strip()
     if not text:
         if combo.currentData() is not None:
-            set_current_index_blocked(combo, -1)
-            if editor is not None:
-                combo.clearEditText()
-            on_window_changed(main_window, -1)
+            _clear_window_selection(main_window, combo, editor, text_to_keep=None)
         return
 
-    needle = text.casefold()
-    idx = -1
-    for i in range(combo.count()):
-        if combo.itemText(i).casefold() == needle:
-            idx = i
-            break
+    idx = _find_combo_index_by_text_casefold(combo, text)
 
     if idx < 0:
         if combo.currentData() is not None:
-            set_current_index_blocked(combo, -1)
-            if editor is not None:
-                editor.setText(text)
-            on_window_changed(main_window, -1)
+            _clear_window_selection(main_window, combo, editor, text_to_keep=text)
         return
 
     current_idx = int(combo.currentIndex())
@@ -461,8 +527,7 @@ def has_visible_image_dock(main_window) -> bool:
     # 画像系ドックが1つでも開いていれば image 処理を有効にする。
     targets = getattr(main_window, "_image_update_targets", ())
     return any(
-        is_widget_renderable(dock) and is_widget_renderable(dock.widget())
-        for dock, *_ in targets
+        is_widget_renderable(dock) and is_widget_renderable(dock.widget()) for dock, *_ in targets
     )
 
 
@@ -477,10 +542,7 @@ def sync_worker_view_flags(main_window):
         getattr(main_window, "dock_color_band", None) is not None
         and main_window.dock_color_band.isVisible()
     )
-    color_visible = bool(
-        main_window.dock_color.isVisible()
-        or color_band_visible
-    )
+    color_visible = bool(main_window.dock_color.isVisible() or color_band_visible)
     _set_worker_view_flags_if_changed(
         main_window,
         color=color_visible,

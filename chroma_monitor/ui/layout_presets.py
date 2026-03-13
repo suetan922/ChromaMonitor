@@ -5,7 +5,15 @@ from PySide6.QtWidgets import QMessageBox
 
 from ..util import constants as C
 from ..util.config import load_config, save_config
-from ..util.layout_state import apply_layout_state, capture_layout_state, restore_layout_geometry
+from ..util.debug_log import write_window_layout_debug_log
+from ..util.layout_state import (
+    apply_layout_state,
+    capture_layout_state,
+    is_layout_display_topology_unchanged,
+    restore_floating_dock_geometry,
+    restore_layout_geometry,
+    restore_layout_geometry_rect,
+)
 from ..util.qt_helpers import blocked_signals
 from ..util.value_utils import safe_int
 
@@ -31,6 +39,24 @@ def _load_cfg_with_presets() -> tuple[dict, dict]:
     return cfg, _layout_presets_map(cfg)
 
 
+def _capture_layout_with_debug(
+    main_window,
+    *,
+    event: str,
+    preset_name: str | None = None,
+) -> dict:
+    """現在レイアウトを取得し、保存前ログを記録して返す。"""
+    layout = capture_layout_state(main_window, main_window._dock_map)
+    fields = {
+        "has_display_topology": bool("display_topology" in layout),
+        "has_geometry_rect": bool("geometry_rect" in layout),
+    }
+    if preset_name is not None:
+        fields["preset_name"] = str(preset_name)
+    write_window_layout_debug_log(str(event), **fields)
+    return layout
+
+
 def _apply_layout_or_default(main_window, layout: dict) -> bool:
     """レイアウト適用を試し、失敗時は既定レイアウトへ戻す。"""
     restored = apply_layout_state(main_window, main_window._dock_map, layout)
@@ -39,6 +65,21 @@ def _apply_layout_or_default(main_window, layout: dict) -> bool:
         return False
     _after_layout_apply(main_window, applied_layout=layout)
     return True
+
+
+def _arm_hidden_anchor_docks_for_next_show(main_window) -> None:
+    """非表示中の優先アンカー付きドックを次回表示時に再アタッチさせる。"""
+    # 例: dock_hist / dock_rgb_hist
+    for dock in getattr(main_window, "_dock_map", {}).values():
+        if dock is None:
+            continue
+        anchor_name = str(getattr(dock, "_preferred_tab_anchor_name", "")).strip()
+        if not anchor_name:
+            continue
+        if dock.isVisible():
+            dock._attach_on_next_show = False
+            continue
+        dock._attach_on_next_show = True
 
 
 def _after_layout_apply(
@@ -50,13 +91,45 @@ def _after_layout_apply(
     """レイアウト適用後に必要なUI同期と保存予約を行う。"""
     main_window.sync_window_menu_checks()
     main_window.update_placeholder()
+    should_fit_window = True
     if applied_layout is not None:
         # 適用前の最小サイズ制約で geometry 復元が大きい方へ丸められることがある。
         # placeholder 同期後に現在の最小サイズで再適用し、保存済みの縮小サイズを戻す。
-        restore_layout_geometry(main_window, applied_layout)
+        restored_blob = restore_layout_geometry(main_window, applied_layout)
+        # モニター構成が保存時と同一なら、保存位置をそのまま優先する。
+        topology_unchanged = is_layout_display_topology_unchanged(applied_layout)
+        restored_rect = False
+        restored_floating_docks = 0
+        if topology_unchanged:
+            # restoreGeometry が安全補正で寄せる場合があるため、同構成時は明示矩形を優先する。
+            restored_rect = restore_layout_geometry_rect(main_window, applied_layout)
+            restored_floating_docks = restore_floating_dock_geometry(
+                main_window._dock_map,
+                applied_layout,
+            )
+        should_fit_window = not topology_unchanged
+        write_window_layout_debug_log(
+            "layout_apply_decision",
+            topology_unchanged=bool(topology_unchanged),
+            restored_blob=bool(restored_blob),
+            restored_rect=bool(restored_rect),
+            restored_floating_docks=int(restored_floating_docks),
+            should_fit_window=bool(should_fit_window),
+            window_geometry=(
+                int(main_window.geometry().x()),
+                int(main_window.geometry().y()),
+                int(main_window.geometry().width()),
+                int(main_window.geometry().height()),
+            ),
+        )
+    # 起動時の初回showEventで参照する。
+    main_window._startup_should_fit_window = bool(should_fit_window)
     if schedule_rebalance:
         main_window._schedule_dock_rebalance()
-    main_window._fit_window_to_desktop()
+    # 非表示のアンカー付きドックは、次回表示時に共通アタッチ経路を使う。
+    _arm_hidden_anchor_docks_for_next_show(main_window)
+    if should_fit_window:
+        main_window._fit_window_to_desktop()
     main_window._schedule_layout_autosave()
 
 
@@ -137,7 +210,8 @@ def save_current_layout_to_config(main_window, silent: bool = False) -> None:
     # 現在のドック配置を layout_current へ保存する。
     cfg = load_config()
     _stamp_layout_engine_version(cfg)
-    cfg[C.CFG_LAYOUT_CURRENT] = capture_layout_state(main_window, main_window._dock_map)
+    layout = _capture_layout_with_debug(main_window, event="layout_saved_current")
+    cfg[C.CFG_LAYOUT_CURRENT] = layout
     save_config(cfg)
     if not silent:
         main_window.on_status("現在の配置を保存しました")
@@ -230,7 +304,11 @@ def save_layout_preset(main_window) -> None:
         return
 
     cfg, presets = _load_cfg_with_presets()
-    presets[name] = capture_layout_state(main_window, main_window._dock_map)
+    presets[name] = _capture_layout_with_debug(
+        main_window,
+        event="layout_saved_preset",
+        preset_name=name,
+    )
     _stamp_layout_engine_version(cfg)
     cfg[C.CFG_LAYOUT_PRESETS] = presets
     cfg[C.CFG_LAYOUT_CURRENT] = presets[name]
