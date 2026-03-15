@@ -4,15 +4,9 @@ import cv2
 import numpy as np
 
 from ..util import constants as C
-from ..util.image_ops import (
-    cvt_color_cached,
-    gray_to_qpixmap,
-    resize_by_long_edge,
-)
-from ..util.value_utils import (
-    clamp_int,
-    safe_choice,
-)
+from ..util.image_ops import cvt_color_cached
+from ..util.qt_image import gray_to_qpixmap
+from ..util.value_utils import clamp_int, safe_choice
 from .base_image_view import BaseImageLabelView
 
 
@@ -33,6 +27,7 @@ class GrayscaleView(BaseImageLabelView):
         pm = gray_to_qpixmap(gray, max_w=self.width(), max_h=self.height())
         self.setPixmap(pm)
 
+
 class BinaryView(BaseImageLabelView):
     """2値化表示ビュー。"""
 
@@ -44,17 +39,14 @@ class BinaryView(BaseImageLabelView):
 
     def set_preset(self, preset: str):
         """2値化プリセットを更新する。"""
-        self._preset = safe_choice(preset, C.BINARY_PRESETS, C.DEFAULT_BINARY_PRESET)
-        if self._last_bgr is not None:
-            self.update_binary(self._last_bgr)
+        next_preset = safe_choice(preset, C.BINARY_PRESETS, C.DEFAULT_BINARY_PRESET)
+        self._set_state_value("_preset", next_preset, self.update_binary)
 
     def update_binary(self, bgr: np.ndarray):
         """入力フレームを2値化して表示する。"""
         if not self._set_last_bgr(bgr):
             return
         gray = cvt_color_cached(bgr, cv2.COLOR_BGR2GRAY)
-        # 固定上限で縮小して処理量を抑える（表示時に再スケールされる）。
-        gray = resize_by_long_edge(gray, C.ANALYZER_MAX_DIM)
 
         # Otsu を基準にプリセット分だけ閾値をシフトする。
         otsu_thr, _ = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
@@ -68,6 +60,7 @@ class BinaryView(BaseImageLabelView):
         pm = gray_to_qpixmap(binary, max_w=self.width(), max_h=self.height())
         self.setPixmap(pm)
 
+
 class TernaryView(BaseImageLabelView):
     """3値化表示ビュー。"""
 
@@ -79,20 +72,18 @@ class TernaryView(BaseImageLabelView):
 
     def set_preset(self, preset: str):
         """3値化プリセットを更新する。"""
-        self._preset = safe_choice(preset, C.TERNARY_PRESETS, C.DEFAULT_TERNARY_PRESET)
-        if self._last_bgr is not None:
-            self.update_ternary(self._last_bgr)
+        next_preset = safe_choice(preset, C.TERNARY_PRESETS, C.DEFAULT_TERNARY_PRESET)
+        self._set_state_value("_preset", next_preset, self.update_ternary)
 
     def update_ternary(self, bgr: np.ndarray):
         """入力フレームを3値化して表示する。"""
         if not self._set_last_bgr(bgr):
             return
         gray = cvt_color_cached(bgr, cv2.COLOR_BGR2GRAY)
-        # 3値化計算は縮小画像で実施し、リアルタイム性を維持する。
-        gray = resize_by_long_edge(gray, C.ANALYZER_MAX_DIM)
 
         # 輝度分布の分位点で 0/127/255 の3階調へ分割する。
-        flat = gray.reshape(-1).astype(np.float32)
+        # uint8 のまま扱って不要なメモリコピーを避ける。
+        flat = gray.reshape(-1)
         p1, p2 = 33.3, 66.6
         if self._preset == C.TERNARY_PRESET_SOFT:
             p1, p2 = 25.0, 75.0

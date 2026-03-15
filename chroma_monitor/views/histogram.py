@@ -25,6 +25,15 @@ _RGB_OVERLAY_TEXT_MAIN = QColor(238, 241, 246)
 _RGB_OVERLAY_MAX_BADGE_BG = QColor(12, 14, 18, 176)
 
 
+def _bucket_sum(hist: np.ndarray, bucket: int) -> np.ndarray:
+    """ヒストグラムを指定幅でバケット集約して返す。"""
+    arr = np.asarray(hist)
+    bucket = max(1, int(bucket))
+    if bucket <= 1 or arr.size % bucket != 0:
+        return arr
+    return arr.reshape(-1, bucket).sum(axis=1)
+
+
 def _fit_hist_size(hist: np.ndarray, size: int) -> np.ndarray:
     """ヒストグラム配列を指定ビン数へ切り詰め/ゼロ埋めする。"""
     arr = np.asarray(hist, dtype=np.int64).reshape(-1)
@@ -72,11 +81,7 @@ class ChannelHistogram(QWidget):
 
     def _bucketed_hist(self) -> np.ndarray:
         """描画用にバケット集約したヒストグラムを返す。"""
-        bins = self._hist
-        bucket = max(1, int(self._bucket))
-        if self._bins % bucket == 0:
-            return bins.reshape(-1, bucket).sum(axis=1)
-        return bins
+        return _bucket_sum(self._hist, self._bucket)
 
     def bucketed_max(self) -> int:
         """バケット化後ヒストグラムの最大値を返す。"""
@@ -132,7 +137,8 @@ class ChannelHistogram(QWidget):
         # 描画は毎回ヒストグラム配列から再生成する。
         p = QPainter(self)
         try:
-            p.setRenderHint(QPainter.Antialiasing, True)
+            # バー描画主体のため AA を切って描画負荷を抑える。
+            p.setRenderHint(QPainter.Antialiasing, False)
             p.fillRect(self.rect(), QColor(255, 255, 255, 255))
 
             title_rect = self.rect().adjusted(10, 6, -10, -6)
@@ -212,13 +218,55 @@ class RgbOverlayHistogram(QWidget):
         self._hist_b = np.zeros(256, dtype=np.int64)
         self._total = 0
         self._bucket = 2
+        self._x_vals_cache_key: tuple[int, int, int] | None = None
+        self._x_vals_cache: np.ndarray | None = None
 
     def _bucketed(self, hist: np.ndarray) -> np.ndarray:
         """描画負荷を抑えるためバケット集約した配列を返す。"""
-        bucket = max(1, int(self._bucket))
-        if hist.size % bucket != 0:
-            return hist
-        return hist.reshape(-1, bucket).sum(axis=1)
+        return _bucket_sum(hist, self._bucket)
+
+    def _cached_x_values(self, plot: QRect, n_bins: int) -> np.ndarray:
+        """プロット用 X 座標配列をキャッシュ付きで返す。"""
+        key = (int(plot.left()), int(plot.width()), int(n_bins))
+        if self._x_vals_cache_key == key and self._x_vals_cache is not None:
+            return self._x_vals_cache
+        x_step = plot.width() / float(max(1, n_bins - 1))
+        x_vals = np.arange(n_bins, dtype=np.float32) * float(x_step) + float(plot.left())
+        self._x_vals_cache_key = key
+        self._x_vals_cache = x_vals
+        return x_vals
+
+    @staticmethod
+    def _build_area_path(plot: QRect, x_vals: np.ndarray, y_vals: np.ndarray, n_bins: int) -> QPainterPath:
+        """Y列から塗りつぶし用の連続パスを構築する。"""
+        path = QPainterPath()
+        path.moveTo(float(plot.left()), float(plot.bottom()))
+        path.lineTo(float(x_vals[0]), float(y_vals[0]))
+        for i in range(1, n_bins):
+            path.lineTo(float(x_vals[i]), float(y_vals[i]))
+        path.lineTo(float(plot.right()), float(plot.bottom()))
+        path.closeSubpath()
+        return path
+
+    @staticmethod
+    def _draw_curve(
+        painter: QPainter,
+        *,
+        x_vals: np.ndarray,
+        y_vals: np.ndarray,
+        n_bins: int,
+        color: QColor,
+    ) -> None:
+        """折れ線カーブを描画する。"""
+        pen = QPen(color, 1.6)
+        painter.setPen(pen)
+        prev_x = int(round(float(x_vals[0])))
+        prev_y = int(round(float(y_vals[0])))
+        for i in range(1, n_bins):
+            x = int(round(float(x_vals[i])))
+            y = int(round(float(y_vals[i])))
+            painter.drawLine(prev_x, prev_y, x, y)
+            prev_x, prev_y = x, y
 
     def update_from_histograms(self, hist_r: np.ndarray, hist_g: np.ndarray, hist_b: np.ndarray):
         """RGB各ヒストグラムを反映して表示を更新する。"""
@@ -272,46 +320,30 @@ class RgbOverlayHistogram(QWidget):
             n_bins = int(h_r.size)
             if n_bins <= 1:
                 return
-            x_step = plot.width() / float(n_bins - 1)
+            x_vals = self._cached_x_values(plot, n_bins)
             plot_h = max(1, plot.height() - 1)
             # 縦筋アーティファクトを避けるため、ビン矩形ではなく連続パスで塗る。
-            x_vals = np.arange(n_bins, dtype=np.float32) * float(x_step) + float(plot.left())
-            y_r = plot.bottom() - np.clip((h_r.astype(np.float32) / float(max_y)) * plot_h, 0, plot_h)
-            y_g = plot.bottom() - np.clip((h_g.astype(np.float32) / float(max_y)) * plot_h, 0, plot_h)
-            y_b = plot.bottom() - np.clip((h_b.astype(np.float32) / float(max_y)) * plot_h, 0, plot_h)
+            y_r = plot.bottom() - np.clip(
+                (h_r.astype(np.float32) / float(max_y)) * plot_h, 0, plot_h
+            )
+            y_g = plot.bottom() - np.clip(
+                (h_g.astype(np.float32) / float(max_y)) * plot_h, 0, plot_h
+            )
+            y_b = plot.bottom() - np.clip(
+                (h_b.astype(np.float32) / float(max_y)) * plot_h, 0, plot_h
+            )
             h_overlap = np.minimum(np.minimum(h_r, h_g), h_b).astype(np.float32)
             y_overlap = plot.bottom() - np.clip((h_overlap / float(max_y)) * plot_h, 0, plot_h)
 
-            def _build_area_path(y_vals: np.ndarray) -> QPainterPath:
-                path = QPainterPath()
-                path.moveTo(float(plot.left()), float(plot.bottom()))
-                path.lineTo(float(x_vals[0]), float(y_vals[0]))
-                for i in range(1, n_bins):
-                    path.lineTo(float(x_vals[i]), float(y_vals[i]))
-                path.lineTo(float(plot.right()), float(plot.bottom()))
-                path.closeSubpath()
-                return path
-
             p.setPen(Qt.NoPen)
             p.setBrush(_RGB_OVERLAY_R_FILL)
-            p.drawPath(_build_area_path(y_r))
+            p.drawPath(self._build_area_path(plot, x_vals, y_r, n_bins))
             p.setBrush(_RGB_OVERLAY_G_FILL)
-            p.drawPath(_build_area_path(y_g))
+            p.drawPath(self._build_area_path(plot, x_vals, y_g, n_bins))
             p.setBrush(_RGB_OVERLAY_B_FILL)
-            p.drawPath(_build_area_path(y_b))
+            p.drawPath(self._build_area_path(plot, x_vals, y_b, n_bins))
             p.setBrush(_RGB_OVERLAY_RGB_OVERLAP_FILL)
-            p.drawPath(_build_area_path(y_overlap))
-
-            def _draw_curve(y_vals: np.ndarray, color: QColor):
-                pen = QPen(color, 1.6)
-                p.setPen(pen)
-                prev_x = int(round(float(x_vals[0])))
-                prev_y = int(round(float(y_vals[0])))
-                for i in range(1, n_bins):
-                    x = int(round(float(x_vals[i])))
-                    y = int(round(float(y_vals[i])))
-                    p.drawLine(prev_x, prev_y, x, y)
-                    prev_x, prev_y = x, y
+            p.drawPath(self._build_area_path(plot, x_vals, y_overlap, n_bins))
 
             color_r = QColor(_R_COLOR)
             color_r.setAlpha(210)
@@ -319,9 +351,9 @@ class RgbOverlayHistogram(QWidget):
             color_g.setAlpha(210)
             color_b = QColor(_B_COLOR)
             color_b.setAlpha(210)
-            _draw_curve(y_r, color_r)
-            _draw_curve(y_g, color_g)
-            _draw_curve(y_b, color_b)
+            self._draw_curve(p, x_vals=x_vals, y_vals=y_r, n_bins=n_bins, color=color_r)
+            self._draw_curve(p, x_vals=x_vals, y_vals=y_g, n_bins=n_bins, color=color_g)
+            self._draw_curve(p, x_vals=x_vals, y_vals=y_b, n_bins=n_bins, color=color_b)
 
             axis_rect = QRect(plot.left(), plot.bottom() + 4, plot.width(), 14)
             p.setPen(QColor(30, 30, 30))
@@ -369,6 +401,8 @@ class RgbHistogramWidget(QWidget):
     def set_display_mode(self, mode: str):
         """表示モードを切り替える。"""
         normalized = safe_choice(mode, C.RGB_HIST_MODES, C.DEFAULT_RGB_HIST_MODE)
+        if self._display_mode == normalized:
+            return
         self._display_mode = normalized
         self._stack.setCurrentIndex(1 if normalized == C.RGB_HIST_MODE_OVERLAY else 0)
 

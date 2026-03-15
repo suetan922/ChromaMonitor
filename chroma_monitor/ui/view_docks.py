@@ -24,6 +24,7 @@ from ..views.color_scatter import ColorWheelWidget, ScatterRasterWidget
 from ..views.edge_view import EdgeView
 from ..views.focus_peaking_view import FocusPeakingView
 from ..views.histogram import ChannelHistogram, RgbHistogramWidget
+from ..views.mirror_view import MirrorView
 from ..views.saliency_view import SaliencyView
 from ..views.squint_view import SquintView
 from ..views.tonal_views import BinaryView, GrayscaleView, TernaryView
@@ -33,6 +34,24 @@ _H_COLOR = QColor(220, 90, 90)
 _S_COLOR = QColor(90, 170, 90)
 _V_COLOR = QColor(80, 140, 240)
 _COLOR_BAND_WARMCOOL_BOTTOM_SPACING = 6
+_SINGLE_VIEW_DOCK_SPECS = (
+    # (dock_name, view_attr, view_factory, title, update_method, initial_height)
+    ("dock_edge", "edge_view", EdgeView, "エッジ検出", "update_edge", 190),
+    ("dock_gray", "gray_view", GrayscaleView, "グレースケール", "update_gray", 170),
+    ("dock_mirror", "mirror_view", MirrorView, "反転表示", "update_mirror", 170),
+    ("dock_binary", "binary_view", BinaryView, "2値化", "update_binary", 160),
+    ("dock_ternary", "ternary_view", TernaryView, "3値化", "update_ternary", 170),
+    ("dock_saliency", "saliency_view", SaliencyView, "サリエンシーマップ", "update_saliency", 170),
+    (
+        "dock_focus",
+        "focus_peaking_view",
+        FocusPeakingView,
+        "フォーカスピーキング",
+        "update_focus",
+        170,
+    ),
+    ("dock_squint", "squint_view", SquintView, "スクイント表示", "update_squint", 160),
+)
 
 
 class UniformMinDockWidget(QDockWidget):
@@ -59,6 +78,15 @@ def _build_single_view_container(view: QWidget) -> QWidget:
     layout.setContentsMargins(6, 6, 6, 6)
     layout.addWidget(view, 1)
     return container
+
+
+def _create_info_label(text: str) -> QLabel:
+    """配色詳細欄で使う共通スタイルの説明ラベルを作る。"""
+    label = QLabel(text)
+    label.setStyleSheet("color:#111; font-size:12px;")
+    label.setWordWrap(True)
+    label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+    return label
 
 
 def _create_dock(
@@ -203,6 +231,7 @@ def setup_view_docks(main_window) -> None:
 
     main_window._last_top_bars = []
     main_window._top_bar_render_key = None
+    main_window._last_top_bars_key = None
     main_window._color_detail_has_selection = False
     main_window._color_detail_merge_complement = False
     main_window._color_detail_show_info = True
@@ -245,10 +274,7 @@ def setup_view_docks(main_window) -> None:
     main_window.lbl_color_detail_info.setWordWrap(True)
     main_window.lbl_color_detail_info.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-    main_window.lbl_color_harmony_info = QLabel("色彩調和")
-    main_window.lbl_color_harmony_info.setStyleSheet("color:#111; font-size:12px;")
-    main_window.lbl_color_harmony_info.setWordWrap(True)
-    main_window.lbl_color_harmony_info.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+    main_window.lbl_color_harmony_info = _create_info_label("色彩調和")
 
     main_window.color_harmony_preview = QWidget()
     main_window.color_harmony_preview_layout = QHBoxLayout(main_window.color_harmony_preview)
@@ -256,10 +282,7 @@ def setup_view_docks(main_window) -> None:
     main_window.color_harmony_preview_layout.setSpacing(6)
     main_window.color_harmony_preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-    main_window.lbl_color_complement_info = QLabel("補色")
-    main_window.lbl_color_complement_info.setStyleSheet("color:#111; font-size:12px;")
-    main_window.lbl_color_complement_info.setWordWrap(True)
-    main_window.lbl_color_complement_info.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+    main_window.lbl_color_complement_info = _create_info_label("補色")
 
     main_window.color_complement_preview = QWidget()
     main_window.color_complement_preview_layout = QHBoxLayout(main_window.color_complement_preview)
@@ -267,10 +290,7 @@ def setup_view_docks(main_window) -> None:
     main_window.color_complement_preview_layout.setSpacing(6)
     main_window.color_complement_preview.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-    main_window.lbl_color_methods_info = QLabel("配色手法")
-    main_window.lbl_color_methods_info.setStyleSheet("color:#111; font-size:12px;")
-    main_window.lbl_color_methods_info.setWordWrap(True)
-    main_window.lbl_color_methods_info.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+    main_window.lbl_color_methods_info = _create_info_label("配色手法")
 
     main_window.color_methods_preview = QWidget()
     main_window.color_methods_preview_layout = QVBoxLayout(main_window.color_methods_preview)
@@ -416,35 +436,27 @@ def setup_view_docks(main_window) -> None:
     # RGBヒストグラムも色相環グループへ合流する。
     rgb_hist_dock._preferred_tab_anchor_name = "dock_color"
 
-    main_window.edge_view = EdgeView()
-    edge_container = _build_single_view_container(main_window.edge_view)
-    edge_dock = _create_dock(main_window, "エッジ検出", "dock_edge", edge_container)
+    def _init_single_view_dock(
+        view_attr: str, view_factory: type[QWidget], *, title: str, object_name: str
+    ) -> QDockWidget:
+        """単一ビュー本体生成とドック生成をまとめて行う。"""
+        view = view_factory()
+        setattr(main_window, view_attr, view)
+        return _create_dock(
+            main_window,
+            title,
+            object_name,
+            _build_single_view_container(view),
+        )
 
-    main_window.gray_view = GrayscaleView()
-    gray_container = _build_single_view_container(main_window.gray_view)
-    gray_dock = _create_dock(main_window, "グレースケール", "dock_gray", gray_container)
-
-    main_window.binary_view = BinaryView()
-    binary_container = _build_single_view_container(main_window.binary_view)
-    binary_dock = _create_dock(main_window, "2値化", "dock_binary", binary_container)
-
-    main_window.ternary_view = TernaryView()
-    ternary_container = _build_single_view_container(main_window.ternary_view)
-    ternary_dock = _create_dock(main_window, "3値化", "dock_ternary", ternary_container)
-
-    main_window.saliency_view = SaliencyView()
-    saliency_container = _build_single_view_container(main_window.saliency_view)
-    saliency_dock = _create_dock(
-        main_window, "サリエンシーマップ", "dock_saliency", saliency_container
-    )
-
-    main_window.focus_peaking_view = FocusPeakingView()
-    focus_container = _build_single_view_container(main_window.focus_peaking_view)
-    focus_dock = _create_dock(main_window, "フォーカスピーキング", "dock_focus", focus_container)
-
-    main_window.squint_view = SquintView()
-    squint_container = _build_single_view_container(main_window.squint_view)
-    squint_dock = _create_dock(main_window, "スクイント表示", "dock_squint", squint_container)
+    single_view_docks: dict[str, QDockWidget] = {}
+    for dock_name, view_attr, view_factory, title, _update_method, _height in _SINGLE_VIEW_DOCK_SPECS:
+        single_view_docks[dock_name] = _init_single_view_dock(
+            view_attr,
+            view_factory,
+            title=title,
+            object_name=dock_name,
+        )
 
     main_window.vectorscope_view = VectorScopeView()
     vectorscope_container = QWidget()
@@ -488,41 +500,46 @@ def setup_view_docks(main_window) -> None:
     main_window.setCentralWidget(central)
     main_window.central_container = central
 
-    _register_docks(
-        main_window,
-        [
-            ("dock_color", color_dock, Qt.LeftDockWidgetArea),
-            ("dock_color_band", color_band_dock, Qt.LeftDockWidgetArea),
-            ("dock_scatter", scatter_dock, Qt.RightDockWidgetArea),
-            ("dock_hist", hist_dock, Qt.LeftDockWidgetArea),
-            ("dock_rgb_hist", rgb_hist_dock, Qt.LeftDockWidgetArea),
-            ("dock_edge", edge_dock, Qt.RightDockWidgetArea),
-            ("dock_gray", gray_dock, Qt.RightDockWidgetArea),
-            ("dock_binary", binary_dock, Qt.RightDockWidgetArea),
-            ("dock_ternary", ternary_dock, Qt.RightDockWidgetArea),
-            ("dock_saliency", saliency_dock, Qt.RightDockWidgetArea),
-            ("dock_focus", focus_dock, Qt.RightDockWidgetArea),
-            ("dock_squint", squint_dock, Qt.RightDockWidgetArea),
-            ("dock_vectorscope", vectorscope_dock, Qt.RightDockWidgetArea),
-        ],
+    dock_specs = [
+        ("dock_color", color_dock, Qt.LeftDockWidgetArea),
+        ("dock_color_band", color_band_dock, Qt.LeftDockWidgetArea),
+        ("dock_scatter", scatter_dock, Qt.RightDockWidgetArea),
+        ("dock_hist", hist_dock, Qt.LeftDockWidgetArea),
+        ("dock_rgb_hist", rgb_hist_dock, Qt.LeftDockWidgetArea),
+    ]
+    dock_specs.extend(
+        (dock_name, single_view_docks[dock_name], Qt.RightDockWidgetArea)
+        for dock_name, *_rest in _SINGLE_VIEW_DOCK_SPECS
     )
+    dock_specs.append(("dock_vectorscope", vectorscope_dock, Qt.RightDockWidgetArea))
+    _register_docks(main_window, dock_specs)
     main_window._dock_actions = _build_dock_actions(main_window)
     # 画像入力を必要とするビューの更新ルールを一元管理する。
-    main_window._image_update_targets = [
-        (main_window.dock_edge, main_window.edge_view.update_edge, None),
-        (main_window.dock_gray, main_window.gray_view.update_gray, None),
-        (main_window.dock_binary, main_window.binary_view.update_binary, None),
-        (main_window.dock_ternary, main_window.ternary_view.update_ternary, None),
+    single_updates = {
+        dock_name: (
+            single_view_docks[dock_name],
+            getattr(getattr(main_window, view_attr), update_method),
+            None,
+        )
+        for dock_name, view_attr, _view_factory, _title, update_method, _height in _SINGLE_VIEW_DOCK_SPECS
+    }
+    image_update_targets = [
+        single_updates["dock_edge"],
+        single_updates["dock_gray"],
+        single_updates["dock_mirror"],
+        single_updates["dock_binary"],
+        single_updates["dock_ternary"],
         (main_window.dock_rgb_hist, main_window.rgb_hist_view.update_from_bgr, None),
-        (main_window.dock_saliency, main_window.saliency_view.update_saliency, None),
-        (main_window.dock_focus, main_window.focus_peaking_view.update_focus, None),
-        (main_window.dock_squint, main_window.squint_view.update_squint, None),
+        single_updates["dock_saliency"],
+        single_updates["dock_focus"],
+        single_updates["dock_squint"],
         (
             main_window.dock_vectorscope,
             main_window.vectorscope_view.update_scope,
             main_window._update_vectorscope_warning_label,
         ),
     ]
+    main_window._image_update_targets = image_update_targets
 
     for d in main_window._dock_map.values():
         _configure_view_dock(main_window, d)
@@ -536,29 +553,20 @@ def setup_view_docks(main_window) -> None:
     main_window.tabifyDockWidget(color_dock, rgb_hist_dock)
     color_dock.raise_()
     main_window.addDockWidget(Qt.RightDockWidgetArea, scatter_dock)
-    main_window.splitDockWidget(scatter_dock, edge_dock, Qt.Vertical)
-    main_window.splitDockWidget(edge_dock, gray_dock, Qt.Vertical)
-    main_window.splitDockWidget(gray_dock, binary_dock, Qt.Vertical)
-    main_window.splitDockWidget(binary_dock, ternary_dock, Qt.Vertical)
-    main_window.splitDockWidget(ternary_dock, saliency_dock, Qt.Vertical)
-    main_window.splitDockWidget(saliency_dock, focus_dock, Qt.Vertical)
-    main_window.splitDockWidget(focus_dock, squint_dock, Qt.Vertical)
-    main_window.splitDockWidget(squint_dock, vectorscope_dock, Qt.Vertical)
-    main_window.resizeDocks([color_dock, scatter_dock, edge_dock], [700, 700, 700], Qt.Horizontal)
+    right_chain = [single_view_docks[dock_name] for dock_name, *_rest in _SINGLE_VIEW_DOCK_SPECS]
+    right_chain.append(vectorscope_dock)
+    prev = scatter_dock
+    for dock in right_chain:
+        main_window.splitDockWidget(prev, dock, Qt.Vertical)
+        prev = dock
     main_window.resizeDocks(
-        [
-            scatter_dock,
-            edge_dock,
-            gray_dock,
-            binary_dock,
-            ternary_dock,
-            saliency_dock,
-            focus_dock,
-            squint_dock,
-            vectorscope_dock,
-        ],
-        [280, 200, 180, 170, 160, 180, 170, 170, 170],
-        Qt.Vertical,
+        [color_dock, scatter_dock, right_chain[0]],
+        [700, 700, 700],
+        Qt.Horizontal,
     )
+    vertical_sizes = [280]
+    vertical_sizes.extend(height for *_head, height in _SINGLE_VIEW_DOCK_SPECS)
+    vertical_sizes.append(160)  # vectorscope
+    main_window.resizeDocks([scatter_dock, *right_chain], vertical_sizes, Qt.Vertical)
     _detach_initially_hidden_docks(main_window)
     main_window._sync_tabbed_dock_title_bars()

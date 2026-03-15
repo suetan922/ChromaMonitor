@@ -3,6 +3,8 @@ from typing import Any, Dict
 from PySide6.QtCore import QByteArray
 from PySide6.QtGui import QGuiApplication
 
+from .qt_helpers import dict_to_rect, rect_to_dict
+
 #: 保存時のキー名: ウィンドウジオメトリ。
 _KEY_GEOMETRY = "geometry"
 #: 保存時のキー名: ドック配置状態。
@@ -49,6 +51,9 @@ def _apply_visible_docks(docks: Dict[str, Any], visible: Any) -> bool:
 
 def _capture_window_geometry_rect(window) -> dict[str, int]:
     """ウィンドウ geometry を単純矩形として取得する。"""
+    rect = rect_to_dict(window.geometry())
+    if rect is not None:
+        return rect
     geom = window.geometry()
     return {
         "x": int(geom.x()),
@@ -60,18 +65,10 @@ def _capture_window_geometry_rect(window) -> dict[str, int]:
 
 def _normalize_geometry_rect(raw: Any) -> tuple[int, int, int, int] | None:
     """保存済み geometry_rect を検証済みタプルへ変換する。"""
-    if not isinstance(raw, dict):
+    rect = dict_to_rect(raw)
+    if rect is None:
         return None
-    try:
-        x = int(raw.get("x", 0))
-        y = int(raw.get("y", 0))
-        w = int(raw.get("w", 0))
-        h = int(raw.get("h", 0))
-    except Exception:
-        return None
-    if w <= 0 or h <= 0:
-        return None
-    return (x, y, w, h)
+    return (int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height()))
 
 
 def _capture_floating_dock_geometry(docks: Dict[str, Any]) -> dict[str, dict[str, int]]:
@@ -84,14 +81,9 @@ def _capture_floating_dock_geometry(docks: Dict[str, Any]) -> dict[str, dict[str
             geom = dock.geometry()
         except Exception:
             continue
-        if geom.width() <= 0 or geom.height() <= 0:
-            continue
-        out[str(name)] = {
-            "x": int(geom.x()),
-            "y": int(geom.y()),
-            "w": int(geom.width()),
-            "h": int(geom.height()),
-        }
+        rect = rect_to_dict(geom)
+        if rect is not None:
+            out[str(name)] = rect
     return out
 
 

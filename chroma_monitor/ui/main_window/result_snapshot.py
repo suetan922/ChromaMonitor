@@ -5,11 +5,11 @@ import numpy as np
 
 from ...analysis.frame_analysis import (
     _compute_hsv_histograms,
-    _compute_wheel_stats,
+    _compute_wheel_stats_from_hs,
     _prepare_hsv8_and_bgr8,
     _sample_sv_and_rgb,
+    compute_top_bars_chromatic_medoid,
 )
-from ...util import constants as C
 from ...util.image_ops import (
     clear_cvt_color_cache,
     clear_resize_cache,
@@ -19,7 +19,6 @@ from ...util.image_ops import (
 from ...util.qt_helpers import is_widget_renderable
 from .result_color_band import (
     _color_band_sat_threshold_from_ui,
-    _top_bars_chromatic_medoid,
     render_color_band_dock_from_snapshot,
 )
 
@@ -255,6 +254,17 @@ def _ensure_image_update_target_map(main_window) -> dict:
     return target_map
 
 
+def _image_view_input_bgr(main_window, bgr_preview):
+    """画像系ドック描画に使う入力フレームを解析解像度設定で正規化する。"""
+    if bgr_preview is None:
+        return None
+    try:
+        max_dim = int(getattr(main_window.worker.cfg, "max_dim", 0))
+    except Exception:
+        max_dim = 0
+    return resize_by_long_edge(np.asarray(bgr_preview), max_dim)
+
+
 def _apply_image_update_target(
     main_window,
     target_dock,
@@ -282,21 +292,13 @@ def _apply_image_update_target(
     return True
 
 
-def _update_single_image_dock_from_frame(main_window, target_dock, bgr_preview) -> bool:
-    """単一画像ドック更新の共通ラッパー。"""
-    target_map = _ensure_image_update_target_map(main_window)
-    return _apply_image_update_target(
-        main_window,
-        target_dock,
-        bgr_preview,
-        target_map=target_map,
-    )
-
-
 def update_image_docks_from_frame(main_window, bgr_preview) -> set[str]:
     """可視な画像系ドックへ現在フレームを反映し、更新済み名集合を返す。"""
     # 可視ドックだけ更新して不要な画像処理を避ける。
     if bgr_preview is None:
+        return set()
+    bgr_input = _image_view_input_bgr(main_window, bgr_preview)
+    if bgr_input is None:
         return set()
     target_map = _ensure_image_update_target_map(main_window)
     updated_docks: set[str] = set()
@@ -304,7 +306,7 @@ def update_image_docks_from_frame(main_window, bgr_preview) -> set[str]:
         if not _apply_image_update_target(
             main_window,
             dock,
-            bgr_preview,
+            bgr_input,
             target_map=target_map,
         ):
             continue
@@ -323,11 +325,6 @@ def _snapshot_has_graph_data_for_dock(snapshot: dict, dock_name: str) -> bool:
     if dock_name == _SNAPSHOT_DOCK_HIST:
         return all(_has_hsv_channel_data(snapshot, ch) for ch in ("h", "s", "v"))
     return True
-
-
-def _graph_requirements_for_dock(dock_name: str) -> tuple[bool, bool, bool, bool]:
-    """ドック種別から必要なグラフ計算種別を返す。"""
-    return _GRAPH_DOCK_REQUIREMENTS.get(dock_name, (False, False, False, False))
 
 
 def _compute_graph_subset_from_bgr(
@@ -364,9 +361,7 @@ def _compute_graph_subset_from_bgr(
 
     if need_color:
         sat_th = int(main_window._selected_wheel_sat_threshold())
-        sat_th = int(np.clip(sat_th, C.WHEEL_SAT_THRESHOLD_MIN, C.WHEEL_SAT_THRESHOLD_MAX))
-        h_wheel = h[s >= sat_th]
-        hist, warm_ratio, cool_ratio, other_ratio = _compute_wheel_stats(h_wheel)
+        hist, warm_ratio, cool_ratio, other_ratio = _compute_wheel_stats_from_hs(h, s, sat_th)
         out["hist"] = hist
         out["warm_ratio"] = float(warm_ratio)
         out["cool_ratio"] = float(cool_ratio)
@@ -378,7 +373,7 @@ def _compute_graph_subset_from_bgr(
         out["rgb"] = rgb
     if need_color_band:
         # ライブ解析と同様に、配色比率は解析解像度（max_dim適用後）で算出する。
-        out["top_colors"] = _top_bars_chromatic_medoid(
+        out["top_colors"] = compute_top_bars_chromatic_medoid(
             bgr_u8,
             sat_threshold=_color_band_sat_threshold_from_ui(main_window),
         )
@@ -418,8 +413,8 @@ def _ensure_snapshot_graph_data_for_dock(main_window, dock_name: str) -> bool:
             bump_version=True,
         )
 
-    need_color, need_color_band, need_scatter, need_hsv_hist = _graph_requirements_for_dock(
-        dock_name
+    need_color, need_color_band, need_scatter, need_hsv_hist = _GRAPH_DOCK_REQUIREMENTS.get(
+        dock_name, (False, False, False, False)
     )
     if not (need_color or need_color_band or need_scatter or need_hsv_hist):
         return True
@@ -484,10 +479,11 @@ def _render_dock_from_snapshot_by_name(main_window, dock_name: str, dock, snapsh
     if graph_updated is not None:
         return bool(graph_updated)
     return bool(
-        _update_single_image_dock_from_frame(
+        _apply_image_update_target(
             main_window,
             dock,
-            snapshot.get("bgr_preview"),
+            _image_view_input_bgr(main_window, snapshot.get("bgr_preview")),
+            target_map=_ensure_image_update_target_map(main_window),
         )
     )
 

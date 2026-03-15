@@ -11,6 +11,9 @@ venv/
 .mypy_cache/
 .ruff_cache/
 
+# Tests
+tests/
+
 # Build artifacts
 build/
 dist/
@@ -22,4 +25,4 @@ dist/
 .DS_Store
 
 # Local runtime config
-config/settings.json
+config/

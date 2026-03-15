@@ -13,12 +13,14 @@ from PySide6.QtGui import QGuiApplication
 
 from .analysis.frame_analysis import (
     _compute_hsv_histograms,
-    _compute_wheel_stats,
+    _compute_wheel_stats_from_hs,
     _sample_sv_and_rgb,
     compute_top_bars_chromatic_medoid,
+    compute_top_bars_chromatic_medoid_from_hs,
 )
 from .capture.win32_windows import HAS_WIN32, ctypes_win_api, win32gui
 from .util import constants as C
+from .util.debug_log import write_window_layout_debug_log
 from .util.image_ops import resize_by_long_edge
 from .util.value_utils import clamp_int
 
@@ -36,7 +38,6 @@ _EMPTY_GRAPH_DATA: "GraphData" = {
     "cool_ratio": 0.0,
     "other_ratio": 0.0,
 }
-_DEFAULT_ROI_SIZE = (640, 360)
 _ANALYZER_MIN_INTERVAL_SEC = 0.05
 _ANALYZER_MIN_GRAPH_EVERY = 1
 _ANALYZER_CHANGE_POLL_SEC = 0.08
@@ -109,6 +110,7 @@ class AnalyzerWorker(QObject):
         self._prev_h: Optional[np.ndarray] = None
         self._prev_s: Optional[np.ndarray] = None
         self._prev_v: Optional[np.ndarray] = None
+        self._hue_wrap_buf: Optional[np.ndarray] = None
         self._stable_frames: int = 0
         self._was_stable: bool = False
         self._cooldown_until: float = 0.0
@@ -287,21 +289,6 @@ class AnalyzerWorker(QObject):
         except Exception:
             return False
 
-    def _screen_signature(self, qt_screens) -> tuple:
-        """Qt画面構成の比較用シグネチャを作る。"""
-        return tuple(
-            (
-                id(screen),
-                str(screen.name()),
-                int(screen.geometry().left()),
-                int(screen.geometry().top()),
-                int(screen.geometry().width()),
-                int(screen.geometry().height()),
-                round(float(screen.devicePixelRatio()), 3),
-            )
-            for screen in qt_screens
-        )
-
     @staticmethod
     def _load_native_monitors() -> list[dict]:
         """mss から実モニタ一覧を取得する。"""
@@ -417,7 +404,18 @@ class AnalyzerWorker(QObject):
         qt_screens = QGuiApplication.screens()
         if not qt_screens:
             return {}
-        screen_sig = self._screen_signature(qt_screens)
+        screen_sig = tuple(
+            (
+                id(screen),
+                str(screen.name()),
+                int(screen.geometry().left()),
+                int(screen.geometry().top()),
+                int(screen.geometry().width()),
+                int(screen.geometry().height()),
+                round(float(screen.devicePixelRatio()), 3),
+            )
+            for screen in qt_screens
+        )
         if (
             isinstance(self._screen_monitor_map_cache, dict)
             and self._screen_monitor_map_cache
@@ -749,12 +747,7 @@ class AnalyzerWorker(QObject):
         """画面領域キャプチャを実行し、画像と実キャプチャ矩形を返す。"""
         vmon = sct.monitors[0]
         if cap is None:
-            # 初回は画面中央に既定ROIを自動生成する。
-            cw, ch = _DEFAULT_ROI_SIZE
-            cx = vmon["left"] + vmon["width"] // 2
-            cy = vmon["top"] + vmon["height"] // 2
-            cap = QRect(cx - cw // 2, cy - ch // 2, cw, ch)
-            self.roi_abs = cap
+            return None, None, "キャプチャ領域を選択してください"
 
         left = max(cap.left(), vmon["left"])
         top = max(cap.top(), vmon["top"])
@@ -808,13 +801,19 @@ class AnalyzerWorker(QObject):
             return 0.0
 
         hue_diff = cv2.absdiff(dh, prev_h)
-        hue_diff = np.minimum(hue_diff, 180 - hue_diff)
+        hue_wrap = self._hue_wrap_buf
+        if hue_wrap is None or hue_wrap.shape != hue_diff.shape:
+            hue_wrap = np.empty_like(hue_diff)
+            self._hue_wrap_buf = hue_wrap
+        # min(d, 180-d) を in-place で計算して一時配列を減らす。
+        np.subtract(180, hue_diff, out=hue_wrap, casting="unsafe")
+        np.minimum(hue_diff, hue_wrap, out=hue_diff)
         sat_diff = cv2.absdiff(ds, prev_s)
         val_diff = cv2.absdiff(dv, prev_v)
         return (
-            float(np.mean(hue_diff))
-            + float(np.mean(sat_diff)) * 0.5
-            + float(np.mean(val_diff)) * 0.5
+            float(cv2.mean(hue_diff)[0])
+            + float(cv2.mean(sat_diff)[0]) * 0.5
+            + float(cv2.mean(val_diff)[0]) * 0.5
         )
 
     def _should_emit_in_change_mode(self, bgr: np.ndarray, now: float) -> bool:
@@ -894,13 +893,7 @@ class AnalyzerWorker(QObject):
         """色相環ヒストグラムと暖寒比率を必要時のみ計算する。"""
         if not enabled or h is None or s is None:
             return None, 0.0, 0.0, 0.0
-        sat_th = clamp_int(
-            self.cfg.wheel_sat_threshold,
-            C.WHEEL_SAT_THRESHOLD_MIN,
-            C.WHEEL_SAT_THRESHOLD_MAX,
-        )
-        h_wheel = h[s >= sat_th]
-        return _compute_wheel_stats(h_wheel)
+        return _compute_wheel_stats_from_hs(h, s, int(self.cfg.wheel_sat_threshold))
 
     def _optional_scatter_samples(
         self,
@@ -916,10 +909,25 @@ class AnalyzerWorker(QObject):
             return None, None
         return _sample_sv_and_rgb(h, s, v, bgr, self.cfg.sample_points)
 
-    def _optional_top_colors(self, *, enabled: bool, bgr: np.ndarray):
+    def _optional_top_colors(
+        self,
+        *,
+        enabled: bool,
+        bgr: np.ndarray,
+        h: Optional[np.ndarray],
+        s: Optional[np.ndarray],
+    ):
         """配色比率の代表色を必要時のみ計算する。"""
         if not enabled:
             return None
+        if h is not None and s is not None:
+            return compute_top_bars_chromatic_medoid_from_hs(
+                bgr,
+                h,
+                s,
+                sat_threshold=int(self.cfg.color_band_sat_threshold),
+                top_count=int(C.TOP_COLORS_COUNT),
+            )
         return compute_top_bars_chromatic_medoid(
             bgr,
             sat_threshold=int(self.cfg.color_band_sat_threshold),
@@ -937,7 +945,7 @@ class AnalyzerWorker(QObject):
         """現在フレームから要求されたグラフ項目だけを計算する。"""
         # 設定された解析上限（max_dim）で縮小してから重い集計を行う。
         bgr_small = resize_by_long_edge(bgr, self.cfg.max_dim)
-        need_hsv_channels = need_hsv_hist or need_color or need_scatter
+        need_hsv_channels = need_hsv_hist or need_color or need_scatter or need_color_band
         h, s, v = self._extract_hsv_channels(bgr_small, enabled=need_hsv_channels)
         h_hist, s_hist, v_hist = self._optional_hsv_histograms(
             enabled=need_hsv_hist,
@@ -958,7 +966,12 @@ class AnalyzerWorker(QObject):
             bgr=bgr_small,
         )
         # 配色比率の代表色計算は解析解像度(max_dim適用後)で行い、負荷を抑える。
-        top_colors = self._optional_top_colors(enabled=need_color_band, bgr=bgr_small)
+        top_colors = self._optional_top_colors(
+            enabled=need_color_band,
+            bgr=bgr_small,
+            h=h,
+            s=s,
+        )
 
         return {
             "hist": hist,
@@ -1016,6 +1029,11 @@ class AnalyzerWorker(QObject):
         # windowモードは ROI未指定でもウィンドウ全体を直接取得する。
         if self.target_hwnd is not None and HAS_WIN32:
             if self._is_window_minimized(self.target_hwnd):
+                write_window_layout_debug_log(
+                    "capture_window_source_error",
+                    target_hwnd=int(self.target_hwnd),
+                    reason="minimized",
+                )
                 self._emit_status_and_sleep(
                     "ターゲットウィンドウが最小化されています（色を取得できません）",
                     _CAPTURE_SLEEP_SEC_DEFAULT,
@@ -1023,6 +1041,11 @@ class AnalyzerWorker(QObject):
                 return None, None
             bgr, cap = self._capture_target_window_region()
             if bgr is None or cap is None:
+                write_window_layout_debug_log(
+                    "capture_window_source_error",
+                    target_hwnd=int(self.target_hwnd),
+                    reason="capture_failed",
+                )
                 self._emit_status_and_sleep(
                     "選択ウィンドウのキャプチャに失敗しました",
                     _CAPTURE_SLEEP_SEC_RETRY,
@@ -1133,9 +1156,15 @@ class AnalyzerWorker(QObject):
                     need_graph_data,
                     need_bgr_emit,
                 ) = self._view_requirements(cfg)
+                loop_interval = self._loop_interval_sec(cfg)
+                idle_sleep_sec = max(0.01, loop_interval)
                 if not need_graph_data and not need_bgr_emit:
                     # 表示先が1つもない間はキャプチャ/解析を休止してCPU使用率を下げる。
-                    time.sleep(max(0.01, self._loop_interval_sec(cfg)))
+                    time.sleep(idle_sleep_sec)
+                    continue
+                if self._result_inflight.is_set():
+                    # UIが前フレームを消費中の間は新規キャプチャを抑止して無駄負荷を避ける。
+                    time.sleep(idle_sleep_sec)
                     continue
 
                 # 1フレーム取得。
@@ -1145,11 +1174,11 @@ class AnalyzerWorker(QObject):
 
                 # 今回フレームを通知するか判定。
                 emit_now, graph_update = self._emit_and_graph_update_flags(cfg, bgr)
-
-                dt_ms = (time.perf_counter() - t0) * 1000.0
+                # UI未消費で結果が捨てられる状態なら重い計算を省く。
+                can_emit_now = bool(emit_now and not self._result_inflight.is_set())
                 # 必要時のみ重い集計を走らせる。
                 graph_data = self._graph_data_for_frame(
-                    emit_now=emit_now,
+                    emit_now=can_emit_now,
                     graph_update=graph_update,
                     need_graph_data=need_graph_data,
                     bgr=bgr,
@@ -1159,10 +1188,11 @@ class AnalyzerWorker(QObject):
                     need_hsv_hist=need_hsv_hist,
                 )
 
-                if emit_now:
+                if can_emit_now:
                     # グラフ更新なしでも画像プレビューが必要なら通知する。
                     should_emit_payload = need_bgr_emit or (graph_update and need_graph_data)
                     if should_emit_payload:
+                        dt_ms = (time.perf_counter() - t0) * 1000.0
                         payload = self._build_result_payload(
                             bgr=bgr,
                             cap=cap,
@@ -1174,7 +1204,6 @@ class AnalyzerWorker(QObject):
                         self._emit_result_if_possible(payload, cfg=cfg)
 
                 # ループ周期を維持。
-                loop_interval = self._loop_interval_sec(cfg)
                 remain = loop_interval - (time.perf_counter() - t0)
                 if remain > 0:
                     time.sleep(remain)

@@ -31,16 +31,12 @@ class RoiSelector(QWidget):
         self.setFocusPolicy(Qt.StrongFocus)
         self._help_text = help_text
 
-        self._bounds = bounds if bounds is not None else self._all_screens_geometry()
+        self._bounds = bounds if bounds is not None else screen_union_geometry(available=False)
         self.setGeometry(self._bounds)
 
         self._dragging = False
         self._start_local = QPoint()
         self._end_local = QPoint()
-
-    def _all_screens_geometry(self) -> QRect:
-        """全画面を覆う矩形を返す。"""
-        return screen_union_geometry(available=False)
 
     def _event_local_point(self, event) -> QPoint:
         """入力イベント座標をウィジェット内ローカル座標へ正規化する。"""
@@ -133,6 +129,16 @@ class RoiSelector(QWidget):
         if e.key() == Qt.Key_Escape:
             self.selectionCanceled.emit()
             self.close()
+            e.accept()
+            return
+        super().keyPressEvent(e)
+
+    def showEvent(self, e):
+        """表示時にフォーカスを取り、Esc入力を受け取りやすくする。"""
+        super().showEvent(e)
+        self.raise_()
+        self.activateWindow()
+        self.setFocus(Qt.ActiveWindowFocusReason)
 
     def paintEvent(self, _):
         """オーバーレイ背景と選択矩形を描画する。"""

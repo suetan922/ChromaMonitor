@@ -5,7 +5,7 @@ from PySide6.QtWidgets import QDockWidget, QWidget
 
 from ...capture.win32_windows import HAS_WIN32
 from ...util.debug_log import write_window_layout_debug_log
-from ...util.qt_helpers import blocked_signals
+from ...util.qt_helpers import blocked_signals, safe_window_handle
 
 _WIN_SWP_NOSIZE = 0x0001
 _WIN_SWP_NOMOVE = 0x0002
@@ -42,14 +42,6 @@ if HAS_WIN32:
         ]
     except Exception:
         _win_set_window_pos = None
-
-
-def _dock_window_handle(dock: QDockWidget):
-    """ドックに対応する windowHandle を安全に取得する。"""
-    try:
-        return dock.windowHandle()
-    except Exception:
-        return None
 
 
 def _widget_debug_name(widget: QWidget | None) -> str | None:
@@ -220,15 +212,10 @@ def schedule_dock_on_top_refresh(
     schedule_widget_on_top_refresh(main_window, dock, delay_ms=delay_ms)
 
 
-def _resolve_widget_window_handle(widget: QWidget):
-    """通常ウィンドウ/ドック差異を吸収して windowHandle を返す。"""
-    return _dock_window_handle(widget) if isinstance(widget, QDockWidget) else widget.windowHandle()
-
-
 def _read_on_top_flag_state(widget: QWidget) -> tuple[bool, bool, object]:
     """ウィジェット本体と windowHandle の最前面フラグ状態を返す。"""
     widget_flag = bool(widget.windowFlags() & Qt.WindowStaysOnTopHint)
-    win = _resolve_widget_window_handle(widget)
+    win = safe_window_handle(widget)
     window_flag = bool(win.flags() & Qt.WindowStaysOnTopHint) if win is not None else widget_flag
     return widget_flag, window_flag, win
 

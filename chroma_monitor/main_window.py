@@ -34,6 +34,7 @@ from .ui.settings_dialog import hide_settings_window as hide_settings_dialog_win
 from .ui.settings_dialog import show_settings_window as show_settings_dialog_window
 from .ui.view_docks import setup_view_docks
 from .util import constants as C
+from .util.debug_log import is_window_layout_debug_enabled
 from .views.preview import PreviewWindow
 
 _WINDOW_DOCK_MENU_ITEMS = (
@@ -47,6 +48,7 @@ _WINDOW_DOCK_MENU_ITEMS = (
     ("act_binary", "2値化", True, "dock_binary"),
     ("act_ternary", "3値化", True, "dock_ternary"),
     ("act_gray", "グレースケール", True, "dock_gray"),
+    ("act_mirror", "反転表示", False, "dock_mirror"),
     ("act_focus", "フォーカスピーキング", True, "dock_focus"),
     ("act_squint", "スクイント表示", True, "dock_squint"),
     ("act_saliency", "サリエンシーマップ", True, "dock_saliency"),
@@ -83,7 +85,10 @@ class MainWindow(QMainWindow):
 
     def _init_window_runtime_state(self) -> None:
         """ランタイム管理用フラグ・タイマー・ネットワーク状態を初期化する。"""
-        self.setWindowTitle(C.APP_NAME)
+        title = C.APP_NAME
+        if is_window_layout_debug_enabled():
+            title = f"{title} [DEBUG]"
+        self.setWindowTitle(title)
         self.resize(1120, 700)
         self._did_initial_screen_fit = False
         self._layout_autosave_enabled = False
@@ -102,6 +107,7 @@ class MainWindow(QMainWindow):
         self._dock_rebalance_timer.setInterval(_DOCK_REBALANCE_DEBOUNCE_MS)
         self._dock_rebalance_timer.timeout.connect(self._rebalance_dock_layout)
         self._dock_rebalance_running = False
+        self._dockability_sync_timer = None
         self._dock_geometry_snapshot = {}
         self._dock_rebalance_last_main_size = self.size()
         self._layout_interaction_pause_active = False
@@ -209,7 +215,9 @@ class MainWindow(QMainWindow):
         self.combo_win = RefreshOnInteractComboBox()
         self.combo_win.setEditable(True)
         self.combo_win.setInsertPolicy(QComboBox.NoInsert)
-        self.combo_win.set_refresh_callback(lambda: self.refresh_windows(announce=False))
+        self.combo_win.set_refresh_callback(
+            lambda force=False: self.refresh_windows(announce=False, force=bool(force))
+        )
         win_completer = QCompleter(self.combo_win.model(), self.combo_win)
         win_completer.setCaseSensitivity(Qt.CaseInsensitive)
         win_completer.setFilterMode(Qt.MatchContains)
@@ -217,12 +225,16 @@ class MainWindow(QMainWindow):
         self.combo_win.setCompleter(win_completer)
         if self.combo_win.lineEdit() is not None:
             self.combo_win.lineEdit().setClearButtonEnabled(True)
-            self.combo_win.lineEdit().setPlaceholderText("例: CLIP STUDIO PAINT")
+            self.combo_win.lineEdit().setPlaceholderText("ウィンドウ名を入力")
             self.combo_win.lineEdit().setToolTip(
-                "入力例: CLIP STUDIO PAINT\nウィンドウ名の一部を入力して候補を絞り込めます。"
+                "ウィンドウ名の一部を入力して候補を絞り込めます。"
             )
         self.btn_pick_roi_win = QPushButton("領域選択（ウィンドウ内）")
         self.btn_pick_roi_screen = QPushButton("領域選択（画面）")
+        # 設定ダイアログ上の Enter で領域選択ボタンが誤起動しないようにする。
+        for btn in (self.btn_pick_roi_win, self.btn_pick_roi_screen):
+            btn.setAutoDefault(False)
+            btn.setDefault(False)
 
         self.spin_interval = self._build_double_spinbox(
             0.10,
@@ -305,6 +317,15 @@ class MainWindow(QMainWindow):
             (
                 ("横並び", C.RGB_HIST_MODE_SIDE_BY_SIDE),
                 ("重ね表示", C.RGB_HIST_MODE_OVERLAY),
+            ),
+        )
+        self.combo_mirror_mode = QComboBox()
+        self._populate_data_combo(
+            self.combo_mirror_mode,
+            (
+                ("左右", C.MIRROR_MODE_HORIZONTAL),
+                ("上下", C.MIRROR_MODE_VERTICAL),
+                ("上下左右", C.MIRROR_MODE_BOTH),
             ),
         )
         self.spin_wheel_sat_threshold = self._build_int_spinbox(
@@ -501,7 +522,18 @@ class MainWindow(QMainWindow):
     def _connect_capture_control_signals(self) -> None:
         """取得元選択とROI操作のシグナルを接続する。"""
         self.combo_win.currentIndexChanged.connect(self.on_window_changed)
+        self.combo_win.currentTextChanged.connect(self.on_window_text_changed)
+        self.combo_win.activated.connect(self.on_window_index_activated)
+        text_activated = getattr(self.combo_win, "textActivated", None)
+        if text_activated is not None:
+            text_activated.connect(self.on_window_text_activated)
+        popup_view = self.combo_win.view()
+        if popup_view is not None:
+            # スタイル差で片方しか発火しないケースがあるため両方を監視する。
+            popup_view.pressed.connect(self.on_window_popup_row_selected)
+            popup_view.clicked.connect(self.on_window_popup_row_selected)
         if self.combo_win.lineEdit() is not None:
+            self.combo_win.lineEdit().textEdited.connect(self.on_window_text_edited)
             self.combo_win.lineEdit().editingFinished.connect(self.on_window_text_committed)
         self.btn_pick_roi_win.clicked.connect(self.pick_roi_in_window)
         self.btn_pick_roi_screen.clicked.connect(self.pick_roi_on_screen)
@@ -521,6 +553,7 @@ class MainWindow(QMainWindow):
         self.chk_wheel_harmony_guide.toggled.connect(self.apply_wheel_settings)
         self.combo_wheel_harmony_guide.currentIndexChanged.connect(self.apply_wheel_settings)
         self.combo_rgb_hist_mode.currentIndexChanged.connect(self.apply_rgb_hist_settings)
+        self.combo_mirror_mode.currentIndexChanged.connect(self.apply_mirror_settings)
         self.spin_wheel_sat_threshold.valueChanged.connect(self.apply_wheel_settings)
         self.chk_color_band_use_wheel_sat_threshold.toggled.connect(self.apply_color_band_settings)
         self.spin_color_band_sat_threshold.valueChanged.connect(self.apply_color_band_settings)
@@ -581,9 +614,7 @@ class MainWindow(QMainWindow):
             self.apply_always_on_top,
         )
         self.settings_action = menu.addAction("設定ウィンドウを開く")
-        self.settings_action.triggered.connect(
-            lambda: self.show_settings_window(C.SETTINGS_PAGE_CAPTURE)
-        )
+        self.settings_action.triggered.connect(lambda: self.show_settings_window())
 
         layout_menu = mb.addMenu("レイアウト")
         self.presets_menu = layout_menu.addMenu("プリセットを適用")
@@ -592,6 +623,36 @@ class MainWindow(QMainWindow):
             lambda: self.show_settings_window(C.SETTINGS_PAGE_LAYOUT)
         )
         self._setup_help_menu(mb)
+        for popup in (
+            win_menu,
+            menu,
+            layout_menu,
+            self.presets_menu,
+            getattr(self, "help_menu", None),
+        ):
+            self._ensure_menu_popup_width(popup)
+
+    def _ensure_menu_popup_width(self, menu) -> None:
+        """メニュー項目文言が見切れないようポップアップ最小幅を調整する。"""
+        if menu is None:
+            return
+
+        def _sync_min_width() -> None:
+            fm = menu.fontMetrics()
+            max_text_width = 0
+            for action in menu.actions():
+                if action is None or action.isSeparator():
+                    continue
+                text = str(action.text()).replace("&", "")
+                if "\t" in text:
+                    text = text.split("\t", 1)[0]
+                max_text_width = max(max_text_width, int(fm.horizontalAdvance(text)))
+            # チェックマーク/余白/サブメニュー矢印ぶんを見込む。
+            target = max(180, int(max_text_width) + 96)
+            menu.setMinimumWidth(target)
+
+        _sync_min_width()
+        menu.aboutToShow.connect(_sync_min_width)
 
     def _build_toolbar(self) -> None:
         """Start/Stop/画像読み込みのツールバーを構築する。"""
@@ -725,6 +786,14 @@ class MainWindow(QMainWindow):
             self._refresh_topmost_if_enabled()
         return super().event(event)
 
+    def keyPressEvent(self, event):
+        """Esc入力時に領域選択モードを優先的に解除する。"""
+        if event.key() == Qt.Key_Escape and bool(getattr(self, "_roi_selectors", ())):
+            self._cancel_roi_selection(announce=True)
+            event.accept()
+            return
+        super().keyPressEvent(event)
+
     def _handle_top_colors_bar_resize_event(self, obj, event) -> bool:
         """配色比率バーのリサイズイベントを処理したか返す。"""
         if obj is getattr(self, "top_colors_bar", None) and event.type() == QEvent.Resize:
@@ -756,14 +825,6 @@ class MainWindow(QMainWindow):
         if (not is_tabbed) or int(size.height()) >= 96:
             dock._last_docked_size = (int(size.width()), int(size.height()))
 
-    @staticmethod
-    def _should_pause_for_dock_event(event_type, *, is_floating: bool) -> bool:
-        """ドックイベントで解析一時停止を入れるべきかを返す。"""
-        return bool(
-            event_type == QEvent.Resize
-            or (event_type in (QEvent.Move, QEvent.Show) and not bool(is_floating))
-        )
-
     def _handle_floating_state_dock_event(self, dock, event_type) -> None:
         """フローティング状態に応じたドックイベント処理を行う。"""
         if not dock.isFloating():
@@ -788,10 +849,16 @@ class MainWindow(QMainWindow):
         """共通ドックレイアウトイベントを処理する。"""
         self._remember_last_docked_size(dock)
         is_floating = bool(dock.isFloating())
-        should_pause = self._should_pause_for_dock_event(event_type, is_floating=is_floating)
+        should_pause = bool(
+            event_type == QEvent.Resize
+            or (event_type in (QEvent.Move, QEvent.Show) and not is_floating)
+        )
         if should_pause:
             self._begin_layout_interaction_pause("dock_layout")
-        self._update_floating_dock_dockability(dock)
+        if event_type in (QEvent.Resize, QEvent.Move, QEvent.Show) and not is_floating:
+            self._schedule_floating_dock_dockability_sync()
+        else:
+            self._update_floating_dock_dockability(dock)
         self._handle_floating_state_dock_event(dock, event_type)
         self._maybe_restore_dock_snapshot_after_event(dock, event_type)
         if should_pause:
@@ -819,14 +886,14 @@ class MainWindow(QMainWindow):
     def moveEvent(self, event):
         """メイン移動時にフローティングドック状態と保存予約を更新する。"""
         super().moveEvent(event)
-        self._sync_all_floating_dock_dockability()
+        self._schedule_floating_dock_dockability_sync()
         self._schedule_layout_autosave()
 
     def resizeEvent(self, event):
         """メインリサイズ時の一時停止制御とレイアウト同期を行う。"""
         self._begin_layout_interaction_pause("main_resize")
         super().resizeEvent(event)
-        self._sync_all_floating_dock_dockability()
+        self._schedule_floating_dock_dockability_sync()
         self.update_placeholder()
         self._schedule_layout_autosave()
         self._schedule_layout_interaction_resume("main_resize")
@@ -840,6 +907,7 @@ class MainWindow(QMainWindow):
     _on_dock_top_level_changed = mw_windowing.on_dock_top_level_changed
     _update_floating_dock_dockability = mw_windowing.update_floating_dock_dockability
     _sync_all_floating_dock_dockability = mw_windowing.sync_all_floating_dock_dockability
+    _schedule_floating_dock_dockability_sync = mw_windowing.schedule_floating_dock_dockability_sync
     _notify_floating_dock_moved = mw_windowing.notify_floating_dock_moved
     _track_floating_dock_size = mw_windowing.track_floating_dock_size
 
@@ -871,6 +939,11 @@ class MainWindow(QMainWindow):
     apply_capture_source = mw_runtime.apply_capture_source
     _apply_capture_source = mw_runtime._apply_capture_source
     on_window_changed = mw_runtime.on_window_changed
+    on_window_text_changed = mw_runtime.on_window_text_changed
+    on_window_index_activated = mw_runtime.on_window_index_activated
+    on_window_text_activated = mw_runtime.on_window_text_activated
+    on_window_popup_row_selected = mw_runtime.on_window_popup_row_selected
+    on_window_text_edited = mw_runtime.on_window_text_edited
     on_window_text_committed = mw_runtime.on_window_text_committed
     _selected_wheel_sat_threshold = mw_settings.selected_wheel_sat_threshold
     _apply_ui_style = mw_windowing.apply_ui_style
@@ -889,6 +962,7 @@ class MainWindow(QMainWindow):
     apply_wheel_settings = mw_settings.apply_wheel_settings
     apply_color_band_settings = mw_settings.apply_color_band_settings
     apply_rgb_hist_settings = mw_settings.apply_rgb_hist_settings
+    apply_mirror_settings = mw_settings.apply_mirror_settings
     apply_edge_settings = mw_settings.apply_edge_settings
     apply_binary_settings = mw_settings.apply_binary_settings
     apply_ternary_settings = mw_settings.apply_ternary_settings
@@ -919,6 +993,7 @@ class MainWindow(QMainWindow):
     show_settings_window = show_settings_dialog_window
     hide_settings_window = hide_settings_dialog_window
     _close_roi_selectors = mw_roi.close_roi_selectors
+    _cancel_roi_selection = mw_roi.cancel_roi_selection
     pick_roi_on_screen = mw_roi.pick_roi_on_screen
     on_roi_screen_selected = mw_roi.on_roi_screen_selected
     pick_roi_in_window = mw_roi.pick_roi_in_window

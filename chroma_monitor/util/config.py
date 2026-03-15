@@ -19,10 +19,15 @@ DEFAULT_CONFIG = {
     C.CFG_SCATTER_HUE_CENTER: C.DEFAULT_SCATTER_HUE_CENTER,
     C.CFG_WHEEL_MODE: C.DEFAULT_WHEEL_MODE,
     C.CFG_RGB_HIST_MODE: C.DEFAULT_RGB_HIST_MODE,
+    C.CFG_MIRROR_MODE: C.DEFAULT_MIRROR_MODE,
     C.CFG_WHEEL_SAT_THRESHOLD: C.DEFAULT_WHEEL_SAT_THRESHOLD,
     C.CFG_WHEEL_HARMONY_GUIDE_ENABLED: C.DEFAULT_WHEEL_HARMONY_GUIDE_ENABLED,
     C.CFG_WHEEL_HARMONY_GUIDE_TYPE: C.DEFAULT_WHEEL_HARMONY_GUIDE_TYPE,
     C.CFG_CAPTURE_SOURCE: C.DEFAULT_CAPTURE_SOURCE,
+    C.CFG_CAPTURE_WINDOW_TITLE: "",
+    C.CFG_CAPTURE_WINDOW_TEXT: "",
+    C.CFG_CAPTURE_WINDOW_ROI_REL: None,
+    C.CFG_CAPTURE_SCREEN_ROI_ABS: None,
     C.CFG_EDGE_SENSITIVITY: C.DEFAULT_EDGE_SENSITIVITY,
     C.CFG_BINARY_PRESET: C.DEFAULT_BINARY_PRESET,
     C.CFG_TERNARY_PRESET: C.DEFAULT_TERNARY_PRESET,
@@ -46,12 +51,6 @@ DEFAULT_CONFIG = {
 }
 #: 設定ファイルパスの探索結果キャッシュ。
 _CONFIG_PATH_CACHE: Path | None = None
-
-
-def _fresh_default_config() -> Dict[str, Any]:
-    """DEFAULT_CONFIG から独立した新規設定辞書を作る。"""
-    # layout_current/layout_presets などの可変値参照を共有しない。
-    return copy.deepcopy(DEFAULT_CONFIG)
 
 
 def _legacy_user_config_dir() -> Path:
@@ -134,7 +133,8 @@ def config_path() -> Path:
 def load_config() -> Dict[str, Any]:
     """設定ファイルを読み込み、既定値を補完して返す。"""
     path = config_path()
-    defaults = _fresh_default_config()
+    # layout_current/layout_presets などの可変値参照を共有しない。
+    defaults = copy.deepcopy(DEFAULT_CONFIG)
     if not path.exists():
         return defaults
     try:

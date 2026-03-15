@@ -15,7 +15,11 @@ from PySide6.QtWidgets import (
 )
 
 from ...util.debug_log import write_window_layout_debug_log
-from ...util.qt_helpers import blocked_signals, screen_union_geometry
+from ...util.qt_helpers import (
+    blocked_signals,
+    safe_window_handle,
+    screen_union_geometry,
+)
 from .window_tabs import clear_force_dock_drop_active, sync_tabbed_dock_title_bars
 from .window_topmost import (
     refresh_topmost_if_enabled,
@@ -54,6 +58,7 @@ _FLOATING_SIZE_REMEMBER_RETRY_MS = 120
 _FLOATING_DEBUG_EVENT_THROTTLE_SEC = 0.06
 _FLOATING_MOVE_DRAG_EDGE_MARGIN_PX = 12
 _FLOATING_MOVE_DRAG_GUARD_RETRY_MS = 120
+_DOCKABILITY_SYNC_DEBOUNCE_MS = 56
 
 
 def _dock_debug_name(main_window, dock: QDockWidget) -> str:
@@ -125,18 +130,10 @@ def _debug_log_floating_dock_event(
     write_window_layout_debug_log(event, **payload)
 
 
-def _dock_window_handle(dock: QDockWidget):
-    """ドックに対応する windowHandle を安全に取得する。"""
-    try:
-        return dock.windowHandle()
-    except Exception:
-        return None
-
-
 def _floating_dock_screen_key(main_window, dock: QDockWidget):
     """フローティングドックが現在属しているスクリーン識別子を返す。"""
     screen = None
-    win = _dock_window_handle(dock)
+    win = safe_window_handle(dock)
     if win is not None:
         try:
             screen = win.screen()
@@ -643,7 +640,7 @@ def _ensure_floating_dock_screen_tracking(main_window, dock: QDockWidget) -> Non
     """フローティングドックの screenChanged 監視を現在ハンドルへ接続する。"""
     if dock is None:
         return
-    win = _dock_window_handle(dock)
+    win = safe_window_handle(dock)
     if win is None:
         return
     tracked_handle = getattr(dock, "_floating_screen_tracking_handle", None)
@@ -715,12 +712,20 @@ def _clamp_top_left_in_available(
     return min(max(int(x), min_x), max_x), min(max(int(y), min_y), max_y)
 
 
-def update_floating_dock_dockability(main_window, dock: QDockWidget) -> None:
+def update_floating_dock_dockability(
+    main_window,
+    dock: QDockWidget,
+    *,
+    sync_options: bool = True,
+) -> None:
     """フローティングドックのドッキング許可状態を同期する。"""
+    if dock is None:
+        return
     # レイアウトは Qt 標準ドッキング挙動を優先する。
     if dock.allowedAreas() != Qt.AllDockWidgetAreas:
         dock.setAllowedAreas(Qt.AllDockWidgetAreas)
-    _sync_dock_options_by_floating_state(main_window)
+    if bool(sync_options):
+        _sync_dock_options_by_floating_state(main_window)
 
 
 def _dock_drop_activation_margin_px(main_window) -> int:
@@ -759,7 +764,25 @@ def _floating_dock_intersects_drop_zone(main_window, zone: QRect) -> bool:
     return False
 
 
-def _is_dock_drop_active_near_main_window(main_window) -> bool:
+def _floating_dock_state_flags(main_window) -> tuple[bool, bool]:
+    """可視フローティング有無と移動ドラッグ有無を同時に返す。"""
+    has_visible_floating = False
+    has_active_move_drag = False
+    for dock in getattr(main_window, "_dock_map", {}).values():
+        if dock is None or not dock.isVisible() or not dock.isFloating():
+            continue
+        has_visible_floating = True
+        if bool(getattr(dock, "_floating_move_drag_active", False)):
+            has_active_move_drag = True
+            break
+    return bool(has_visible_floating), bool(has_active_move_drag)
+
+
+def _is_dock_drop_active_near_main_window(
+    main_window,
+    *,
+    has_active_drag: bool | None = None,
+) -> bool:
     """メイン近傍でドックドラッグが発生中か判定する。"""
     app = QApplication.instance()
     if app is None:
@@ -769,6 +792,10 @@ def _is_dock_drop_active_near_main_window(main_window) -> bool:
     if not (app.mouseButtons() & Qt.LeftButton):
         return False
     if not main_window.isVisible():
+        return False
+    if has_active_drag is None:
+        _, has_active_drag = _floating_dock_state_flags(main_window)
+    if not bool(has_active_drag):
         return False
     frame = _dock_drop_zone_rect(main_window)
     cursor_pos = QCursor.pos()
@@ -781,11 +808,11 @@ def _sync_dock_options_by_floating_state(main_window) -> None:
     """ドックオプション(ネスト可否など)を現在状態に合わせて同期する。"""
     # 通常はフローティング中の外部左右上下ドロップを抑制し、中央タブ重ねを優先する。
     # ただしメイン近傍へドラッグ中はネストを一時許可し、上下左右のドロップ判定を広げる。
-    has_visible_floating = any(
-        dock.isVisible() and dock.isFloating()
-        for dock in getattr(main_window, "_dock_map", {}).values()
+    has_visible_floating, has_active_drag = _floating_dock_state_flags(main_window)
+    allow_nested_while_dragging = _is_dock_drop_active_near_main_window(
+        main_window,
+        has_active_drag=bool(has_active_drag),
     )
-    allow_nested_while_dragging = _is_dock_drop_active_near_main_window(main_window)
     desired = (
         _DOCK_OPTIONS_NESTED
         if (not has_visible_floating or allow_nested_while_dragging)
@@ -798,9 +825,29 @@ def _sync_dock_options_by_floating_state(main_window) -> None:
 def sync_all_floating_dock_dockability(main_window) -> None:
     """全ドックのフローティング/ドッキング関連設定を再同期する。"""
     for dock in getattr(main_window, "_dock_map", {}).values():
-        update_floating_dock_dockability(main_window, dock)
+        update_floating_dock_dockability(main_window, dock, sync_options=False)
     _sync_dock_options_by_floating_state(main_window)
     sync_tabbed_dock_title_bars(main_window)
+
+
+def _ensure_dockability_sync_timer(main_window) -> QTimer:
+    """ドッカビリティ同期用デバウンスタイマーを取得する。"""
+    timer = getattr(main_window, "_dockability_sync_timer", None)
+    if timer is None:
+        timer = QTimer(main_window)
+        timer.setSingleShot(True)
+        timer.timeout.connect(lambda mw=main_window: sync_all_floating_dock_dockability(mw))
+        main_window._dockability_sync_timer = timer
+    return timer
+
+
+def schedule_floating_dock_dockability_sync(
+    main_window,
+    *,
+    delay_ms: int = _DOCKABILITY_SYNC_DEBOUNCE_MS,
+) -> None:
+    """全ドックのドッカビリティ同期をデバウンス実行する。"""
+    _ensure_dockability_sync_timer(main_window).start(max(0, int(delay_ms)))
 
 
 def on_dock_top_level_changed(main_window, dock: QDockWidget, floating: bool):

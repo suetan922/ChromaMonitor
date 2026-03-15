@@ -6,10 +6,11 @@ import cv2
 import numpy as np
 
 from ..util import constants as C
-from ..util.image_ops import resize_by_long_edge, rgb_to_qpixmap
+from ..util.image_math import normalize_map
+from ..util.image_ops import resize_by_long_edge
+from ..util.qt_image import rgb_to_qpixmap
 from ..util.value_utils import clamp_int, safe_choice
 from .base_image_view import BaseImageLabelView
-from .image_math import normalize_map
 
 
 def _composition_guide_primitives(guide: str, w: int, h: int):
@@ -121,8 +122,6 @@ class SaliencyView(BaseImageLabelView):
     def __init__(self):
         """既定パラメータと内部キャッシュを初期化する。"""
         super().__init__("サリエンシーなし")
-        self._last_saliency: Optional[np.ndarray] = None
-        self._last_overlay_bgra: Optional[np.ndarray] = None
         self._overlay_alpha = C.DEFAULT_SALIENCY_OVERLAY_ALPHA  # 0..100
         # 構図ガイド種別（なし/三分割/中央クロス/対角線）
         self._guide = C.DEFAULT_COMPOSITION_GUIDE
@@ -133,16 +132,14 @@ class SaliencyView(BaseImageLabelView):
     def set_overlay_alpha(self, value: int):
         """オーバーレイ不透明度を更新する。"""
         # アルファ変更は直近フレームを再描画して即時反映する。
-        self._overlay_alpha = clamp_int(value, C.SALIENCY_ALPHA_MIN, C.SALIENCY_ALPHA_MAX)
-        if self._last_bgr is not None:
-            self.update_saliency(self._last_bgr)
+        next_alpha = clamp_int(value, C.SALIENCY_ALPHA_MIN, C.SALIENCY_ALPHA_MAX)
+        self._set_state_value("_overlay_alpha", next_alpha, self.update_saliency)
 
     def set_composition_guide(self, guide: str):
         """構図ガイドの表示種別を更新する。"""
         # 無効値を避けるため safe_choice で正規化する。
-        self._guide = safe_choice(guide, C.COMPOSITION_GUIDES, C.DEFAULT_COMPOSITION_GUIDE)
-        if self._last_bgr is not None:
-            self.update_saliency(self._last_bgr)
+        next_guide = safe_choice(guide, C.COMPOSITION_GUIDES, C.DEFAULT_COMPOSITION_GUIDE)
+        self._set_state_value("_guide", next_guide, self.update_saliency)
 
     def _compute_spectral_saliency_opencv(self, bgr: np.ndarray) -> Optional[np.ndarray]:
         """OpenCV saliency実装を使ってサリエンシーを計算する。"""
@@ -238,11 +235,9 @@ class SaliencyView(BaseImageLabelView):
             # 稀な演算エラー時も描画不能にしない。
             saliency = normalize_map(self._compute_spectral_saliency_fft(proc_bgr))
 
-        self._last_saliency = saliency
-        self._last_overlay_bgra = self._make_overlay_bgra(saliency)
-
-        overlay_bgr = self._last_overlay_bgra[:, :, :3].astype(np.float32)
-        alpha = (self._last_overlay_bgra[:, :, 3].astype(np.float32) / 255.0)[:, :, None]
+        overlay_bgra = self._make_overlay_bgra(saliency)
+        overlay_bgr = overlay_bgra[:, :, :3].astype(np.float32)
+        alpha = (overlay_bgra[:, :, 3].astype(np.float32) / 255.0)[:, :, None]
         # 元画像をグレースケール化して残差を見やすくする
         gray = cv2.cvtColor(proc_bgr, cv2.COLOR_BGR2GRAY)
         base = cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR).astype(np.float32)

@@ -4,6 +4,7 @@ from ...util import constants as C
 from ...util.config import load_config, save_config
 from ...util.qt_helpers import (
     blocked_signals,
+    dict_to_rect,
     set_checked_blocked,
     set_enabled_if,
     set_visible_if,
@@ -23,6 +24,7 @@ from .settings_values import (
     selected_composition_guide,
     selected_effective_color_band_sat_threshold,
     selected_focus_peak_color,
+    selected_mirror_mode,
     selected_mode,
     selected_rgb_hist_mode,
     selected_scatter_hue_center,
@@ -41,6 +43,12 @@ _LEGACY_REMOVED_CONFIG_KEYS = (
     "graph_every",
     "preview_window",
 )
+
+
+def _request_save_if(main_window, *, save: bool) -> None:
+    """`save` が True のときだけ設定保存予約を行う。"""
+    if save:
+        main_window._request_save_settings()
 
 
 def sync_mode_dependent_rows(main_window):
@@ -152,18 +160,18 @@ def _apply_vectorscope_view_state(
     update_vectorscope_warning_label(main_window)
 
 
-def apply_sample_points_settings(main_window, *_):
+def apply_sample_points_settings(main_window, *_, save: bool = True):
     """サンプル点数設定をワーカーへ反映する。"""
     # サンプル数は散布図サンプリング負荷に直結する設定。
     main_window.worker.set_sample_points(int(main_window.spin_points.value()))
-    main_window._request_save_settings()
+    _request_save_if(main_window, save=save)
 
 
-def apply_scatter_settings(main_window, *_):
+def apply_scatter_settings(main_window, *_, save: bool = True):
     """散布図表示設定をビューへ反映する。"""
     # 散布図の形状・表示モード・色相フィルター条件をまとめて反映。
     _apply_scatter_view_from_ui(main_window)
-    main_window._request_save_settings()
+    _request_save_if(main_window, save=save)
 
 
 def apply_analysis_resolution_settings(main_window, *_args, save: bool = True):
@@ -180,11 +188,10 @@ def apply_analysis_resolution_settings(main_window, *_args, save: bool = True):
             with blocked_signals(main_window.edit_analysis_max_dim):
                 main_window.edit_analysis_max_dim.setValue(int(max_dim))
     sync_analysis_resolution_rows(main_window)
-    if save:
-        main_window._request_save_settings()
+    _request_save_if(main_window, save=save)
 
 
-def apply_wheel_settings(main_window, *_):
+def apply_wheel_settings(main_window, *_, save: bool = True, sync_color_band: bool = True):
     """色相環設定をビューとワーカーへ反映する。"""
     # 色相環表示方式と彩度しきい値を同時に反映。
     main_window.wheel.set_mode(selected_wheel_mode(main_window))
@@ -196,9 +203,9 @@ def apply_wheel_settings(main_window, *_):
     # チップ詳細の調和候補も即時更新する。
     if hasattr(main_window, "list_color_chips") and hasattr(main_window, "_on_color_chip_selected"):
         main_window._on_color_chip_selected(int(main_window.list_color_chips.currentRow()))
-    if hasattr(main_window, "apply_color_band_settings"):
+    if sync_color_band and hasattr(main_window, "apply_color_band_settings"):
         main_window.apply_color_band_settings(save=False)
-    main_window._request_save_settings()
+    _request_save_if(main_window, save=save)
 
 
 def apply_color_band_settings(main_window, *_args, save: bool = True):
@@ -209,8 +216,7 @@ def apply_color_band_settings(main_window, *_args, save: bool = True):
     )
     _invalidate_color_band_snapshot_cache(main_window)
     _refresh_color_band_related_views(main_window)
-    if save:
-        main_window._request_save_settings()
+    _request_save_if(main_window, save=save)
 
 
 def on_wheel_harmony_rotation_changed(main_window, _rotation_deg: float):
@@ -219,45 +225,51 @@ def on_wheel_harmony_rotation_changed(main_window, _rotation_deg: float):
     main_window._request_save_settings()
 
 
-def apply_rgb_hist_settings(main_window, *_):
+def apply_rgb_hist_settings(main_window, *_, save: bool = True):
     """RGBヒストグラム設定を反映する。"""
     main_window.rgb_hist_view.set_display_mode(selected_rgb_hist_mode(main_window))
-    main_window._request_save_settings()
+    _request_save_if(main_window, save=save)
 
 
-def apply_edge_settings(main_window, *_):
+def apply_mirror_settings(main_window, *_, save: bool = True):
+    """反転表示設定を反映する。"""
+    main_window.mirror_view.set_mode(selected_mirror_mode(main_window))
+    _request_save_if(main_window, save=save)
+
+
+def apply_edge_settings(main_window, *_, save: bool = True):
     """エッジビュー設定を反映する。"""
     main_window.edge_view.set_sensitivity(main_window.spin_edge_sensitivity.value())
-    main_window._request_save_settings()
+    _request_save_if(main_window, save=save)
 
 
-def apply_binary_settings(main_window, *_):
+def apply_binary_settings(main_window, *_, save: bool = True):
     """2値化ビュー設定を反映する。"""
     main_window.binary_view.set_preset(selected_binary_preset(main_window))
-    main_window._request_save_settings()
+    _request_save_if(main_window, save=save)
 
 
-def apply_ternary_settings(main_window, *_):
+def apply_ternary_settings(main_window, *_, save: bool = True):
     """3値化ビュー設定を反映する。"""
     main_window.ternary_view.set_preset(selected_ternary_preset(main_window))
-    main_window._request_save_settings()
+    _request_save_if(main_window, save=save)
 
 
-def apply_saliency_settings(main_window, *_):
+def apply_saliency_settings(main_window, *_, save: bool = True):
     """サリエンシ表示設定を反映する。"""
     main_window.saliency_view.set_overlay_alpha(int(main_window.spin_saliency_alpha.value()))
-    main_window._request_save_settings()
+    _request_save_if(main_window, save=save)
 
 
-def apply_composition_guide_settings(main_window, *_):
+def apply_composition_guide_settings(main_window, *_, save: bool = True):
     """構図ガイド設定を関連ビューへ反映する。"""
     # サリエンシーとプレビューで同じ構図ガイドを使う。
     guide = selected_composition_guide(main_window)
     _apply_composition_guide_to_views(main_window, guide)
-    main_window._request_save_settings()
+    _request_save_if(main_window, save=save)
 
 
-def apply_focus_peaking_settings(main_window, *_):
+def apply_focus_peaking_settings(main_window, *_, save: bool = True):
     """フォーカスピーキング設定を反映する。"""
     main_window.focus_peaking_view.set_sensitivity(
         int(main_window.spin_focus_peak_sensitivity.value())
@@ -266,16 +278,16 @@ def apply_focus_peaking_settings(main_window, *_):
     main_window.focus_peaking_view.set_thickness(
         float(main_window.spin_focus_peak_thickness.value())
     )
-    main_window._request_save_settings()
+    _request_save_if(main_window, save=save)
 
 
-def apply_squint_settings(main_window, *_):
+def apply_squint_settings(main_window, *_, save: bool = True):
     """スクイント表示設定を反映する。"""
     main_window.squint_view.set_mode(selected_squint_mode(main_window))
     main_window.squint_view.set_scale_percent(int(main_window.spin_squint_scale.value()))
     main_window.squint_view.set_blur_sigma(float(main_window.spin_squint_blur.value()))
     sync_squint_mode_rows(main_window)
-    main_window._request_save_settings()
+    _request_save_if(main_window, save=save)
 
 
 def update_vectorscope_warning_label(main_window):
@@ -296,14 +308,14 @@ def update_vectorscope_warning_label(main_window):
         main_window.lbl_vectorscope_warning.setStyleSheet(style)
 
 
-def apply_vectorscope_settings(main_window, *_):
+def apply_vectorscope_settings(main_window, *_, save: bool = True):
     """ベクトルスコープ設定を反映する。"""
     _apply_vectorscope_view_state(
         main_window,
         show_skin_line=bool(main_window.chk_vectorscope_skin_line.isChecked()),
         warn_threshold=int(main_window.spin_vectorscope_warn_threshold.value()),
     )
-    main_window._request_save_settings()
+    _request_save_if(main_window, save=save)
 
 
 def apply_mode_settings(main_window, *_args, save: bool = True):
@@ -314,8 +326,7 @@ def apply_mode_settings(main_window, *_args, save: bool = True):
     main_window.worker.set_diff_threshold(main_window.spin_diff.value())
     main_window.worker.set_stable_frames(main_window.spin_stable.value())
     sync_mode_dependent_rows(main_window)
-    if save:
-        main_window._request_save_settings()
+    _request_save_if(main_window, save=save)
 
 
 def _load_interval_and_analysis_settings(main_window, cfg: dict) -> None:
@@ -332,7 +343,7 @@ def _load_interval_and_analysis_settings(main_window, cfg: dict) -> None:
         C.ANALYZER_MAX_SAMPLE_POINTS,
     )
     _set_value_blocked(main_window.spin_points, sample_points)
-    main_window.worker.set_sample_points(sample_points)
+    apply_sample_points_settings(main_window, save=False)
 
     analysis_max_dim = _cfg_int(
         cfg,
@@ -386,7 +397,7 @@ def _load_scatter_settings(main_window, cfg: dict) -> None:
         C.SCATTER_HUE_MAX,
     )
     _set_value_blocked(main_window.slider_scatter_hue_center, scatter_hue_center)
-    _apply_scatter_view_from_ui(main_window)
+    apply_scatter_settings(main_window, save=False)
 
 
 def _load_wheel_and_capture_settings(main_window, cfg: dict) -> None:
@@ -405,7 +416,7 @@ def _load_wheel_and_capture_settings(main_window, cfg: dict) -> None:
         C.RGB_HIST_MODES,
         C.DEFAULT_RGB_HIST_MODE,
     )
-    main_window.rgb_hist_view.set_display_mode(selected_rgb_hist_mode(main_window))
+    apply_rgb_hist_settings(main_window, save=False)
 
     wheel_sat_threshold = _cfg_int(
         cfg,
@@ -433,14 +444,10 @@ def _load_wheel_and_capture_settings(main_window, cfg: dict) -> None:
         C.WHEEL_HARMONY_GUIDE_TYPES,
         C.DEFAULT_WHEEL_HARMONY_GUIDE_TYPE,
     )
-    set_enabled_if(main_window.combo_wheel_harmony_guide, wheel_harmony_guide_enabled)
 
     _set_value_blocked(main_window.spin_wheel_sat_threshold, wheel_sat_threshold)
-    main_window.wheel.set_mode(selected_wheel_mode(main_window))
-    main_window.wheel.set_harmony_guide_enabled(wheel_harmony_guide_enabled)
-    main_window.wheel.set_harmony_guide_type(selected_wheel_harmony_guide_type(main_window))
+    apply_wheel_settings(main_window, save=False, sync_color_band=False)
     main_window.wheel.set_harmony_guide_rotation(wheel_harmony_guide_rotation)
-    main_window.worker.set_wheel_sat_threshold(wheel_sat_threshold)
     main_window.worker.set_graph_every(C.DEFAULT_GRAPH_EVERY)
 
     color_band_use_wheel_sat = bool(
@@ -492,7 +499,19 @@ def _load_wheel_and_capture_settings(main_window, cfg: dict) -> None:
         C.CAPTURE_SOURCES,
         C.DEFAULT_CAPTURE_SOURCE,
     )
-    main_window._apply_capture_source(save=False)
+    capture_window_title = str(cfg.get(C.CFG_CAPTURE_WINDOW_TITLE, "") or "").strip()
+    capture_window_text = str(
+        cfg.get(C.CFG_CAPTURE_WINDOW_TEXT, capture_window_title) or ""
+    ).strip()
+    capture_window_roi_rel = dict_to_rect(cfg.get(C.CFG_CAPTURE_WINDOW_ROI_REL))
+    capture_screen_roi_abs = dict_to_rect(cfg.get(C.CFG_CAPTURE_SCREEN_ROI_ABS))
+    main_window._apply_capture_source(
+        save=False,
+        restore_window_title=capture_window_title,
+        restore_window_text=capture_window_text,
+        restore_window_roi_rel=capture_window_roi_rel,
+        restore_screen_roi_abs=capture_screen_roi_abs,
+    )
 
 
 def _load_composition_and_window_flags(main_window, cfg: dict) -> None:
@@ -503,7 +522,7 @@ def _load_composition_and_window_flags(main_window, cfg: dict) -> None:
         C.COMPOSITION_GUIDES,
         C.DEFAULT_COMPOSITION_GUIDE,
     )
-    _apply_composition_guide_to_views(main_window, selected_composition_guide(main_window))
+    apply_composition_guide_settings(main_window, save=False)
 
     # 領域プレビューは起動時の表示復元対象外にする（常に非表示開始）。
     set_checked_blocked(main_window.chk_preview_window, False)
@@ -548,7 +567,14 @@ def _load_image_view_settings(main_window, cfg: dict) -> None:
         C.EDGE_SENSITIVITY_MAX,
     )
     _set_value_blocked(main_window.spin_edge_sensitivity, edge_sens)
-    main_window.edge_view.set_sensitivity(edge_sens)
+    apply_edge_settings(main_window, save=False)
+    _apply_combo_choice(
+        main_window.combo_mirror_mode,
+        cfg.get(C.CFG_MIRROR_MODE, C.DEFAULT_MIRROR_MODE),
+        C.MIRROR_MODES,
+        C.DEFAULT_MIRROR_MODE,
+    )
+    apply_mirror_settings(main_window, save=False)
 
     _apply_combo_choice(
         main_window.combo_binary_preset,
@@ -556,7 +582,7 @@ def _load_image_view_settings(main_window, cfg: dict) -> None:
         C.BINARY_PRESETS,
         C.DEFAULT_BINARY_PRESET,
     )
-    main_window.binary_view.set_preset(selected_binary_preset(main_window))
+    apply_binary_settings(main_window, save=False)
 
     _apply_combo_choice(
         main_window.combo_ternary_preset,
@@ -564,7 +590,7 @@ def _load_image_view_settings(main_window, cfg: dict) -> None:
         C.TERNARY_PRESETS,
         C.DEFAULT_TERNARY_PRESET,
     )
-    main_window.ternary_view.set_preset(selected_ternary_preset(main_window))
+    apply_ternary_settings(main_window, save=False)
 
     saliency_alpha = _cfg_int(
         cfg,
@@ -574,7 +600,7 @@ def _load_image_view_settings(main_window, cfg: dict) -> None:
         C.SALIENCY_ALPHA_MAX,
     )
     _set_value_blocked(main_window.spin_saliency_alpha, saliency_alpha)
-    main_window.saliency_view.set_overlay_alpha(saliency_alpha)
+    apply_saliency_settings(main_window, save=False)
 
     focus_sens = _cfg_int(
         cfg,
@@ -598,9 +624,7 @@ def _load_image_view_settings(main_window, cfg: dict) -> None:
         C.FOCUS_PEAK_THICKNESS_MAX,
     )
     _set_value_blocked(main_window.spin_focus_peak_thickness, focus_thick)
-    main_window.focus_peaking_view.set_sensitivity(focus_sens)
-    main_window.focus_peaking_view.set_color(selected_focus_peak_color(main_window))
-    main_window.focus_peaking_view.set_thickness(focus_thick)
+    apply_focus_peaking_settings(main_window, save=False)
 
     _apply_combo_choice(
         main_window.combo_squint_mode,
@@ -624,10 +648,7 @@ def _load_image_view_settings(main_window, cfg: dict) -> None:
         C.SQUINT_BLUR_SIGMA_MAX,
     )
     _set_value_blocked(main_window.spin_squint_blur, squint_blur)
-    main_window.squint_view.set_mode(selected_squint_mode(main_window))
-    main_window.squint_view.set_scale_percent(squint_scale)
-    main_window.squint_view.set_blur_sigma(squint_blur)
-    sync_squint_mode_rows(main_window)
+    apply_squint_settings(main_window, save=False)
 
 
 def _load_vectorscope_settings(main_window, cfg: dict) -> None:
@@ -644,11 +665,7 @@ def _load_vectorscope_settings(main_window, cfg: dict) -> None:
         C.VECTORSCOPE_WARN_THRESHOLD_MAX,
     )
     _set_value_blocked(main_window.spin_vectorscope_warn_threshold, warn_threshold)
-    _apply_vectorscope_view_state(
-        main_window,
-        show_skin_line=show_skin_line,
-        warn_threshold=warn_threshold,
-    )
+    apply_vectorscope_settings(main_window, save=False)
 
 
 def _finalize_loaded_settings(main_window, cfg: dict) -> None:

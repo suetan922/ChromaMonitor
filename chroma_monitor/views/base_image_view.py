@@ -42,22 +42,37 @@ class BaseImageLabelView(QLabel):
         """標準サイズヒントを返す。"""
         return QSize(240, 240)
 
-    def _show_empty(self):
-        """未入力時のプレースホルダ文言を表示する。"""
-        self.setText(self._empty_text)
-
     def _set_last_bgr(self, bgr: Optional[np.ndarray]) -> bool:
         """最新フレームを保持し、有効入力かどうかを返す。"""
         self._last_bgr = bgr
         if bgr is None or bgr.size == 0:
             self._last_resize_render_size = None
-            self._show_empty()
+            self.setText(self._empty_text)
             return False
+        return True
+
+    def _set_state_value(
+        self,
+        attr_name: str,
+        next_value,
+        rerender: Callable[[np.ndarray], None],
+    ) -> bool:
+        """状態値を更新し、変化時のみ再描画する。"""
+        if getattr(self, attr_name) == next_value:
+            return False
+        setattr(self, attr_name, next_value)
+        self._rerender_with_last_bgr(rerender)
         return True
 
     def set_resize_renderer(self, renderer: Optional[Callable[[np.ndarray], None]]) -> None:
         """サイズ変更時に再描画するレンダラを設定する。"""
         self._resize_renderer = renderer
+
+    def _rerender_with_last_bgr(self, renderer: Callable[[np.ndarray], None]) -> None:
+        """保持中フレームがある場合のみ指定レンダラで再描画する。"""
+        if self._last_bgr is None:
+            return
+        renderer(self._last_bgr)
 
     def _rerender_on_resize(self, renderer: Callable[[np.ndarray], None]) -> None:
         """サイズ変化時に必要な場合のみ再レンダリングする。"""
@@ -95,6 +110,10 @@ class BaseImageLabelView(QLabel):
         if renderer is None:
             return
         self._rerender_on_resize(renderer)
+
+    def _is_resize_interaction_active(self) -> bool:
+        """リサイズ中のデバウンス待ち状態かを返す。"""
+        return self._resize_rerender_timer.isActive()
 
     def resizeEvent(self, event):
         """リサイズ時に軽量追従描画と遅延再描画を実行する。"""

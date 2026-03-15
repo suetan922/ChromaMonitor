@@ -1,4 +1,4 @@
-"""画像変換・描画向けの共通関数。"""
+"""画像処理系の共通関数。"""
 
 import math
 import weakref
@@ -7,8 +7,6 @@ from typing import Tuple
 
 import cv2
 import numpy as np
-from PySide6.QtCore import Qt
-from PySide6.QtGui import QImage, QPixmap
 
 _MAX_RENDER_EDGE = 2048
 _MAX_RENDER_AREA = _MAX_RENDER_EDGE * _MAX_RENDER_EDGE
@@ -20,6 +18,16 @@ _CVT_COLOR_CACHE_MAX_ENTRIES = 16
 _cvt_color_cache: "OrderedDict[tuple, tuple[weakref.ReferenceType[np.ndarray], np.ndarray]]" = (
     OrderedDict()
 )
+
+
+def _array_identity_key(src: np.ndarray) -> tuple:
+    """同一配列判定に使う軽量キーを返す。"""
+    return (
+        id(src),
+        src.shape,
+        src.strides,
+        src.dtype.str,
+    )
 
 
 def resize_by_long_edge(
@@ -40,12 +48,9 @@ def resize_by_long_edge(
         return src
 
     key = (
-        id(src),
+        _array_identity_key(src),
         int(max_dim),
         int(interpolation),
-        tuple(int(v) for v in src.shape),
-        tuple(int(v) for v in src.strides),
-        str(src.dtype),
     )
     cached = _resize_cache.get(key)
     if cached is not None:
@@ -74,11 +79,8 @@ def cvt_color_cached(img: np.ndarray, code: int) -> np.ndarray:
         return img
     src = np.asarray(img)
     key = (
-        id(src),
+        _array_identity_key(src),
         int(code),
-        tuple(int(v) for v in src.shape),
-        tuple(int(v) for v in src.strides),
-        str(src.dtype),
     )
     cached = _cvt_color_cache.get(key)
     if cached is not None:
@@ -123,32 +125,3 @@ def clamp_render_size(width: int, height: int) -> Tuple[int, int]:
         w = max(1, int(w * scale))
         h = max(1, int(h * scale))
     return w, h
-
-
-def _scaled_qpixmap_from_qimage(qimg: QImage, max_w: int, max_h: int) -> QPixmap:
-    """`QImage` を安全サイズへ等比スケーリングして `QPixmap` 化する。"""
-    pm = QPixmap.fromImage(qimg)
-    max_w, max_h = clamp_render_size(max_w, max_h)
-    return pm.scaled(max_w, max_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-
-
-def rgb_to_qpixmap(rgb: np.ndarray, max_w: int, max_h: int) -> QPixmap:
-    """NumPy の RGB 配列を `QPixmap` に変換する。"""
-    rgb = np.ascontiguousarray(rgb)
-    h, w = rgb.shape[:2]
-    qimg = QImage(rgb.data, w, h, w * 3, QImage.Format_RGB888)
-    return _scaled_qpixmap_from_qimage(qimg, max_w=max_w, max_h=max_h)
-
-
-def bgr_to_qpixmap(bgr: np.ndarray, max_w: int = 560, max_h: int = 420) -> QPixmap:
-    """NumPy の BGR 配列を `QPixmap` に変換する。"""
-    rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
-    return rgb_to_qpixmap(rgb, max_w=max_w, max_h=max_h)
-
-
-def gray_to_qpixmap(gray: np.ndarray, max_w: int, max_h: int) -> QPixmap:
-    """NumPy のグレースケール配列を `QPixmap` に変換する。"""
-    gray = np.ascontiguousarray(gray)
-    h, w = gray.shape[:2]
-    qimg = QImage(gray.data, w, h, w, QImage.Format_Grayscale8)
-    return _scaled_qpixmap_from_qimage(qimg, max_w=max_w, max_h=max_h)

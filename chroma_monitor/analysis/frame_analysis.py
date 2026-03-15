@@ -1,11 +1,13 @@
 """解析処理の補助関数。"""
 
+import threading
 from typing import Callable, Optional, TypeAlias
 
 import cv2
 import numpy as np
 
 from ..util import constants as C
+from ..util.color_utils import HUE_NAME_12
 from ..util.image_ops import resize_by_long_edge
 from ..util.value_utils import clamp_int
 
@@ -13,26 +15,22 @@ _WARM_HUE_LOW_END = 45
 _WARM_HUE_HIGH_START = 150
 _COOL_HUE_START = 60
 _COOL_HUE_END = 135
-_HUE_NAME_12 = (
-    "赤",
-    "橙",
-    "黄",
-    "黄緑",
-    "緑",
-    "青緑",
-    "水",
-    "青",
-    "藍",
-    "紫",
-    "赤紫",
-    "紅",
-)
 _TOP_COLOR_MEDOID_CANDIDATE_LIMIT = 64
 _TOP_COLOR_MEDOID_MAX_PIXELS_PER_SEGMENT = 120_000
 _SAMPLE_RGB_DIRECT_GATHER_THRESHOLD = 180_000
 TopColorBar: TypeAlias = tuple[str, float, tuple[int, int, int]]
 ProgressCb: TypeAlias = Optional[Callable[[int, str], None]]
 CancelCb: TypeAlias = Optional[Callable[[], bool]]
+_RNG_LOCAL = threading.local()
+
+
+def _thread_local_rng() -> np.random.Generator:
+    """現在スレッド専用の乱数生成器を返す。"""
+    rng = getattr(_RNG_LOCAL, "rng", None)
+    if rng is None:
+        rng = np.random.default_rng()
+        _RNG_LOCAL.rng = rng
+    return rng
 
 
 def _normalize_bgr_to_float01(bgr: np.ndarray) -> np.ndarray:
@@ -98,19 +96,27 @@ def _compute_hsv_histograms(
     return h_hist, s_hist, v_hist
 
 
-def _compute_wheel_stats(h_wheel: np.ndarray) -> tuple[np.ndarray, float, float, float]:
-    """色相環ヒストグラムと暖色/寒色/その他の比率を同時に計算する。"""
-    # 色相環ヒストグラムと暖寒比率を同じ raw ヒストグラムから計算して走査回数を減らす。
-    # 色相の広がりを抑えるため、色相環表示には平滑化を入れない。
-    if h_wheel.size == 0:
+def _compute_wheel_stats_from_hs(
+    h: np.ndarray,
+    s: np.ndarray,
+    sat_threshold: int,
+) -> tuple[np.ndarray, float, float, float]:
+    """H/S チャネルから彩度しきい値付きで色相環統計を計算する。"""
+    # h[s >= th] の一時配列を作らず、マスク付きヒストグラムで直接集計する。
+    if h is None or s is None or h.size <= 0 or s.size <= 0:
         return np.zeros(180, dtype=np.int64), 0.0, 0.0, 0.0
 
-    hist_raw = cv2.calcHist([h_wheel], [0], None, [180], [0, 180]).reshape(180).astype(np.int64)
+    sat_th = clamp_int(sat_threshold, C.WHEEL_SAT_THRESHOLD_MIN, C.WHEEL_SAT_THRESHOLD_MAX)
+    if sat_th <= C.WHEEL_SAT_THRESHOLD_MIN:
+        mask = None
+        total_color = float(h.size)
+    else:
+        mask = cv2.compare(s, int(sat_th) - 1, cv2.CMP_GT)
+        total_color = float(cv2.countNonZero(mask))
+        if total_color <= 0.0:
+            return np.zeros(180, dtype=np.int64), 0.0, 0.0, 0.0
 
-    total_color = float(h_wheel.size)
-    # OpenCV Hue(0..179)基準:
-    # 暖色 = 0..44 (0..88deg) + 150..179 (300..358deg)
-    # 寒色 = 60..134 (120..268deg)
+    hist_raw = cv2.calcHist([h], [0], mask, [180], [0, 180]).reshape(180).astype(np.int64)
     warm_count = float(
         hist_raw[:_WARM_HUE_LOW_END].sum() + hist_raw[_WARM_HUE_HIGH_START:180].sum()
     )
@@ -142,8 +148,9 @@ def _medoid_rgb_from_pixels(rgb_pixels: np.ndarray) -> tuple[int, int, int]:
     ur = np.right_shift(unique_codes, 10) & 31
     ug = np.right_shift(unique_codes, 5) & 31
     ub = unique_codes & 31
-    all_centers = np.stack([ur, ug, ub], axis=1).astype(np.float32) * 8.0 + 4.0
-    all_weights = counts.astype(np.float32)
+    # 距離計算は整数演算に寄せて、低スペック環境での浮動小数演算負荷を下げる。
+    all_centers = np.stack([ur, ug, ub], axis=1).astype(np.int16) * 8 + 4
+    all_weights = counts.astype(np.int32)
 
     candidate_count = min(int(_TOP_COLOR_MEDOID_CANDIDATE_LIMIT), int(unique_codes.size))
     if candidate_count < unique_codes.size:
@@ -152,12 +159,12 @@ def _medoid_rgb_from_pixels(rgb_pixels: np.ndarray) -> tuple[int, int, int]:
         candidate_idx = np.arange(unique_codes.size, dtype=np.int32)
     cand_centers = all_centers[candidate_idx]
 
-    diff = np.abs(cand_centers[:, None, :] - all_centers[None, :, :]).sum(axis=2)
+    diff = np.abs(cand_centers[:, None, :] - all_centers[None, :, :]).sum(axis=2, dtype=np.int32)
     scores = diff @ all_weights
     best_local = int(np.argmin(scores))
     best_idx = int(candidate_idx[best_local])
     best_code = int(unique_codes[best_idx])
-    best_center = all_centers[best_idx]
+    best_center = all_centers[best_idx].astype(np.float32)
 
     members = arr[packed == best_code]
     if members.size <= 0:
@@ -243,6 +250,96 @@ def _segment_hue_to_12bin(h_u16: np.ndarray) -> np.ndarray:
     return (((h_u16 * 2) // 30) % 12).astype(np.uint8, copy=False)
 
 
+def _compute_top_bars_chromatic_medoid_from_prepared(
+    *,
+    bgr_u8: np.ndarray,
+    h: np.ndarray,
+    s: np.ndarray,
+    sat_threshold: int,
+    top_count: int,
+) -> list[TopColorBar]:
+    """前計算済み BGR/H/S から配色比率上位色を返す。"""
+    if bgr_u8.ndim != 3 or bgr_u8.shape[2] < 3 or bgr_u8.size == 0:
+        return []
+    h_flat = h.reshape(-1)
+    s_flat = s.reshape(-1)
+    if h_flat.size == 0 or h_flat.size != s_flat.size:
+        return []
+
+    bgr_all = bgr_u8[:, :, :3].reshape(-1, 3)
+    if bgr_all.shape[0] != h_flat.size:
+        return []
+    rgb_all = bgr_all[:, ::-1]
+    sat_th = int(max(0, min(255, int(sat_threshold))))
+    max_count = max(1, int(top_count))
+
+    if sat_th <= 0:
+        achro_bin = 12
+        seg = np.full(h_flat.shape, achro_bin, dtype=np.uint8)
+        chroma_mask = s_flat > 0
+        h_chroma = h_flat[chroma_mask].astype(np.uint16, copy=False)
+        seg[chroma_mask] = _segment_hue_to_12bin(h_chroma)
+        counts = np.bincount(seg, minlength=13)[:13]
+        return _build_top_color_bars(
+            counts=counts,
+            seg=seg,
+            rgb_source=rgb_all,
+            max_count=max_count,
+            label_for_idx=lambda idx, achro=achro_bin: (
+                "無彩色"
+                if int(idx) == int(achro)
+                else HUE_NAME_12[int(idx) % len(HUE_NAME_12)]
+            ),
+        )
+
+    # 色相環と同じく「しきい値未満を除外」するため、しきい値ちょうどは含める。
+    chroma_mask = s_flat >= sat_th
+    if not np.any(chroma_mask):
+        return []
+
+    h_chroma = h_flat[chroma_mask].astype(np.uint16, copy=False)
+    seg = _segment_hue_to_12bin(h_chroma)
+    counts = np.bincount(seg, minlength=12)[:12]
+    rgb_chroma = rgb_all[chroma_mask]
+    return _build_top_color_bars(
+        counts=counts,
+        seg=seg,
+        rgb_source=rgb_chroma,
+        max_count=max_count,
+        label_for_idx=lambda idx: HUE_NAME_12[int(idx) % len(HUE_NAME_12)],
+    )
+
+
+def compute_top_bars_chromatic_medoid_from_hs(
+    bgr_u8: np.ndarray | None,
+    h: np.ndarray | None,
+    s: np.ndarray | None,
+    *,
+    sat_threshold: int = 0,
+    top_count: int = 8,
+) -> list[TopColorBar]:
+    """前計算済み H/S を使って配色比率上位色を計算する。"""
+    if bgr_u8 is None or h is None or s is None:
+        return []
+    bgr_arr = np.asarray(bgr_u8)
+    h_arr = np.asarray(h)
+    s_arr = np.asarray(s)
+    if bgr_arr.dtype != np.uint8 or h_arr.dtype != np.uint8 or s_arr.dtype != np.uint8:
+        # 想定外dtypeは既存経路にフォールバックし、表示結果の互換性を優先する。
+        return compute_top_bars_chromatic_medoid(
+            bgr_arr,
+            sat_threshold=sat_threshold,
+            top_count=top_count,
+        )
+    return _compute_top_bars_chromatic_medoid_from_prepared(
+        bgr_u8=bgr_arr,
+        h=h_arr,
+        s=s_arr,
+        sat_threshold=sat_threshold,
+        top_count=top_count,
+    )
+
+
 def compute_top_bars_chromatic_medoid(
     bgr_preview: np.ndarray | None,
     *,
@@ -261,48 +358,12 @@ def compute_top_bars_chromatic_medoid(
         return []
 
     bgr_u8, h, s, _v = _prepare_hsv8_and_bgr8(bgr)
-    h_flat = h.reshape(-1)
-    s_flat = s.reshape(-1)
-    if h_flat.size == 0:
-        return []
-
-    sat_th = int(max(0, min(255, int(sat_threshold))))
-    bgr_all = bgr_u8.reshape(-1, 3)
-    rgb_all = bgr_all[:, ::-1]
-    max_count = max(1, int(top_count))
-
-    if sat_th <= 0:
-        achro_bin = 12
-        seg = np.full(h_flat.shape, achro_bin, dtype=np.uint8)
-        chroma_mask = s_flat > 0
-        h_chroma = h_flat[chroma_mask].astype(np.uint16, copy=False)
-        seg[chroma_mask] = _segment_hue_to_12bin(h_chroma)
-        counts = np.bincount(seg, minlength=13)[:13]
-        return _build_top_color_bars(
-            counts=counts,
-            seg=seg,
-            rgb_source=rgb_all,
-            max_count=max_count,
-            label_for_idx=lambda idx, achro=achro_bin: (
-                "無彩色" if int(idx) == int(achro) else _HUE_NAME_12[int(idx) % 12]
-            ),
-        )
-
-    # 色相環と同じく「しきい値未満を除外」するため、しきい値ちょうどは含める。
-    chroma_mask = s_flat >= sat_th
-    if not np.any(chroma_mask):
-        return []
-
-    h_chroma = h_flat[chroma_mask].astype(np.uint16, copy=False)
-    seg = _segment_hue_to_12bin(h_chroma)
-    counts = np.bincount(seg, minlength=12)[:12]
-    rgb_chroma = rgb_all[chroma_mask]
-    return _build_top_color_bars(
-        counts=counts,
-        seg=seg,
-        rgb_source=rgb_chroma,
-        max_count=max_count,
-        label_for_idx=lambda idx: _HUE_NAME_12[int(idx) % 12],
+    return _compute_top_bars_chromatic_medoid_from_prepared(
+        bgr_u8=bgr_u8,
+        h=h,
+        s=s,
+        sat_threshold=sat_threshold,
+        top_count=top_count,
     )
 
 
@@ -362,7 +423,8 @@ def _sample_sv_and_rgb(
     k = min(points, n)
     bgr_flat = bgr.reshape(-1, 3)
     if k < n:
-        idx = np.random.randint(0, n, size=k, dtype=np.int32)
+        # スレッドローカルRNGを使ってグローバルRNGロックの競合を避ける。
+        idx = _thread_local_rng().integers(0, n, size=k, dtype=np.int32)
         hsv = _gather_hsv_by_indices(flat_h, flat_s, flat_v, idx)
         rgb = _gather_rgb_from_bgr_indices(bgr_flat, idx)
     else:
@@ -470,10 +532,6 @@ def analyze_bgr_frame(
         return None
     bgr_u8, h, s, v = _prepare_hsv8_and_bgr8(bgr_work)
 
-    # 色相環側の彩度しきい値。
-    sat_th = clamp_int(wheel_sat_threshold, C.WHEEL_SAT_THRESHOLD_MIN, C.WHEEL_SAT_THRESHOLD_MAX)
-    wheel_mask = s >= sat_th
-
     if _emit_step_and_check_cancel(
         progress_cb,
         cancel_cb,
@@ -481,9 +539,11 @@ def analyze_bgr_frame(
         text="色相ヒストグラム集計中…",
     ):
         return None
-    # h_wheel は色相環表示用。
-    h_wheel = h[wheel_mask]
-    hist, warm_ratio, cool_ratio, other_ratio = _compute_wheel_stats(h_wheel)
+    hist, warm_ratio, cool_ratio, other_ratio = _compute_wheel_stats_from_hs(
+        h,
+        s,
+        int(wheel_sat_threshold),
+    )
     h_hist, s_hist, v_hist = _compute_hsv_histograms(h, s, v)
 
     if _emit_step_and_check_cancel(
@@ -505,8 +565,10 @@ def analyze_bgr_frame(
     top_colors = None
     if color_band_sat_threshold is not None:
         # 配色比率は必要時のみ計算。
-        top_colors = compute_top_bars_chromatic_medoid(
+        top_colors = compute_top_bars_chromatic_medoid_from_hs(
             bgr_u8,
+            h,
+            s,
             sat_threshold=int(color_band_sat_threshold),
             top_count=int(C.TOP_COLORS_COUNT),
         )

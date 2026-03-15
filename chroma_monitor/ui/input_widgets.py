@@ -1,5 +1,6 @@
 """入力系ウィジェットと補助関数。"""
 
+import inspect
 import time
 
 from PySide6.QtCore import QEvent, Qt, QTimer
@@ -95,6 +96,7 @@ class RefreshOnInteractComboBox(QComboBox):
         """更新コールバックと重複抑止用状態を初期化する。"""
         super().__init__(*args, **kwargs)
         self._refresh_callback = None
+        self._refresh_callback_accepts_force = False
         self._refresh_min_interval_sec = 0.0
         self._last_refresh_monotonic = 0.0
         self._install_line_edit_filter()
@@ -110,6 +112,7 @@ class RefreshOnInteractComboBox(QComboBox):
     def set_refresh_callback(self, callback, *, min_interval_ms: int = 700) -> None:
         """候補更新コールバックと最小再実行間隔を設定する。"""
         self._refresh_callback = callback
+        self._refresh_callback_accepts_force = _callback_accepts_force_keyword(callback)
         self._refresh_min_interval_sec = max(0.0, int(min_interval_ms) / 1000.0)
 
     def _install_line_edit_filter(self) -> None:
@@ -119,30 +122,40 @@ class RefreshOnInteractComboBox(QComboBox):
             editor.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
             editor.installEventFilter(self)
 
-    def _maybe_refresh_items(self) -> None:
-        """短時間の重複呼び出しを抑止して更新コールバックを実行する。"""
+    def _invoke_refresh_callback(self, *, force: bool) -> None:
+        """更新コールバックを呼び出す。"""
         if not callable(self._refresh_callback):
             return
+        if bool(self._refresh_callback_accepts_force):
+            self._refresh_callback(force=bool(force))
+            return
+        self._refresh_callback()
+
+    def _maybe_refresh_items(self, *, force: bool = False) -> None:
+        """短時間の重複呼び出しを抑止して更新コールバックを実行する。"""
         now = time.monotonic()
-        if (now - float(self._last_refresh_monotonic)) < float(self._refresh_min_interval_sec):
+        if (not bool(force)) and (
+            (now - float(self._last_refresh_monotonic)) < float(self._refresh_min_interval_sec)
+        ):
             return
         self._last_refresh_monotonic = now
-        self._refresh_callback()
+        self._invoke_refresh_callback(force=bool(force))
 
     def focusInEvent(self, event) -> None:
         """コンボ本体へフォーカスが来た時に候補を最新化する。"""
         super().focusInEvent(event)
-        self._maybe_refresh_items()
+        self._maybe_refresh_items(force=False)
 
     def showPopup(self) -> None:
         """候補一覧を開く直前に対象一覧を最新化する。"""
-        self._maybe_refresh_items()
+        # 明示的に開いたときは最小間隔の抑止を超えて再取得する。
+        self._maybe_refresh_items(force=True)
         super().showPopup()
 
     def eventFilter(self, obj, event):
         """内包入力欄のフォーカス時にも候補を最新化する。"""
         if obj is self.lineEdit() and event.type() == QEvent.FocusIn:
-            self._maybe_refresh_items()
+            self._maybe_refresh_items(force=False)
         return super().eventFilter(obj, event)
 
 
@@ -189,3 +202,22 @@ def add_checkable_action(menu, text: str, checked: bool, toggled_cb):
     action.setChecked(bool(checked))
     action.toggled.connect(toggled_cb)
     return action
+
+
+def _callback_accepts_force_keyword(callback) -> bool:
+    """callback が `force=` キーワードを受け取れるか判定する。"""
+    if not callable(callback):
+        return False
+    try:
+        sig = inspect.signature(callback)
+    except (TypeError, ValueError):
+        return False
+    for param in sig.parameters.values():
+        if param.kind == inspect.Parameter.VAR_KEYWORD:
+            return True
+        if param.name == "force" and param.kind in (
+            inspect.Parameter.POSITIONAL_OR_KEYWORD,
+            inspect.Parameter.KEYWORD_ONLY,
+        ):
+            return True
+    return False

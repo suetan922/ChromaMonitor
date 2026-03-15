@@ -25,12 +25,20 @@ def close_roi_selectors(main_window):
             pass
 
 
+def cancel_roi_selection(main_window, *, announce: bool = False) -> None:
+    """進行中の領域選択をキャンセルして必要ならステータス表示する。"""
+    had_selectors = bool(getattr(main_window, "_roi_selectors", ()))
+    close_roi_selectors(main_window)
+    if announce and had_selectors:
+        main_window.on_status("領域選択をキャンセルしました")
+
+
 def _build_roi_selector(main_window, bounds: QRect, help_text: str, on_selected):
     """共通設定済みのROIセレクタを生成する。"""
     sel = RoiSelector(bounds=bounds, help_text=help_text, as_window=True)
     sel.roiSelected.connect(on_selected)
     # どの画面でキャンセルしても、残りのオーバーレイを必ず閉じる。
-    sel.selectionCanceled.connect(lambda mw=main_window: close_roi_selectors(mw))
+    sel.selectionCanceled.connect(lambda mw=main_window: cancel_roi_selection(mw, announce=True))
     # destroyed シグナルで逆参照を片付ける。
     sel.destroyed.connect(lambda _=None, s=sel: on_roi_selector_destroyed(main_window, s))
     return sel
@@ -97,6 +105,7 @@ def on_roi_screen_selected(main_window, r: QRect):
     main_window.worker.set_capture_selection(target_hwnd=None, roi_rel=None, roi_abs=r)
     main_window.on_status(f"画面領域: x={r.left()} y={r.top()} w={r.width()} h={r.height()}")
     main_window._update_preview_snapshot()
+    main_window._request_save_settings()
 
 
 def pick_roi_in_window(main_window):
@@ -119,7 +128,7 @@ def pick_roi_in_window(main_window):
         return
     bounds_native = main_window.worker._get_window_rect(int(hwnd))
     if bounds_native is None:
-        QMessageBox.warning(main_window, "警告", "ウィンドウ矩形の取得に失敗しました。")
+        QMessageBox.warning(main_window, "警告", "ウィンドウの表示範囲を取得できませんでした。")
         return
     window_bounds_logical = main_window.worker._native_rect_to_logical(bounds_native)
     help_text = "ターゲットウィンドウ内で領域をドラッグ選択（Escでキャンセル）"
@@ -152,3 +161,4 @@ def on_roi_window_selected(main_window, hwnd: int, wrect: QRect, roi_abs_logical
         f"ウィンドウ領域: rel_x={rel.left()} rel_y={rel.top()} w={rel.width()} h={rel.height()}"
     )
     main_window._update_preview_snapshot()
+    main_window._request_save_settings()

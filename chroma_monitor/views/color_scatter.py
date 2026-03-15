@@ -5,7 +5,7 @@ from typing import Optional
 
 import cv2
 import numpy as np
-from PySide6.QtCore import QEvent, QPoint, QSize, Qt, Signal, QTimer
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
 from PySide6.QtWidgets import QLabel, QSizePolicy, QWidget
 
@@ -114,6 +114,7 @@ _WHEEL_THICKNESS_MODE_RELATIVE_MAX = "relative_max"
 # - relative_max: 最大ビン基準（count / local_max）で太さを決める（既定）
 _WHEEL_THICKNESS_MODE = _WHEEL_THICKNESS_MODE_RELATIVE_MAX
 
+
 def _build_hue180_to_munsell40_weights() -> np.ndarray:
     """HSV180ビンをマンセル40色相へ再配分する重み行列を作る。"""
     src_bins = 180
@@ -142,13 +143,12 @@ def _build_hue180_to_munsell40_weights() -> np.ndarray:
 
 HUE180_TO_MUNSELL40_WEIGHTS = _build_hue180_to_munsell40_weights()
 _MUNSELL_COLORS_Q = tuple(QColor(r, g, b, 255) for (r, g, b) in _MUNSELL_COLORS_RGB)
-_HSV180_COLORS_Q = tuple(
-    QColor.fromHsv(int((h / 180.0) * 360.0), 255, 255) for h in range(180)
-)
+_HSV180_COLORS_Q = tuple(QColor.fromHsv(int((h / 180.0) * 360.0), 255, 255) for h in range(180))
 
 
 class ColorWheelWidget(QWidget):
     """色相分布をリング状に可視化する色相環ウィジェット。"""
+
     harmonyGuideRotationChanged = Signal(float)
 
     def __init__(self):
@@ -173,6 +173,14 @@ class ColorWheelWidget(QWidget):
         self._guide_drag_start_angle = 0.0
         self._guide_drag_start_rotation = 0.0
 
+    def _set_state_and_update(self, attr_name: str, next_value) -> bool:
+        """状態値を更新し、変化時のみ再描画する。"""
+        if getattr(self, attr_name) == next_value:
+            return False
+        setattr(self, attr_name, next_value)
+        self.update()
+        return True
+
     def update_hist(self, hist: np.ndarray):
         """色相ヒストグラムを更新して再描画する。"""
         # 受け取ったヒストグラムを描画向けに float32 化して保持する。
@@ -185,18 +193,12 @@ class ColorWheelWidget(QWidget):
     def set_mode(self, mode: str):
         """色相環の表示方式を更新する。"""
         normalized = safe_choice(mode, C.WHEEL_MODES, C.DEFAULT_WHEEL_MODE)
-        if self._mode == normalized:
-            return
-        self._mode = normalized
-        self.update()
+        self._set_state_and_update("_mode", normalized)
 
     def set_harmony_guide_enabled(self, enabled: bool):
         """色彩調和ガイド表示の有効/無効を切り替える。"""
         next_enabled = bool(enabled)
-        if self._guide_enabled == next_enabled:
-            return
-        self._guide_enabled = next_enabled
-        self.update()
+        self._set_state_and_update("_guide_enabled", next_enabled)
 
     def set_harmony_guide_type(self, guide_type: str):
         """色彩調和ガイド種別を更新する。"""
@@ -205,10 +207,7 @@ class ColorWheelWidget(QWidget):
             C.WHEEL_HARMONY_GUIDE_TYPES,
             C.DEFAULT_WHEEL_HARMONY_GUIDE_TYPE,
         )
-        if self._guide_type == normalized:
-            return
-        self._guide_type = normalized
-        self.update()
+        self._set_state_and_update("_guide_type", normalized)
 
     def set_harmony_guide_rotation(self, rotation_deg: float):
         """色彩調和ガイドの回転角を設定する。"""
@@ -332,7 +331,9 @@ class ColorWheelWidget(QWidget):
         painter.setPen(Qt.NoPen)
         painter.setBrush(_WHEEL_HARMONY_GUIDE_DOT_COLOR)
         for pt in points:
-            painter.drawEllipse(pt, _WHEEL_HARMONY_GUIDE_DOT_RADIUS, _WHEEL_HARMONY_GUIDE_DOT_RADIUS)
+            painter.drawEllipse(
+                pt, _WHEEL_HARMONY_GUIDE_DOT_RADIUS, _WHEEL_HARMONY_GUIDE_DOT_RADIUS
+            )
 
     @staticmethod
     def _point_angle_deg(px: int, py: int, cx: int, cy: int) -> float:
@@ -340,17 +341,14 @@ class ColorWheelWidget(QWidget):
         # 画面座標(下向き+Y)を数学座標へ変換して角度化する。
         return math.degrees(math.atan2(float(cy - py), float(px - cx))) % 360.0
 
-    def _is_guide_drag_enabled(self) -> bool:
-        """ガイド回転ドラッグが有効かを返す。"""
-        return bool(
-            self._guide_enabled
-            and self._guide_type != C.WHEEL_HARMONY_GUIDE_NONE
-            and self._guide_type in C.WHEEL_HARMONY_GUIDE_OFFSETS_DEG
-        )
-
     def mousePressEvent(self, event):
         """内周クリック時はガイド回転ドラッグを開始する。"""
-        if event.button() == Qt.LeftButton and self._is_guide_drag_enabled():
+        if (
+            event.button() == Qt.LeftButton
+            and self._guide_enabled
+            and self._guide_type != C.WHEEL_HARMONY_GUIDE_NONE
+            and self._guide_type in C.WHEEL_HARMONY_GUIDE_OFFSETS_DEG
+        ):
             cx, cy, _r, inner_r = self._wheel_geometry()
             pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
             dx = int(pos.x()) - int(cx)
@@ -426,8 +424,7 @@ class ColorWheelWidget(QWidget):
                 p.setPen(Qt.NoPen)
                 p.setBrush(c)
                 center_deg = (
-                    float(C.HUE_RED_REFERENCE_DEG)
-                    + float(C.HUE_DIRECTION_SIGN) * (h * step_deg)
+                    float(C.HUE_RED_REFERENCE_DEG) + float(C.HUE_DIRECTION_SIGN) * (h * step_deg)
                 ) % 360.0
                 start_deg = center_deg - (step_deg / 2.0) - overlap_deg
                 span_deg = step_deg + overlap_deg * 2.0
@@ -468,8 +465,7 @@ class ColorWheelWidget(QWidget):
                 p.setPen(Qt.NoPen)
                 p.setBrush(c)
                 center_deg = (
-                    float(C.HUE_RED_REFERENCE_DEG)
-                    + float(C.HUE_DIRECTION_SIGN) * (h * step_deg)
+                    float(C.HUE_RED_REFERENCE_DEG) + float(C.HUE_DIRECTION_SIGN) * (h * step_deg)
                 ) % 360.0
                 start_deg = center_deg - (step_deg / 2.0) - overlap_deg
                 span_deg = step_deg + overlap_deg * 2.0
@@ -527,11 +523,27 @@ class ScatterRasterWidget(QLabel):
         self._layout_sync_timer.timeout.connect(self._sync_after_layout_change)
         self._shape = C.SCATTER_SHAPE_SQUARE
         self._render_mode = C.DEFAULT_SCATTER_RENDER_MODE
+        self._need_rgb_for_render = self._render_mode != C.SCATTER_RENDER_MODE_HEATMAP
         self._hue_filter_enabled = bool(C.DEFAULT_SCATTER_HUE_FILTER_ENABLED)
         self._hue_center = clamp_int(
             C.DEFAULT_SCATTER_HUE_CENTER, C.SCATTER_HUE_MIN, C.SCATTER_HUE_MAX
         )
         self._show_scatter_frame_only()
+
+    def _rerender_or_show_frame(self) -> None:
+        """直近データがあれば再描画し、なければ枠のみ表示する。"""
+        if self._last_sv is not None and self._last_rgb is not None:
+            self.update_scatter(self._last_sv, self._last_rgb)
+            return
+        self._show_scatter_frame_only()
+
+    def _can_render_current_geometry(self) -> bool:
+        """現在の可視状態とサイズで描画可能かを返す。"""
+        if not self.isVisible() or self.isHidden():
+            return False
+        if self.width() <= 1 or self.height() <= 1:
+            return False
+        return True
 
     def request_layout_sync(self):
         """外部レイアウト変更後に散布図表示のサイズ同期を予約する。"""
@@ -548,10 +560,7 @@ class ScatterRasterWidget(QLabel):
         if self._shape == next_shape:
             return
         self._shape = next_shape
-        if self._last_sv is not None and self._last_rgb is not None:
-            self.update_scatter(self._last_sv, self._last_rgb)
-        else:
-            self._show_scatter_frame_only()
+        self._rerender_or_show_frame()
 
     def set_render_mode(self, mode: str):
         """散布図の描画方式(代表色/ヒートマップ)を切り替える。"""
@@ -563,10 +572,8 @@ class ScatterRasterWidget(QLabel):
         if self._render_mode == normalized:
             return
         self._render_mode = normalized
-        if self._last_sv is not None and self._last_rgb is not None:
-            self.update_scatter(self._last_sv, self._last_rgb)
-        else:
-            self._show_scatter_frame_only()
+        self._need_rgb_for_render = self._render_mode != C.SCATTER_RENDER_MODE_HEATMAP
+        self._rerender_or_show_frame()
 
     def set_hue_filter(self, enabled: bool, center: int):
         """色相フィルターの有効状態と中心色相を更新する。"""
@@ -577,10 +584,7 @@ class ScatterRasterWidget(QLabel):
             return
         self._hue_filter_enabled = next_enabled
         self._hue_center = next_center
-        if self._last_sv is not None and self._last_rgb is not None:
-            self.update_scatter(self._last_sv, self._last_rgb)
-        else:
-            self._show_scatter_frame_only()
+        self._rerender_or_show_frame()
 
     def minimumSizeHint(self):
         """散布図ビューの最小サイズヒントを返す。"""
@@ -658,9 +662,7 @@ class ScatterRasterWidget(QLabel):
     def _rerender_after_resize_idle(self):
         """リサイズ停止後に高品質再描画へ戻す。"""
         # リサイズ停止後に1回だけ通常描画へ戻す。
-        if not self.isVisible() or self.isHidden():
-            return
-        if self.width() <= 1 or self.height() <= 1:
+        if not self._can_render_current_geometry():
             return
         # 散布図のベース画像(256x256)はサイズ非依存なので、まずは再計算せず高品質リスケールだけ行う。
         if self._present_scatter_from_base(smooth=True):
@@ -670,9 +672,7 @@ class ScatterRasterWidget(QLabel):
 
     def _sync_after_layout_change(self):
         """レイアウト変更後に現在サイズへ再スケールして見切れを防ぐ。"""
-        if not self.isVisible() or self.isHidden():
-            return
-        if self.width() <= 1 or self.height() <= 1:
+        if not self._can_render_current_geometry():
             return
         if self._present_scatter_from_base(smooth=False):
             self._resize_recalc_timer.start()
@@ -927,14 +927,6 @@ class ScatterRasterWidget(QLabel):
                 return None
         return sv_used, rgb_u8
 
-    def _resolved_render_mode(self) -> str:
-        """現在設定に対する有効な散布図描画モードを返す。"""
-        return safe_choice(
-            self._render_mode,
-            C.SCATTER_RENDER_MODES,
-            C.DEFAULT_SCATTER_RENDER_MODE,
-        )
-
     def _render_scatter_image(
         self,
         *,
@@ -956,19 +948,17 @@ class ScatterRasterWidget(QLabel):
         if validated is None:
             return None
         sv_arr, rgb_arr, n = validated
-        render_mode = self._resolved_render_mode()
-        need_rgb_for_render = render_mode != C.SCATTER_RENDER_MODE_HEATMAP
         prepared = self._prepare_scatter_samples(
             sv_arr,
             rgb_arr,
             n=n,
-            need_rgb_for_render=bool(need_rgb_for_render),
+            need_rgb_for_render=self._need_rgb_for_render,
         )
         if prepared is None:
             return None
         sv_used, rgb_u8 = prepared
         return self._render_scatter_image(
-            render_mode=render_mode,
+            render_mode=self._render_mode,
             sv_used=sv_used,
             rgb_u8=rgb_u8,
         )
@@ -1005,6 +995,7 @@ class ScatterRasterWidget(QLabel):
             # 描画エラー時は四角モードへフォールバックして継続
             self._shape = C.SCATTER_SHAPE_SQUARE
             self._render_mode = C.SCATTER_RENDER_MODE_DOMINANT
+            self._need_rgb_for_render = True
             try:
                 img = self._build_scatter_image_square_fallback(sv, rgb)
                 if img is None:
@@ -1027,9 +1018,7 @@ class ScatterRasterWidget(QLabel):
         super().resizeEvent(event)
         if event.size() == event.oldSize():
             return
-        if not self.isVisible() or self.isHidden():
-            return
-        if self.width() <= 1 or self.height() <= 1:
+        if not self._can_render_current_geometry():
             return
         # リサイズ時は点群再集計せず、キャッシュ済みベース画像の再スケールだけ行う。
         if self._present_scatter_from_base(smooth=False):

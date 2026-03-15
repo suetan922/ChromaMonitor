@@ -9,7 +9,7 @@ APP_RELEASES_URL = f"https://github.com/{APP_GITHUB_REPOSITORY}/releases"
 """リリースページURL。"""
 
 # Analyzer constraints
-ANALYZER_MAX_DIM = 400
+ANALYZER_MAX_DIM = 640
 """解析時の既定長辺ピクセル。"""
 ANALYZER_MAX_DIM_MIN = 120
 """解析長辺のUI入力最小値。"""
@@ -142,6 +142,16 @@ RGB_HIST_MODE_SIDE_BY_SIDE = "side_by_side"
 RGB_HIST_MODE_OVERLAY = "overlay"
 RGB_HIST_MODES = (RGB_HIST_MODE_SIDE_BY_SIDE, RGB_HIST_MODE_OVERLAY)
 
+# Mirror display modes
+MIRROR_MODE_HORIZONTAL = "horizontal"
+MIRROR_MODE_VERTICAL = "vertical"
+MIRROR_MODE_BOTH = "both"
+MIRROR_MODES = (
+    MIRROR_MODE_HORIZONTAL,
+    MIRROR_MODE_VERTICAL,
+    MIRROR_MODE_BOTH,
+)
+
 # Analysis resolution modes
 ANALYSIS_RESOLUTION_MODE_ORIGINAL = "original"
 ANALYSIS_RESOLUTION_MODE_CUSTOM = "custom"
@@ -197,7 +207,7 @@ SQUINT_MODES = (
 )
 
 # Vectorscope
-VECTORSCOPE_WARN_THRESHOLD_MIN = 40
+VECTORSCOPE_WARN_THRESHOLD_MIN = 1
 """高彩度警告しきい値(%)の最小値。"""
 VECTORSCOPE_WARN_THRESHOLD_MAX = 100
 """高彩度警告しきい値(%)の最大値。"""
@@ -245,6 +255,8 @@ DEFAULT_WHEEL_HARMONY_GUIDE_TYPE = WHEEL_HARMONY_GUIDE_IDENTITY
 """色彩調和ガイド種別の既定値。"""
 DEFAULT_RGB_HIST_MODE = RGB_HIST_MODE_SIDE_BY_SIDE
 """RGBヒストグラム表示モード既定値。"""
+DEFAULT_MIRROR_MODE = MIRROR_MODE_HORIZONTAL
+"""反転表示モード既定値。"""
 DEFAULT_WHEEL_SAT_THRESHOLD = 1
 """色相環集計で使う彩度しきい値既定値。"""
 DEFAULT_COLOR_BAND_USE_WHEEL_SAT_THRESHOLD = False
@@ -298,7 +310,7 @@ VIEW_MIN_HEIGHT = 48
 """ドック/ビューの共通最小高さ(px)。"""
 
 # Debug logging
-DEBUG_UI_LOG_ENABLED = True
+DEBUG_UI_LOG_ENABLED = False
 """UI デバッグログの既定有効状態。"""
 DEBUG_UI_LOG_FILE = "ui_debug.log"
 """UI デバッグログの既定ファイル名。"""
@@ -374,6 +386,7 @@ CFG_SCATTER_HUE_FILTER_ENABLED = "scatter_hue_filter_enabled"
 CFG_SCATTER_HUE_CENTER = "scatter_hue_center"
 CFG_WHEEL_MODE = "wheel_mode"
 CFG_RGB_HIST_MODE = "rgb_hist_mode"
+CFG_MIRROR_MODE = "mirror_mode"
 CFG_WHEEL_SAT_THRESHOLD = "wheel_sat_threshold"
 CFG_WHEEL_HARMONY_GUIDE_ENABLED = "wheel_harmony_guide_enabled"
 CFG_WHEEL_HARMONY_GUIDE_TYPE = "wheel_harmony_guide_type"
@@ -384,6 +397,10 @@ CFG_COLOR_BAND_USE_WHEEL_HARMONY = "color_band_use_wheel_harmony"
 CFG_COLOR_BAND_HARMONY_GUIDE_ENABLED = "color_band_harmony_guide_enabled"
 CFG_COLOR_BAND_HARMONY_GUIDE_TYPE = "color_band_harmony_guide_type"
 CFG_CAPTURE_SOURCE = "capture_source"
+CFG_CAPTURE_WINDOW_TITLE = "capture_window_title"
+CFG_CAPTURE_WINDOW_TEXT = "capture_window_text"
+CFG_CAPTURE_WINDOW_ROI_REL = "capture_window_roi_rel"
+CFG_CAPTURE_SCREEN_ROI_ABS = "capture_screen_roi_abs"
 CFG_EDGE_SENSITIVITY = "edge_sensitivity"
 CFG_BINARY_PRESET = "binary_preset"
 CFG_TERNARY_PRESET = "ternary_preset"

@@ -6,7 +6,7 @@ import numpy as np
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
-from ..util.image_ops import bgr_to_qpixmap
+from ..util.qt_image import bgr_to_qpixmap
 
 
 class _PreviewImageLabel(QLabel):
@@ -56,6 +56,13 @@ class PreviewWindow(QWidget):
         self._last_render_key = render_key
         pm = bgr_to_qpixmap(bgr, max_w=max_w, max_h=max_h)
         self.lbl.setPixmap(pm)
+
+    def show_placeholder(self, text: str):
+        """プレビュー画像をクリアし、案内テキストを表示する。"""
+        self._last_bgr = None
+        self._last_render_key = None
+        self.lbl.clear()
+        self.lbl.setText(str(text or "領域プレビュー"))
 
     def set_composition_guide(self, _guide: str):
         """プレビューでは構図ガイドを無効化する。"""

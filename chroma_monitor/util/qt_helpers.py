@@ -78,6 +78,38 @@ def set_enabled_if(widget: QObject | None, enabled: bool) -> None:
     widget.setEnabled(bool(enabled))
 
 
+def rect_to_dict(rect) -> dict[str, int] | None:
+    """QRect互換オブジェクトを `{x,y,w,h}` へ変換する。"""
+    if rect is None:
+        return None
+    try:
+        x = int(rect.x())
+        y = int(rect.y())
+        w = int(rect.width())
+        h = int(rect.height())
+    except Exception:
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return {"x": x, "y": y, "w": w, "h": h}
+
+
+def dict_to_rect(raw) -> QRect | None:
+    """`{x,y,w,h}` 辞書を検証済み `QRect` に変換する。"""
+    if not isinstance(raw, dict):
+        return None
+    try:
+        x = int(raw.get("x"))
+        y = int(raw.get("y"))
+        w = int(raw.get("w"))
+        h = int(raw.get("h"))
+    except Exception:
+        return None
+    if w <= 0 or h <= 0:
+        return None
+    return QRect(x, y, w, h)
+
+
 def is_widget_renderable(widget: QObject) -> bool:
     """ウィジェットが実描画対象として更新可能かを返す。"""
     if widget is None:
@@ -101,3 +133,13 @@ def is_widget_renderable(widget: QObject) -> bool:
     except Exception:
         pass
     return True
+
+
+def safe_window_handle(widget: QObject | None):
+    """`windowHandle()` を安全に取得し、失敗時は `None` を返す。"""
+    if widget is None:
+        return None
+    try:
+        return widget.windowHandle()
+    except Exception:
+        return None

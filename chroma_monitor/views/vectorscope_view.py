@@ -6,16 +6,19 @@ import cv2
 import numpy as np
 
 from ..util import constants as C
-from ..util.image_ops import bgr_to_qpixmap, resize_by_long_edge
+from ..util.image_math import normalize_map
+from ..util.qt_image import bgr_to_qpixmap
 from ..util.value_utils import clamp_int
 from .base_image_view import BaseImageLabelView
-from .image_math import normalize_map
 
 _VECTORSCOPE_SIZE = 256
 _VECTORSCOPE_CHROMA_FULL_SCALE = 181.0
 _VECTORSCOPE_SKIN_LINE_ANGLE_DEG = 123.0
 _VECTORSCOPE_SCOPE_RADIUS_RATIO = 0.46
 _VECTORSCOPE_WARN_COLOR_BGR = (32, 64, 250)
+_VECTORSCOPE_WARN_COLOR_F32 = np.array(_VECTORSCOPE_WARN_COLOR_BGR, dtype=np.float32).reshape(
+    1, 1, 3
+)
 
 
 class VectorScopeView(BaseImageLabelView):
@@ -64,17 +67,15 @@ class VectorScopeView(BaseImageLabelView):
 
     def set_show_skin_tone_line(self, enabled: bool):
         """スキントーンライン表示の有効/無効を切り替える。"""
-        self._show_skin_tone_line = bool(enabled)
-        if self._last_bgr is not None:
-            self.update_scope(self._last_bgr)
+        next_enabled = bool(enabled)
+        self._set_state_value("_show_skin_tone_line", next_enabled, self.update_scope)
 
     def set_warn_threshold(self, value: int):
         """高彩度警告しきい値(%)を更新する。"""
-        self._warn_threshold = clamp_int(
+        next_threshold = clamp_int(
             value, C.VECTORSCOPE_WARN_THRESHOLD_MIN, C.VECTORSCOPE_WARN_THRESHOLD_MAX
         )
-        if self._last_bgr is not None:
-            self.update_scope(self._last_bgr)
+        self._set_state_value("_warn_threshold", next_threshold, self.update_scope)
 
     def high_saturation_ratio(self) -> float:
         """直近フレームでしきい値超過した画素比率(%)を返す。"""
@@ -215,9 +216,16 @@ class VectorScopeView(BaseImageLabelView):
         if not self._set_last_bgr(bgr):
             self._last_high_sat_ratio = 0.0
             return
+        # リサイズ中は既存Pixmapの再スケール表示を優先し、重い再計算を抑える。
+        current_pm = self.pixmap()
+        if (
+            self._is_resize_interaction_active()
+            and current_pm is not None
+            and not current_pm.isNull()
+        ):
+            return
 
-        # 計算量を抑えるため、入力を固定上限へ縮小してから解析する。
-        src = resize_by_long_edge(bgr, C.ANALYZER_MAX_DIM)
+        src = bgr
         yuv = cv2.cvtColor(src, cv2.COLOR_BGR2YUV)
         u = yuv[:, :, 1].astype(np.float32) - 128.0
         v = yuv[:, :, 2].astype(np.float32) - 128.0
@@ -266,15 +274,16 @@ class VectorScopeView(BaseImageLabelView):
 
         # しきい値を超える高彩度域を控えめに警告する
         thr = float(self._warn_threshold) / 100.0 * float(_VECTORSCOPE_CHROMA_FULL_SCALE)
+        thr2 = thr * thr
         total_valid = int(valid_idx.size)
         over_count = 0
         if total_valid > 0 and flat_idx is not None:
             u_flat = u.reshape(-1)
             v_flat = v.reshape(-1)
-            sat_valid = np.sqrt(
+            sat2_valid = (
                 u_flat[valid_idx] * u_flat[valid_idx] + v_flat[valid_idx] * v_flat[valid_idx]
             )
-            over_valid = sat_valid >= thr
+            over_valid = sat2_valid >= thr2
             over_count = int(np.count_nonzero(over_valid))
             if over_count > 0:
                 over_idx = flat_idx[over_valid]
@@ -290,8 +299,11 @@ class VectorScopeView(BaseImageLabelView):
             over_hist = cv2.GaussianBlur(over_hist, (0, 0), 1.0)
             over_density = normalize_map(np.log1p(over_hist))
             over_alpha = np.clip(over_density[:, :, None] * 0.55, 0.0, 0.55)
-            warn_color = np.array(_VECTORSCOPE_WARN_COLOR_BGR, dtype=np.float32).reshape(1, 1, 3)
-            view_f = np.clip(view_f * (1.0 - over_alpha) + warn_color * over_alpha, 0, 255)
+            view_f = np.clip(
+                view_f * (1.0 - over_alpha) + _VECTORSCOPE_WARN_COLOR_F32 * over_alpha,
+                0,
+                255,
+            )
 
         view = view_f.astype(np.uint8)
         # 設定画面の警告表示で使うため比率を保持しておく。

@@ -4,15 +4,8 @@ import cv2
 import numpy as np
 
 from ..util import constants as C
-from ..util.image_ops import (
-    bgr_to_qpixmap,
-    resize_by_long_edge,
-)
-from ..util.value_utils import (
-    clamp_float,
-    clamp_int,
-    safe_choice,
-)
+from ..util.qt_image import bgr_to_qpixmap
+from ..util.value_utils import clamp_float, clamp_int, safe_choice
 from .base_image_view import BaseImageLabelView
 
 
@@ -29,31 +22,24 @@ class SquintView(BaseImageLabelView):
 
     def set_mode(self, mode: str):
         """スクイント処理モードを更新する。"""
-        self._mode = safe_choice(mode, C.SQUINT_MODES, C.DEFAULT_SQUINT_MODE)
-        if self._last_bgr is not None:
-            self.update_squint(self._last_bgr)
+        next_mode = safe_choice(mode, C.SQUINT_MODES, C.DEFAULT_SQUINT_MODE)
+        self._set_state_value("_mode", next_mode, self.update_squint)
 
     def set_scale_percent(self, value: int):
         """縮小率(%)を更新する。"""
-        self._scale_percent = clamp_int(
-            value, C.SQUINT_SCALE_PERCENT_MIN, C.SQUINT_SCALE_PERCENT_MAX
-        )
-        if self._last_bgr is not None:
-            self.update_squint(self._last_bgr)
+        next_percent = clamp_int(value, C.SQUINT_SCALE_PERCENT_MIN, C.SQUINT_SCALE_PERCENT_MAX)
+        self._set_state_value("_scale_percent", next_percent, self.update_squint)
 
     def set_blur_sigma(self, value: float):
         """ぼかし強度(sigma)を更新する。"""
-        self._blur_sigma = clamp_float(value, C.SQUINT_BLUR_SIGMA_MIN, C.SQUINT_BLUR_SIGMA_MAX)
-        if self._last_bgr is not None:
-            self.update_squint(self._last_bgr)
+        next_sigma = clamp_float(value, C.SQUINT_BLUR_SIGMA_MIN, C.SQUINT_BLUR_SIGMA_MAX)
+        self._set_state_value("_blur_sigma", next_sigma, self.update_squint)
 
     def _apply_scale_up(self, bgr: np.ndarray) -> np.ndarray:
         """縮小後に再拡大してディテールを簡略化した画像を返す。"""
         # 一度縮小してから元サイズへ戻すことで、大きな形状だけを見やすくする。
-        ratio = (
-            clamp_int(self._scale_percent, C.SQUINT_SCALE_PERCENT_MIN, C.SQUINT_SCALE_PERCENT_MAX)
-            / 100.0
-        )
+        # _scale_percent は setter 側で常に範囲内へ正規化済み。
+        ratio = float(self._scale_percent) / 100.0
         if ratio >= 0.999:
             return bgr.copy()
         h, w = bgr.shape[:2]
@@ -65,7 +51,8 @@ class SquintView(BaseImageLabelView):
     def _apply_blur(self, bgr: np.ndarray) -> np.ndarray:
         """ガウシアンぼかしを適用した画像を返す。"""
         # sigma が極小のときは元画像をそのまま返して無駄処理を避ける。
-        sigma = clamp_float(self._blur_sigma, C.SQUINT_BLUR_SIGMA_MIN, C.SQUINT_BLUR_SIGMA_MAX)
+        # _blur_sigma は setter 側で常に範囲内へ正規化済み。
+        sigma = float(self._blur_sigma)
         if sigma <= 0.001:
             return bgr
         return cv2.GaussianBlur(bgr, (0, 0), sigmaX=sigma, sigmaY=sigma)
@@ -75,9 +62,9 @@ class SquintView(BaseImageLabelView):
         if not self._set_last_bgr(bgr):
             return
 
-        # 入力を固定上限へ縮小してリアルタイム性を確保する。
-        src = resize_by_long_edge(bgr, C.ANALYZER_MAX_DIM)
-        mode = safe_choice(self._mode, C.SQUINT_MODES, C.DEFAULT_SQUINT_MODE)
+        src = bgr
+        # _mode は setter 側で正規化済み。
+        mode = self._mode
         if mode == C.SQUINT_MODE_BLUR:
             view = self._apply_blur(src)
         elif mode == C.SQUINT_MODE_SCALE:

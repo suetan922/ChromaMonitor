@@ -10,8 +10,6 @@ from PySide6.QtCore import QObject, Signal
 
 from .frame_analysis import analyze_bgr_frame
 
-_IMAGE_FILE_ANALYSIS_AUTO_MAX_DIM = 3072
-
 
 class ImageFileAnalyzeWorker(QObject):
     """画像読み込み解析を別スレッドで実行するワーカー。"""
@@ -27,6 +25,7 @@ class ImageFileAnalyzeWorker(QObject):
         sample_points: int,
         wheel_sat_threshold: int,
         color_band_sat_threshold: int,
+        max_dim: int,
     ):
         """解析対象画像と解析パラメータを保持してワーカーを初期化する。"""
         super().__init__()
@@ -34,6 +33,7 @@ class ImageFileAnalyzeWorker(QObject):
         self.sample_points = int(sample_points)
         self.wheel_sat_threshold = int(wheel_sat_threshold)
         self.color_band_sat_threshold = int(color_band_sat_threshold)
+        self.max_dim = int(max_dim)
         self._cancel = threading.Event()
 
     def request_cancel(self):
@@ -86,19 +86,7 @@ class ImageFileAnalyzeWorker(QObject):
             return
         self._emit_progress(8, f"解析準備中… ({w_img}x{h_img})")
 
-    def _resolve_auto_max_dim(self, bgr: np.ndarray) -> int | None:
-        """自動解析長辺を決定し、必要なら進捗へ通知する。"""
-        auto_max_dim = self._auto_analysis_max_dim(bgr)
-        if auto_max_dim > 0:
-            self._emit_progress(
-                10,
-                f"大きい画像のため内部解析を長辺{auto_max_dim}pxに調整します…",
-            )
-            if self._is_canceled_and_emit():
-                return None
-        return int(auto_max_dim)
-
-    def _analyze_loaded_bgr(self, bgr: np.ndarray, *, auto_max_dim: int) -> dict | None:
+    def _analyze_loaded_bgr(self, bgr: np.ndarray, *, max_dim: int) -> dict | None:
         """読み込み済みBGR画像を解析して結果辞書を返す。"""
         t0 = time.perf_counter()
         res = analyze_bgr_frame(
@@ -106,7 +94,7 @@ class ImageFileAnalyzeWorker(QObject):
             sample_points=self.sample_points,
             wheel_sat_threshold=self.wheel_sat_threshold,
             color_band_sat_threshold=self.color_band_sat_threshold,
-            max_dim=int(auto_max_dim),
+            max_dim=int(max_dim),
             progress_cb=self._emit_progress,
             cancel_cb=self._is_canceled,
         )
@@ -135,18 +123,6 @@ class ImageFileAnalyzeWorker(QObject):
             return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
         return None
 
-    @staticmethod
-    def _auto_analysis_max_dim(bgr: np.ndarray) -> int:
-        """画像サイズに応じて自動縮小の長辺上限を決定する。"""
-        # 画像読み込み時は高解像度を優先しつつ、極端な大画像のみ内部で上限を掛ける。
-        if bgr is None or bgr.size == 0:
-            return 0
-        h, w = bgr.shape[:2]
-        long_edge = max(int(h), int(w))
-        if long_edge <= int(_IMAGE_FILE_ANALYSIS_AUTO_MAX_DIM):
-            return 0
-        return int(_IMAGE_FILE_ANALYSIS_AUTO_MAX_DIM)
-
     def run(self):
         """画像読み込みから解析実行までの単発ジョブを処理する。"""
         try:
@@ -158,10 +134,14 @@ class ImageFileAnalyzeWorker(QObject):
             if self._is_canceled_and_emit():
                 return
 
-            auto_max_dim = self._resolve_auto_max_dim(bgr)
-            if auto_max_dim is None:
+            analysis_max_dim = int(self.max_dim)
+            if analysis_max_dim > 0:
+                self._emit_progress(10, f"解析解像度: 長辺 {analysis_max_dim}px")
+            else:
+                self._emit_progress(10, "解析解像度: オリジナル")
+            if self._is_canceled_and_emit():
                 return
-            res = self._analyze_loaded_bgr(bgr, auto_max_dim=auto_max_dim)
+            res = self._analyze_loaded_bgr(bgr, max_dim=analysis_max_dim)
             if res is None:
                 return
 
