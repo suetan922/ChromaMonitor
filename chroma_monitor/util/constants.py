@@ -19,7 +19,7 @@ ANALYZER_MIN_SAMPLE_POINTS = 500
 """散布図サンプリング点数の最小値。"""
 ANALYZER_MAX_SAMPLE_POINTS = 500000
 """散布図サンプリング点数の最大値。"""
-ANALYZER_MIN_DIFF_THRESHOLD = 0.5
+ANALYZER_MIN_DIFF_THRESHOLD = 0.01
 """変化検出モードの差分しきい値最小値。"""
 ANALYZER_MIN_STABLE_FRAMES = 1
 """変化検出モードの安定フレーム最小値。"""

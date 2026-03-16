@@ -435,7 +435,7 @@ def _ensure_snapshot_graph_data_for_dock(main_window, dock_name: str) -> bool:
     return _snapshot_has_graph_data_for_dock(main_window._latest_result_snapshot, dock_name)
 
 
-def _resolve_restore_target_dock_name(main_window, dock) -> str | None:
+def _resolve_restore_target_dock_name(main_window, dock, *, force: bool = False) -> str | None:
     """復元対象ドック名を検証し、復元不要なら None を返す。"""
     if dock is None or not dock.isVisible():
         return None
@@ -445,6 +445,12 @@ def _resolve_restore_target_dock_name(main_window, dock) -> str | None:
 
     _ensure_snapshot_state(main_window)
     snapshot_version = int(main_window._latest_result_version)
+    if bool(force):
+        # 跨ぎ/再配置後の描画崩れ復旧では、同一versionでも再描画を許可する。
+        # ただし未取得状態(version=0)では復元対象が無いため通常通り終了する。
+        if snapshot_version <= 0:
+            return None
+        return str(dock_name)
     if snapshot_version <= 0:
         return None
     rendered_version = int(main_window._dock_rendered_version.get(dock_name, 0))
@@ -500,9 +506,9 @@ def _render_all_graph_docks(main_window, snapshot: dict) -> set[str]:
     return rendered
 
 
-def restore_dock_from_snapshot(main_window, dock) -> None:
+def restore_dock_from_snapshot(main_window, dock, *, force: bool = False) -> None:
     """ドック表示時に必要な内容を最新スナップショットから復元する。"""
-    dock_name = _resolve_restore_target_dock_name(main_window, dock)
+    dock_name = _resolve_restore_target_dock_name(main_window, dock, force=bool(force))
     if dock_name is None:
         return
     if not _ensure_graph_snapshot_for_restore(main_window, dock_name):

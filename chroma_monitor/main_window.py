@@ -240,7 +240,7 @@ class MainWindow(QMainWindow):
             0.10,
             10.00,
             C.DEFAULT_INTERVAL_SEC,
-            decimals=2,
+            decimals=1,
             step=0.10,
             suffix=" 秒",
         )
@@ -379,8 +379,8 @@ class MainWindow(QMainWindow):
             C.ANALYZER_MIN_DIFF_THRESHOLD,
             50.0,
             C.DEFAULT_DIFF_THRESHOLD,
-            decimals=1,
-            step=C.ANALYZER_MIN_DIFF_THRESHOLD,
+            decimals=2,
+            step=0.01,
         )
         self.spin_stable = self._build_int_spinbox(
             C.ANALYZER_MIN_STABLE_FRAMES,

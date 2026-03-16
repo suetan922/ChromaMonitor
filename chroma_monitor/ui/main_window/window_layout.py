@@ -130,6 +130,22 @@ def _debug_log_floating_dock_event(
     write_window_layout_debug_log(event, **payload)
 
 
+def _schedule_force_restore_dock_snapshot(main_window, dock: QDockWidget) -> None:
+    """跨ぎ補正後にドック内容を強制再描画して表示崩れを解消する。"""
+    if dock is None or not dock.isFloating() or not dock.isVisible():
+        return
+    restore = getattr(main_window, "_restore_dock_from_snapshot", None)
+    if not callable(restore):
+        return
+
+    # screenChanged 直後はジオメトリ確定が遅れる場合があるため複数回試行する。
+    for delay in (0, 70, 160):
+        QTimer.singleShot(
+            int(delay),
+            lambda mw=main_window, d=dock, fn=restore: fn(mw, d, force=True),
+        )
+
+
 def _floating_dock_screen_key(main_window, dock: QDockWidget):
     """フローティングドックが現在属しているスクリーン識別子を返す。"""
     screen = None
@@ -240,6 +256,7 @@ def _restore_floating_dock_size_on_screen_change(
         sync_dock_on_top(main_window, dock)
         schedule_dock_on_top_refresh(main_window, dock, delay_ms=0)
         schedule_dock_on_top_refresh(main_window, dock, delay_ms=140)
+        _schedule_force_restore_dock_snapshot(main_window, dock)
         _debug_log_floating_dock_event(
             main_window,
             dock,
