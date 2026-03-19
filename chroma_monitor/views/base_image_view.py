@@ -1,6 +1,7 @@
 """画像表示系ビューの共通基底クラス。"""
 
-from typing import Callable, Optional
+from collections.abc import Callable
+from typing import Optional
 
 import numpy as np
 from PySide6.QtCore import QSize, Qt, QTimer
@@ -9,7 +10,6 @@ from PySide6.QtWidgets import QLabel, QSizePolicy
 
 from ..util import constants as C
 
-DEFAULT_IMAGE_VIEW_STYLE = "background:#111; border:1px solid #333; color:#AAA;"
 _RESIZE_RERENDER_DEBOUNCE_MS = 140
 _RESIZE_TRANSFORM_MODE = Qt.FastTransformation
 
@@ -17,7 +17,7 @@ _RESIZE_TRANSFORM_MODE = Qt.FastTransformation
 class BaseImageLabelView(QLabel):
     """画像系ビューの共通表示処理を持つ基底クラス。"""
 
-    def __init__(self, empty_text: str, style: str = DEFAULT_IMAGE_VIEW_STYLE):
+    def __init__(self, empty_text: str, *, view_role: str = "image"):
         """空表示文言とスタイルを受け取り共通状態を初期化する。"""
         super().__init__()
         self.setAlignment(Qt.AlignCenter)
@@ -25,7 +25,7 @@ class BaseImageLabelView(QLabel):
         self.setMinimumWidth(C.VIEW_MIN_WIDTH)
         self.setMinimumHeight(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setStyleSheet(style)
+        self.setProperty("chromaViewRole", str(view_role))
         self._empty_text = empty_text
         self._last_bgr: Optional[np.ndarray] = None
         self._last_resize_render_size: Optional[tuple[int, int]] = None

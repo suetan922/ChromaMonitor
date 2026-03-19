@@ -3,7 +3,6 @@
 import math
 from typing import Optional
 
-import cv2
 import numpy as np
 from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
@@ -11,139 +10,36 @@ from PySide6.QtWidgets import QLabel, QSizePolicy, QWidget
 
 from ..util import constants as C
 from ..util.image_ops import clamp_render_size
+from ..util.theme import UiTheme, get_ui_theme, qcolor
 from ..util.value_utils import clamp_int, safe_choice
+from .color_scatter_constants import (
+    HSV180_COLORS_Q,
+    HUE180_TO_MUNSELL40_WEIGHTS,
+    MUNSELL_COLORS_Q,
+    MUNSELL_HUE_LABELS,
+    SCATTER_HUE_FILTER_HALF_WIDTH,
+    SCATTER_LAYOUT_SYNC_DEBOUNCE_MS,
+    SCATTER_RESIZE_RECALC_DEBOUNCE_MS,
+    WHEEL_HARMONY_GUIDE_DOT_RADIUS,
+    WHEEL_HARMONY_GUIDE_RADIUS_RATIO,
+    WHEEL_THICKNESS_MODE,
+    WHEEL_THICKNESS_MODE_ABSOLUTE,
+    WHEEL_THICKNESS_MODE_RELATIVE_MAX,
+)
+from .color_scatter_math import (
+    ScatterRenderConfig,
+    build_scatter_image,
+    build_square_fallback_scatter_image,
+    guide_points,
+    guide_radius,
+    munsell_hist,
+    normalize_rotation_deg,
+    normalize_signed_delta_deg,
+    point_angle_deg,
+    scatter_render_mode_needs_rgb,
+)
 
-_SCATTER_HUE_FILTER_HALF_WIDTH = 10
-_SCATTER_RESIZE_RECALC_DEBOUNCE_MS = 160
 _SCATTER_RESIZE_TRANSFORM_MODE = Qt.FastTransformation
-_SCATTER_LAYOUT_SYNC_DEBOUNCE_MS = 24
-_MUNSELL_HUE_LABELS = (
-    "2.5R",
-    "5R",
-    "7.5R",
-    "10R",
-    "2.5YR",
-    "5YR",
-    "7.5YR",
-    "10YR",
-    "2.5Y",
-    "5Y",
-    "7.5Y",
-    "10Y",
-    "2.5GY",
-    "5GY",
-    "7.5GY",
-    "10GY",
-    "2.5G",
-    "5G",
-    "7.5G",
-    "10G",
-    "2.5BG",
-    "5BG",
-    "7.5BG",
-    "10BG",
-    "2.5B",
-    "5B",
-    "7.5B",
-    "10B",
-    "2.5PB",
-    "5PB",
-    "7.5PB",
-    "10PB",
-    "2.5P",
-    "5P",
-    "7.5P",
-    "10P",
-    "2.5RP",
-    "5RP",
-    "7.5RP",
-    "10RP",
-)
-_MUNSELL_COLORS_RGB = (
-    (218, 43, 97),
-    (227, 32, 55),
-    (228, 31, 32),
-    (233, 108, 28),
-    (237, 148, 20),
-    (242, 172, 0),
-    (246, 194, 0),
-    (247, 200, 0),
-    (241, 211, 2),
-    (240, 220, 0),
-    (241, 224, 0),
-    (222, 217, 1),
-    (200, 214, 35),
-    (167, 198, 56),
-    (112, 180, 62),
-    (43, 169, 58),
-    (0, 157, 81),
-    (0, 161, 103),
-    (0, 161, 125),
-    (0, 156, 142),
-    (0, 152, 156),
-    (0, 148, 163),
-    (2, 137, 159),
-    (2, 135, 165),
-    (0, 122, 163),
-    (0, 110, 174),
-    (1, 94, 169),
-    (0, 76, 157),
-    (7, 62, 149),
-    (35, 39, 137),
-    (54, 39, 138),
-    (72, 39, 130),
-    (64, 40, 131),
-    (81, 40, 132),
-    (116, 39, 137),
-    (151, 27, 134),
-    (173, 37, 136),
-    (195, 38, 133),
-    (202, 38, 133),
-    (222, 35, 105),
-)
-_WHEEL_HARMONY_GUIDE_RADIUS_RATIO = 0.82
-_WHEEL_HARMONY_GUIDE_DOT_RADIUS = 3
-_WHEEL_HARMONY_GUIDE_RING_COLOR = QColor(123, 144, 173, 92)
-_WHEEL_HARMONY_GUIDE_SPOKE_COLOR = QColor(39, 89, 170, 120)
-_WHEEL_HARMONY_GUIDE_SHAPE_COLOR = QColor(30, 92, 194, 212)
-_WHEEL_HARMONY_GUIDE_DOT_COLOR = QColor(30, 92, 194, 236)
-_WHEEL_THICKNESS_MODE_ABSOLUTE = "absolute"
-_WHEEL_THICKNESS_MODE_RELATIVE_MAX = "relative_max"
-# 色相環の太さ計算方式:
-# - absolute: 各色相の絶対比率（count / total）で太さを決める
-# - relative_max: 最大ビン基準（count / local_max）で太さを決める（既定）
-_WHEEL_THICKNESS_MODE = _WHEEL_THICKNESS_MODE_RELATIVE_MAX
-
-
-def _build_hue180_to_munsell40_weights() -> np.ndarray:
-    """HSV180ビンをマンセル40色相へ再配分する重み行列を作る。"""
-    src_bins = 180
-    dst_bins = len(_MUNSELL_HUE_LABELS)
-    src_step = 360.0 / float(src_bins)  # 2度
-    dst_step = 360.0 / float(dst_bins)  # 9度
-
-    weights = np.zeros((dst_bins, src_bins), dtype=np.float32)
-    for src_idx in range(src_bins):
-        src_start = src_idx * src_step
-        src_end = src_start + src_step
-        pos = src_start
-        while pos < src_end - 1e-9:
-            dst_idx = int(math.floor(pos / dst_step)) % dst_bins
-            dst_end = (math.floor(pos / dst_step) + 1.0) * dst_step
-            overlap = min(src_end, dst_end) - pos
-            if overlap <= 0.0:
-                break
-            weights[dst_idx, src_idx] += float(overlap / src_step)
-            pos += overlap
-
-    col_sum = np.sum(weights, axis=0, keepdims=True)
-    col_sum[col_sum <= 0.0] = 1.0
-    return (weights / col_sum).astype(np.float32)
-
-
-HUE180_TO_MUNSELL40_WEIGHTS = _build_hue180_to_munsell40_weights()
-_MUNSELL_COLORS_Q = tuple(QColor(r, g, b, 255) for (r, g, b) in _MUNSELL_COLORS_RGB)
-_HSV180_COLORS_Q = tuple(QColor.fromHsv(int((h / 180.0) * 360.0), 255, 255) for h in range(180))
 
 
 class ColorWheelWidget(QWidget):
@@ -172,6 +68,12 @@ class ColorWheelWidget(QWidget):
         self._guide_drag_active = False
         self._guide_drag_start_angle = 0.0
         self._guide_drag_start_rotation = 0.0
+        self._theme = get_ui_theme()
+
+    def set_theme(self, theme: UiTheme) -> None:
+        """テーマ色を更新して再描画する。"""
+        self._theme = theme
+        self.update()
 
     def _set_state_and_update(self, attr_name: str, next_value) -> bool:
         """状態値を更新し、変化時のみ再描画する。"""
@@ -211,7 +113,7 @@ class ColorWheelWidget(QWidget):
 
     def set_harmony_guide_rotation(self, rotation_deg: float):
         """色彩調和ガイドの回転角を設定する。"""
-        normalized = self._normalize_rotation_deg(rotation_deg)
+        normalized = normalize_rotation_deg(rotation_deg)
         if abs(normalized - float(self._guide_rotation_deg)) < 1e-6:
             return
         self._guide_rotation_deg = normalized
@@ -224,11 +126,11 @@ class ColorWheelWidget(QWidget):
 
     def _munsell_hist(self) -> np.ndarray:
         """HSV180ビンからマンセル40色相の集計値を返す。"""
-        # 180ビン色相を重み行列で 40 色相へ再サンプリングする。
-        src = np.asarray(self._hist, dtype=np.float32)
-        if src.size != 180:
-            return np.zeros(len(_MUNSELL_HUE_LABELS), dtype=np.float32)
-        return (HUE180_TO_MUNSELL40_WEIGHTS @ src).astype(np.float32)
+        return munsell_hist(
+            self._hist,
+            HUE180_TO_MUNSELL40_WEIGHTS,
+            dst_bins=len(MUNSELL_HUE_LABELS),
+        )
 
     def _wheel_bins(self):
         """現在モードで描画に使うビン値と色配列を返す。"""
@@ -236,10 +138,10 @@ class ColorWheelWidget(QWidget):
         mode = safe_choice(self._mode, C.WHEEL_MODES, C.DEFAULT_WHEEL_MODE)
         if mode == C.WHEEL_MODE_MUNSELL40:
             counts = self._munsell_hist()
-            return counts, _MUNSELL_COLORS_Q
+            return counts, MUNSELL_COLORS_Q
 
         counts = np.asarray(self._hist, dtype=np.float32)
-        return counts, _HSV180_COLORS_Q
+        return counts, HSV180_COLORS_Q
 
     def _wheel_geometry(self) -> tuple[int, int, int, int]:
         """色相環描画の中心座標と半径情報を返す。"""
@@ -253,48 +155,15 @@ class ColorWheelWidget(QWidget):
     def _thickness_norm(count: float, *, local_max: float, total_count: float) -> float:
         """色相ビン値をリング太さ比率(0..1)へ正規化する。"""
         mode = safe_choice(
-            _WHEEL_THICKNESS_MODE,
-            (_WHEEL_THICKNESS_MODE_ABSOLUTE, _WHEEL_THICKNESS_MODE_RELATIVE_MAX),
-            _WHEEL_THICKNESS_MODE_ABSOLUTE,
+            WHEEL_THICKNESS_MODE,
+            (WHEEL_THICKNESS_MODE_ABSOLUTE, WHEEL_THICKNESS_MODE_RELATIVE_MAX),
+            WHEEL_THICKNESS_MODE_ABSOLUTE,
         )
-        if mode == _WHEEL_THICKNESS_MODE_RELATIVE_MAX:
+        if mode == WHEEL_THICKNESS_MODE_RELATIVE_MAX:
             denom = max(1.0, float(local_max))
             return max(0.0, min(1.0, float(count) / denom))
         denom = max(1.0, float(total_count))
         return max(0.0, min(1.0, float(count) / denom))
-
-    @staticmethod
-    def _normalize_signed_delta_deg(delta_deg: float) -> float:
-        """角度差を -180..180 の範囲へ正規化する。"""
-        normalized = (float(delta_deg) + 180.0) % 360.0 - 180.0
-        return normalized
-
-    @staticmethod
-    def _normalize_rotation_deg(rotation_deg: float) -> float:
-        """回転角を -180..180 の範囲へ正規化する。"""
-        return (float(rotation_deg) + 180.0) % 360.0 - 180.0
-
-    def _hue_offset_to_angle_deg(self, hue_deg: float) -> float:
-        """色相オフセットを画面上の絶対角度へ変換する。"""
-        return (
-            float(C.HUE_RED_REFERENCE_DEG)
-            + float(self._guide_rotation_deg)
-            + float(C.HUE_DIRECTION_SIGN) * float(hue_deg)
-        ) % 360.0
-
-    def _guide_points(self, cx: int, cy: int, inner_r: int) -> list[QPoint]:
-        """現在ガイド種別に対応する頂点座標群を返す。"""
-        offsets = C.WHEEL_HARMONY_GUIDE_OFFSETS_DEG.get(self._guide_type)
-        if not offsets:
-            return []
-        guide_r = max(8, int(round(inner_r * _WHEEL_HARMONY_GUIDE_RADIUS_RATIO)))
-        points = []
-        for deg in offsets:
-            angle = math.radians(self._hue_offset_to_angle_deg(deg))
-            x = int(round(cx + math.cos(angle) * guide_r))
-            y = int(round(cy - math.sin(angle) * guide_r))
-            points.append(QPoint(x, y))
-        return points
 
     def _draw_harmony_guide(self, painter: QPainter, cx: int, cy: int, inner_r: int) -> None:
         """色彩調和ガイドのリング・線・頂点を描画する。"""
@@ -302,20 +171,33 @@ class ColorWheelWidget(QWidget):
             return
         if self._guide_type == C.WHEEL_HARMONY_GUIDE_NONE:
             return
-        points = self._guide_points(cx, cy, inner_r)
+        points = [
+            QPoint(x, y)
+            for (x, y) in guide_points(
+                cx,
+                cy,
+                inner_r,
+                guide_type=self._guide_type,
+                guide_rotation_deg=self._guide_rotation_deg,
+                guide_offsets_deg=C.WHEEL_HARMONY_GUIDE_OFFSETS_DEG,
+                radius_ratio=WHEEL_HARMONY_GUIDE_RADIUS_RATIO,
+                red_reference_deg=C.HUE_RED_REFERENCE_DEG,
+                direction_sign=C.HUE_DIRECTION_SIGN,
+            )
+        ]
         if not points:
             return
 
-        guide_r = max(8, int(round(inner_r * _WHEEL_HARMONY_GUIDE_RADIUS_RATIO)))
-        painter.setPen(QPen(_WHEEL_HARMONY_GUIDE_RING_COLOR, 1))
+        guide_r = guide_radius(inner_r, radius_ratio=WHEEL_HARMONY_GUIDE_RADIUS_RATIO)
+        painter.setPen(QPen(qcolor(self._theme.text_muted, 92), 1))
         painter.setBrush(Qt.NoBrush)
         painter.drawEllipse(QPoint(cx, cy), guide_r, guide_r)
 
-        painter.setPen(QPen(_WHEEL_HARMONY_GUIDE_SPOKE_COLOR, 1))
+        painter.setPen(QPen(qcolor(self._theme.accent, 120), 1))
         for pt in points:
             painter.drawLine(cx, cy, pt.x(), pt.y())
 
-        painter.setPen(QPen(_WHEEL_HARMONY_GUIDE_SHAPE_COLOR, 2))
+        painter.setPen(QPen(qcolor(self._theme.accent, 212), 2))
         if len(points) == 1:
             painter.drawLine(cx, cy, points[0].x(), points[0].y())
         elif len(points) == 2:
@@ -329,17 +211,11 @@ class ColorWheelWidget(QWidget):
                 painter.drawLine(sorted_points[i], sorted_points[(i + 1) % len(sorted_points)])
 
         painter.setPen(Qt.NoPen)
-        painter.setBrush(_WHEEL_HARMONY_GUIDE_DOT_COLOR)
+        painter.setBrush(qcolor(self._theme.accent, 236))
         for pt in points:
             painter.drawEllipse(
-                pt, _WHEEL_HARMONY_GUIDE_DOT_RADIUS, _WHEEL_HARMONY_GUIDE_DOT_RADIUS
+                pt, WHEEL_HARMONY_GUIDE_DOT_RADIUS, WHEEL_HARMONY_GUIDE_DOT_RADIUS
             )
-
-    @staticmethod
-    def _point_angle_deg(px: int, py: int, cx: int, cy: int) -> float:
-        """中心基準の点座標から角度(度)を算出する。"""
-        # 画面座標(下向き+Y)を数学座標へ変換して角度化する。
-        return math.degrees(math.atan2(float(cy - py), float(px - cx))) % 360.0
 
     def mousePressEvent(self, event):
         """内周クリック時はガイド回転ドラッグを開始する。"""
@@ -355,7 +231,7 @@ class ColorWheelWidget(QWidget):
             dy = int(pos.y()) - int(cy)
             if dx * dx + dy * dy <= int(inner_r * inner_r):
                 self._guide_drag_active = True
-                self._guide_drag_start_angle = self._point_angle_deg(pos.x(), pos.y(), cx, cy)
+                self._guide_drag_start_angle = point_angle_deg(pos.x(), pos.y(), cx, cy)
                 self._guide_drag_start_rotation = float(self._guide_rotation_deg)
                 event.accept()
                 return
@@ -366,8 +242,8 @@ class ColorWheelWidget(QWidget):
         if self._guide_drag_active:
             cx, cy, _r, _inner_r = self._wheel_geometry()
             pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
-            current_angle = self._point_angle_deg(pos.x(), pos.y(), cx, cy)
-            delta = self._normalize_signed_delta_deg(current_angle - self._guide_drag_start_angle)
+            current_angle = point_angle_deg(pos.x(), pos.y(), cx, cy)
+            delta = normalize_signed_delta_deg(current_angle - self._guide_drag_start_angle)
             self.set_harmony_guide_rotation(self._guide_drag_start_rotation + delta)
             event.accept()
             return
@@ -386,16 +262,16 @@ class ColorWheelWidget(QWidget):
         p = QPainter(self)
         try:
             p.setRenderHint(QPainter.Antialiasing, True)
-            p.fillRect(self.rect(), QColor(255, 255, 255, 255))
+            p.fillRect(self.rect(), qcolor(self._theme.wheel_canvas_bg))
 
             cx, cy, r, inner_r = self._wheel_geometry()
 
             p.setPen(Qt.NoPen)
             # 黄色系でも輪郭が埋もれにくいよう、土台グレーを少し暗くする。
-            p.setBrush(QColor(220, 220, 220, 255))
+            p.setBrush(qcolor(self._theme.wheel_outer_bg))
             p.drawEllipse(QPoint(cx, cy), r, r)
 
-            p.setBrush(QColor(255, 255, 255, 255))
+            p.setBrush(qcolor(self._theme.wheel_inner_bg))
             p.drawEllipse(QPoint(cx, cy), inner_r, inner_r)
 
             ring_max = r - inner_r
@@ -436,7 +312,7 @@ class ColorWheelWidget(QWidget):
                     int(start_deg * 16),
                     int(span_deg * 16),
                 )
-                p.setBrush(QColor(255, 255, 255, 255))
+                p.setBrush(qcolor(self._theme.wheel_inner_bg))
                 p.drawPie(
                     int(cx - inner_r),
                     int(cy - inner_r),
@@ -478,7 +354,7 @@ class ColorWheelWidget(QWidget):
                     int(span_deg * 16),
                 )
                 # 内側を同角度で塗ってリング化
-                p.setBrush(QColor(255, 255, 255, 255))
+                p.setBrush(qcolor(self._theme.wheel_inner_bg))
                 p.drawPie(
                     int(cx - inner_r),
                     int(cy - inner_r),
@@ -490,8 +366,11 @@ class ColorWheelWidget(QWidget):
 
             # 内周の境界を整える
             p.setPen(Qt.NoPen)
-            p.setBrush(QColor(255, 255, 255, 255))
+            p.setBrush(qcolor(self._theme.wheel_inner_bg))
             p.drawEllipse(QPoint(cx, cy), inner_r, inner_r)
+            p.setPen(QPen(qcolor(self._theme.border), 1))
+            p.setBrush(Qt.NoBrush)
+            p.drawRect(self.rect().adjusted(0, 0, -1, -1))
             self._draw_harmony_guide(p, cx, cy, inner_r)
         finally:
             p.end()
@@ -508,27 +387,33 @@ class ScatterRasterWidget(QLabel):
         self.setMinimumWidth(C.VIEW_MIN_WIDTH)
         self.setMinimumHeight(0)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.setStyleSheet("background:#FFFFFF; border:none; color:#222;")
+        self.setProperty("chromaViewRole", "scatter")
         self._square_limit = True
         self._last_sv: Optional[np.ndarray] = None
         self._last_rgb: Optional[np.ndarray] = None
         self._scatter_base_pm: Optional[QPixmap] = None
+        self._theme = get_ui_theme()
         self._resize_recalc_timer = QTimer(self)
         self._resize_recalc_timer.setSingleShot(True)
-        self._resize_recalc_timer.setInterval(_SCATTER_RESIZE_RECALC_DEBOUNCE_MS)
+        self._resize_recalc_timer.setInterval(SCATTER_RESIZE_RECALC_DEBOUNCE_MS)
         self._resize_recalc_timer.timeout.connect(self._rerender_after_resize_idle)
         self._layout_sync_timer = QTimer(self)
         self._layout_sync_timer.setSingleShot(True)
-        self._layout_sync_timer.setInterval(_SCATTER_LAYOUT_SYNC_DEBOUNCE_MS)
+        self._layout_sync_timer.setInterval(SCATTER_LAYOUT_SYNC_DEBOUNCE_MS)
         self._layout_sync_timer.timeout.connect(self._sync_after_layout_change)
         self._shape = C.SCATTER_SHAPE_SQUARE
         self._render_mode = C.DEFAULT_SCATTER_RENDER_MODE
-        self._need_rgb_for_render = self._render_mode != C.SCATTER_RENDER_MODE_HEATMAP
+        self._need_rgb_for_render = scatter_render_mode_needs_rgb(self._render_mode)
         self._hue_filter_enabled = bool(C.DEFAULT_SCATTER_HUE_FILTER_ENABLED)
         self._hue_center = clamp_int(
             C.DEFAULT_SCATTER_HUE_CENTER, C.SCATTER_HUE_MIN, C.SCATTER_HUE_MAX
         )
         self._show_scatter_frame_only()
+
+    def set_theme(self, theme: UiTheme) -> None:
+        """散布図フレーム色と背景色を更新する。"""
+        self._theme = theme
+        self._rerender_or_show_frame()
 
     def _rerender_or_show_frame(self) -> None:
         """直近データがあれば再描画し、なければ枠のみ表示する。"""
@@ -572,7 +457,7 @@ class ScatterRasterWidget(QLabel):
         if self._render_mode == normalized:
             return
         self._render_mode = normalized
-        self._need_rgb_for_render = self._render_mode != C.SCATTER_RENDER_MODE_HEATMAP
+        self._need_rgb_for_render = scatter_render_mode_needs_rgb(self._render_mode)
         self._rerender_or_show_frame()
 
     def set_hue_filter(self, enabled: bool, center: int):
@@ -600,7 +485,7 @@ class ScatterRasterWidget(QLabel):
         if not painter.isActive():
             return
         try:
-            pen = QPen(QColor(95, 105, 118, 185), max(1, int(pm.width() * 0.0045)))
+            pen = QPen(qcolor(self._theme.scatter_frame, 185), max(1, int(pm.width() * 0.0045)))
             painter.setPen(pen)
             painter.setBrush(Qt.NoBrush)
             inset = pen.width() // 2
@@ -682,301 +567,22 @@ class ScatterRasterWidget(QLabel):
             return
         self._show_scatter_frame_only()
 
-    def _compute_scatter_xy(self, sv_arr: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
-        """S/V配列を散布図座標(x,y)へ変換する。"""
-        # sv_arr は [S, V] の2列を想定（0..255）。
-        s = np.clip(sv_arr[:, 0].astype(np.int32), 0, 255)
-        v = np.clip(sv_arr[:, 1].astype(np.int32), 0, 255)
-        if self._shape == C.SCATTER_SHAPE_TRIANGLE:
-            # 右向きHSV三角: 左上=白, 左下=黒, 右中=純色
-            prod = s * v
-            x = np.clip(prod // 255, 0, 255).astype(np.int32)
-            y = np.clip(v - (prod // 510), 0, 255).astype(np.int32)
-            return x, y
-        return s, v
-
-    @staticmethod
-    def _to_rgb_u8(rgb_arr: np.ndarray, n: int) -> np.ndarray:
-        """RGB配列を先頭n件のuint8連続配列へ正規化する。"""
-        rgb_view = rgb_arr[:n, :3]
-        if rgb_view.dtype == np.uint8:
-            return np.ascontiguousarray(rgb_view)
-        return np.clip(rgb_view, 0, 255).astype(np.uint8, copy=False)
-
-    @staticmethod
-    def _four_neighborhood_flat_indices(
-        x: np.ndarray,
-        y: np.ndarray,
-        *,
-        triangle_mode: bool = False,
-        dtype: np.dtype = np.int32,
-    ) -> np.ndarray:
-        """(x, y) の4近傍セルを 256x256 画像のflat indexで返す。"""
-        n = int(x.size)
-        if n <= 0:
-            return np.empty((0,), dtype=dtype)
-        xx0 = np.clip(x, 0, 255)
-        xx1 = np.clip(x + 1, 0, 255)
-        yy0 = np.clip(y, 0, 255)
-        yy1 = np.clip(y + 1, 0, 255)
-
-        if triangle_mode:
-            # 三角モードでは各近傍点を三角形内へ投影して、外側へのはみ出しを防ぐ。
-            y0f = yy0.astype(np.float32)
-            y1f = yy1.astype(np.float32)
-            x_max0 = np.where(
-                yy0 <= 128,
-                y0f * (255.0 / 128.0),
-                (255.0 - y0f) * (255.0 / 127.0),
-            )
-            x_max1 = np.where(
-                yy1 <= 128,
-                y1f * (255.0 / 128.0),
-                (255.0 - y1f) * (255.0 / 127.0),
-            )
-            x_max0_i = np.clip(np.floor(x_max0).astype(np.int32), 0, 255)
-            x_max1_i = np.clip(np.floor(x_max1).astype(np.int32), 0, 255)
-            xx0_y0 = np.minimum(xx0, x_max0_i)
-            xx1_y0 = np.minimum(xx1, x_max0_i)
-            xx0_y1 = np.minimum(xx0, x_max1_i)
-            xx1_y1 = np.minimum(xx1, x_max1_i)
-        else:
-            xx0_y0 = xx0
-            xx1_y0 = xx1
-            xx0_y1 = xx0
-            xx1_y1 = xx1
-
-        out = np.empty((n * 4,), dtype=np.int32)
-        out[0:n] = (yy0 << 8) + xx0_y0
-        out[n : 2 * n] = (yy0 << 8) + xx1_y0
-        out[2 * n : 3 * n] = (yy1 << 8) + xx0_y1
-        out[3 * n : 4 * n] = (yy1 << 8) + xx1_y1
-        return out.astype(dtype, copy=False)
-
-    def _extract_hue_from_rgb(self, rgb_u8: np.ndarray) -> np.ndarray:
-        """RGB配列から色相(H)を推定して返す。"""
-        # 色相情報が無い入力形式向けに RGB から色相を推定する。
-        if rgb_u8.size == 0:
-            return np.empty((0,), dtype=np.int16)
-        bgr = rgb_u8[:, ::-1].reshape((-1, 1, 3))
-        hsv = cv2.cvtColor(bgr, cv2.COLOR_BGR2HSV)
-        return hsv[:, 0, 0].astype(np.int16, copy=False)
-
-    def _apply_hue_filter_mask(self, h_arr: np.ndarray) -> np.ndarray:
-        """中心色相からの円環距離でフィルターマスクを生成する。"""
-        # 色相円環の距離（0/179またぎを含む最短距離）で判定する。
-        if h_arr.size == 0:
-            return np.zeros((0,), dtype=bool)
-        center = int(self._hue_center)
-        diff = np.abs(h_arr.astype(np.int16, copy=False) - center)
-        wrap = 180 - diff
-        dist = np.minimum(diff, wrap)
-        return dist <= int(_SCATTER_HUE_FILTER_HALF_WIDTH)
-
-    def _render_scatter_dominant(
-        self, x: np.ndarray, y: np.ndarray, rgb_u8: np.ndarray
-    ) -> np.ndarray:
-        """同一セルの最頻色で散布図ラスタを生成する。"""
-        # 同一セルに複数色が重なる場合は「最頻色（同数なら後勝ち）」を採用する。
-        out = np.zeros((256 * 256, 4), dtype=np.uint8)
-        if x.size == 0 or y.size == 0 or rgb_u8.size == 0:
-            return out.reshape((256, 256, 4))
-
-        flat_idx = self._four_neighborhood_flat_indices(
-            x,
-            y,
+    def _scatter_render_config(self) -> ScatterRenderConfig:
+        """現在UI状態から散布図ラスタ生成設定を返す。"""
+        return ScatterRenderConfig(
             triangle_mode=(self._shape == C.SCATTER_SHAPE_TRIANGLE),
-            dtype=np.uint32,
-        )
-        # RGBチャンネルを4倍複製する代わりに、color_keyのみを複製してコピー量を抑える。
-        color_key_base = (
-            (rgb_u8[:, 0].astype(np.uint32) << 16)
-            | (rgb_u8[:, 1].astype(np.uint32) << 8)
-            | rgb_u8[:, 2].astype(np.uint32)
-        )
-        color_key = np.tile(color_key_base, 4)
-        pair_key = (flat_idx.astype(np.uint64) << 24) | color_key.astype(np.uint64)
-        if pair_key.size == 0:
-            return out.reshape((256, 256, 4))
-
-        order = np.argsort(pair_key, kind="mergesort")
-        pair_sorted = pair_key[order]
-        run_start = np.concatenate(
-            ([0], np.flatnonzero(np.diff(pair_sorted) != 0).astype(np.int64) + 1)
-        )
-        run_end = np.concatenate((run_start[1:], [pair_sorted.size]))
-        pair_unique = pair_sorted[run_start]
-        run_counts = (run_end - run_start).astype(np.int32, copy=False)
-        run_last_pos = order[run_end - 1]
-
-        pixel_idx = (pair_unique >> 24).astype(np.int32, copy=False)
-        color_unique = (pair_unique & 0xFFFFFF).astype(np.uint32, copy=False)
-        if pixel_idx.size <= 0:
-            return out.reshape((256, 256, 4))
-
-        # 「最頻色（同数は後勝ち）」をベクトル化して選ぶ。
-        # キー: (pixel_idx, run_counts, run_last_pos) を昇順で並べ、pixelごとの末尾を採用。
-        candidate_order = np.lexsort((run_last_pos, run_counts, pixel_idx))
-        if candidate_order.size <= 0:
-            return out.reshape((256, 256, 4))
-
-        pixel_sorted = pixel_idx[candidate_order]
-        group_start = np.concatenate(
-            ([0], np.flatnonzero(np.diff(pixel_sorted) != 0).astype(np.int64) + 1)
-        )
-        group_end = np.concatenate((group_start[1:], [candidate_order.size]))
-        best_rows = candidate_order[group_end - 1]
-
-        best_pixels = pixel_idx[best_rows]
-        best_colors = color_unique[best_rows]
-        out[best_pixels, 0] = ((best_colors >> 16) & 0xFF).astype(np.uint8, copy=False)
-        out[best_pixels, 1] = ((best_colors >> 8) & 0xFF).astype(np.uint8, copy=False)
-        out[best_pixels, 2] = (best_colors & 0xFF).astype(np.uint8, copy=False)
-        out[best_pixels, 3] = 255
-        return out.reshape((256, 256, 4))
-
-    def _render_scatter_heatmap(self, x: np.ndarray, y: np.ndarray) -> np.ndarray:
-        """密度ヒートマップ方式で散布図ラスタを生成する。"""
-        out = np.zeros((256, 256, 4), dtype=np.uint8)
-        if x.size == 0 or y.size == 0:
-            return out
-
-        # 4近傍の重み付けは flat index をまとめて作って bincount で一括集計する。
-        flat_idx = self._four_neighborhood_flat_indices(
-            x,
-            y,
-            triangle_mode=(self._shape == C.SCATTER_SHAPE_TRIANGLE),
-        )
-        density = np.bincount(flat_idx, minlength=256 * 256).astype(np.float32, copy=False)
-
-        density_img = density.reshape((256, 256))
-        if float(density_img.max()) <= 0.0:
-            return out
-
-        # 密度むらを見やすくするため、軽く平滑化して対数圧縮する。
-        smooth = cv2.GaussianBlur(density_img, (0, 0), sigmaX=1.2, sigmaY=1.2)
-        tone = np.log1p(smooth)
-        peak = float(tone.max())
-        if peak <= 0.0:
-            return out
-        norm = np.clip(tone / peak, 0.0, 1.0)
-        gray = np.clip(norm * 255.0, 0.0, 255.0).astype(np.uint8)
-        cmap = getattr(cv2, "COLORMAP_TURBO", cv2.COLORMAP_JET)
-        heat_bgr = cv2.applyColorMap(gray, cmap)
-
-        out[:, :, 0:3] = heat_bgr[:, :, ::-1]
-        alpha = np.clip(np.power(norm, 0.55) * 255.0, 0.0, 255.0).astype(np.uint8)
-        alpha[norm < 0.02] = 0
-        out[:, :, 3] = alpha
-        return out
-
-    def _validated_scatter_arrays(
-        self,
-        sv: np.ndarray,
-        rgb: np.ndarray,
-    ) -> tuple[np.ndarray, np.ndarray, int] | None:
-        """散布図入力配列を検証し、正規化済み配列と件数を返す。"""
-        sv_arr = np.asarray(sv)
-        rgb_arr = np.asarray(rgb)
-        if sv_arr.ndim != 2 or sv_arr.shape[1] < 2:
-            return None
-        if rgb_arr.ndim != 2 or rgb_arr.shape[1] < 3:
-            return None
-        n = min(int(sv_arr.shape[0]), int(rgb_arr.shape[0]))
-        if n <= 0:
-            return None
-        return sv_arr, rgb_arr, int(n)
-
-    def _prepare_scatter_samples(
-        self,
-        sv_arr: np.ndarray,
-        rgb_arr: np.ndarray,
-        *,
-        n: int,
-        need_rgb_for_render: bool,
-    ) -> tuple[np.ndarray, np.ndarray | None] | None:
-        """描画用の SV / RGB サンプルを抽出・フィルタして返す。"""
-        need_rgb_for_hue = bool(self._hue_filter_enabled and sv_arr.shape[1] < 3)
-        need_rgb = bool(need_rgb_for_render or need_rgb_for_hue)
-        rgb_u8 = self._to_rgb_u8(rgb_arr, int(n)) if need_rgb else None
-        if sv_arr.shape[1] >= 3:
-            # [H,S,V] 形式なら Hue を直接利用する。
-            h_arr = sv_arr[:n, 0]
-            if self._hue_filter_enabled:
-                h_arr = np.clip(h_arr, C.SCATTER_HUE_MIN, C.SCATTER_HUE_MAX)
-            sv_used = sv_arr[:n, 1:3]
-        else:
-            # [S,V] 形式なら必要時のみ RGB から Hue を復元する。
-            h_arr = (
-                self._extract_hue_from_rgb(rgb_u8)
-                if self._hue_filter_enabled and rgb_u8 is not None
-                else None
-            )
-            sv_used = sv_arr[:n, :2]
-
-        if self._hue_filter_enabled:
-            if h_arr is None or h_arr.size == 0:
-                return None
-            keep = self._apply_hue_filter_mask(h_arr)
-            if not np.any(keep):
-                return None
-            sv_used = sv_used[keep]
-            if rgb_u8 is not None:
-                rgb_u8 = rgb_u8[keep]
-            if sv_used.size == 0 or (rgb_u8 is not None and rgb_u8.size == 0):
-                return None
-        return sv_used, rgb_u8
-
-    def _render_scatter_image(
-        self,
-        *,
-        render_mode: str,
-        sv_used: np.ndarray,
-        rgb_u8: np.ndarray | None,
-    ) -> np.ndarray | None:
-        """現在の描画モード設定に従って散布図画像を生成する。"""
-        x, y = self._compute_scatter_xy(sv_used)
-        if render_mode == C.SCATTER_RENDER_MODE_HEATMAP:
-            return self._render_scatter_heatmap(x, y)
-        if rgb_u8 is None:
-            return None
-        return self._render_scatter_dominant(x, y, rgb_u8)
-
-    def _build_scatter_image(self, sv: np.ndarray, rgb: np.ndarray) -> np.ndarray | None:
-        """通常経路で散布図画像を構築して返す。"""
-        validated = self._validated_scatter_arrays(sv, rgb)
-        if validated is None:
-            return None
-        sv_arr, rgb_arr, n = validated
-        prepared = self._prepare_scatter_samples(
-            sv_arr,
-            rgb_arr,
-            n=n,
-            need_rgb_for_render=self._need_rgb_for_render,
-        )
-        if prepared is None:
-            return None
-        sv_used, rgb_u8 = prepared
-        return self._render_scatter_image(
             render_mode=self._render_mode,
-            sv_used=sv_used,
-            rgb_u8=rgb_u8,
+            need_rgb_for_render=bool(self._need_rgb_for_render),
+            hue_filter_enabled=bool(self._hue_filter_enabled),
+            hue_center=int(self._hue_center),
+            hue_half_width=int(SCATTER_HUE_FILTER_HALF_WIDTH),
         )
 
-    def _build_scatter_image_square_fallback(
-        self,
-        sv: np.ndarray,
-        rgb: np.ndarray,
-    ) -> np.ndarray | None:
-        """例外時のフォールバック経路(四角・最頻色)で散布図画像を構築する。"""
-        validated = self._validated_scatter_arrays(sv, rgb)
-        if validated is None:
-            return None
-        sv_arr, rgb_arr, n = validated
-        sv_used = sv_arr[:n, 1:3] if sv_arr.shape[1] >= 3 else sv_arr[:n, :2]
-        rgb_u8 = self._to_rgb_u8(rgb_arr, n)
-        x, y = self._compute_scatter_xy(sv_used)
-        return self._render_scatter_dominant(x, y, rgb_u8)
+    def _set_safe_fallback_render_mode(self) -> None:
+        """例外時に安全側の描画モードへ切り替える。"""
+        self._shape = C.SCATTER_SHAPE_SQUARE
+        self._render_mode = C.SCATTER_RENDER_MODE_DOMINANT
+        self._need_rgb_for_render = True
 
     def update_scatter(self, sv: np.ndarray, rgb: np.ndarray):
         """S/V・RGBサンプルから散布図表示を更新する。"""
@@ -987,21 +593,23 @@ class ScatterRasterWidget(QLabel):
             return
 
         try:
-            img = self._build_scatter_image(sv, rgb)
+            img = build_scatter_image(
+                sv,
+                rgb,
+                config=self._scatter_render_config(),
+            )
             if img is None:
                 self._show_scatter_frame_only()
                 return
-        except Exception:
+        except (RuntimeError, TypeError, ValueError, IndexError):
             # 描画エラー時は四角モードへフォールバックして継続
-            self._shape = C.SCATTER_SHAPE_SQUARE
-            self._render_mode = C.SCATTER_RENDER_MODE_DOMINANT
-            self._need_rgb_for_render = True
+            self._set_safe_fallback_render_mode()
             try:
-                img = self._build_scatter_image_square_fallback(sv, rgb)
+                img = build_square_fallback_scatter_image(sv, rgb)
                 if img is None:
                     self._show_scatter_frame_only()
                     return
-            except Exception:
+            except (RuntimeError, TypeError, ValueError, IndexError):
                 self._show_scatter_frame_only()
                 return
 

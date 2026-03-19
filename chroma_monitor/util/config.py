@@ -2,8 +2,9 @@ import copy
 import json
 import os
 import sys
+from collections.abc import Iterator
 from pathlib import Path
-from typing import Any, Dict, Iterator
+from typing import Any
 
 from . import constants as C
 
@@ -41,6 +42,7 @@ DEFAULT_CONFIG = {
     C.CFG_SQUINT_BLUR_SIGMA: C.DEFAULT_SQUINT_BLUR_SIGMA,
     C.CFG_VECTORSCOPE_SHOW_SKIN_LINE: C.DEFAULT_VECTORSCOPE_SHOW_SKIN_LINE,
     C.CFG_VECTORSCOPE_WARN_THRESHOLD: C.DEFAULT_VECTORSCOPE_WARN_THRESHOLD,
+    C.CFG_UI_THEME: C.DEFAULT_UI_THEME,
     C.CFG_ALWAYS_ON_TOP: C.DEFAULT_ALWAYS_ON_TOP,
     C.CFG_MODE: C.DEFAULT_MODE,
     C.CFG_DIFF_THRESHOLD: C.DEFAULT_DIFF_THRESHOLD,
@@ -130,7 +132,7 @@ def config_path() -> Path:
     return _CONFIG_PATH_CACHE
 
 
-def load_config() -> Dict[str, Any]:
+def load_config() -> dict[str, Any]:
     """設定ファイルを読み込み、既定値を補完して返す。"""
     path = config_path()
     # layout_current/layout_presets などの可変値参照を共有しない。
@@ -152,7 +154,7 @@ def load_config() -> Dict[str, Any]:
         return defaults
 
 
-def save_config(cfg: Dict[str, Any]) -> None:
+def save_config(cfg: dict[str, Any]) -> None:
     """設定辞書をJSONとして保存する。"""
     path = config_path()
     temp_path = path.with_name(f"{path.name}.tmp")

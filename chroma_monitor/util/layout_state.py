@@ -1,4 +1,4 @@
-from typing import Any, Dict
+from typing import Any
 
 from PySide6.QtCore import QByteArray
 from PySide6.QtGui import QGuiApplication
@@ -38,7 +38,7 @@ def _restore_encoded_blob(window, encoded: Any, restore_fn) -> bool:
     return bool(restore_fn(_decode_qbytearray(encoded)))
 
 
-def _apply_visible_docks(docks: Dict[str, Any], visible: Any) -> bool:
+def _apply_visible_docks(docks: dict[str, Any], visible: Any) -> bool:
     """保存された可視状態をドック群へ適用する。"""
     if not isinstance(visible, dict) or not visible:
         return False
@@ -71,7 +71,7 @@ def _normalize_geometry_rect(raw: Any) -> tuple[int, int, int, int] | None:
     return (int(rect.x()), int(rect.y()), int(rect.width()), int(rect.height()))
 
 
-def _capture_floating_dock_geometry(docks: Dict[str, Any]) -> dict[str, dict[str, int]]:
+def _capture_floating_dock_geometry(docks: dict[str, Any]) -> dict[str, dict[str, int]]:
     """フローティング中ドックの geometry を保存用辞書へ変換する。"""
     out: dict[str, dict[str, int]] = {}
     for name, dock in docks.items():
@@ -126,7 +126,7 @@ def _normalize_display_topology(raw: Any) -> list[tuple[int, int, int, int]]:
     return normalized
 
 
-def capture_layout_state(window, docks: Dict[str, Any]) -> Dict[str, Any]:
+def capture_layout_state(window, docks: dict[str, Any]) -> dict[str, Any]:
     """ウィンドウ配置・ドック状態を保存可能な辞書へシリアライズする。"""
     return {
         _KEY_GEOMETRY: _encode_qbytearray(window.saveGeometry()),
@@ -138,7 +138,7 @@ def capture_layout_state(window, docks: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-def apply_layout_state(window, docks: Dict[str, Any], data: Dict[str, Any]) -> bool:
+def apply_layout_state(window, docks: dict[str, Any], data: dict[str, Any]) -> bool:
     """保存済みレイアウト辞書をウィンドウへ復元適用する。"""
     if not isinstance(data, dict):
         return False
@@ -156,14 +156,14 @@ def apply_layout_state(window, docks: Dict[str, Any], data: Dict[str, Any]) -> b
     return restored
 
 
-def restore_layout_geometry(window, data: Dict[str, Any]) -> bool:
+def restore_layout_geometry(window, data: dict[str, Any]) -> bool:
     """保存済みレイアウト辞書からウィンドウ geometry だけを再適用する。"""
     if not isinstance(data, dict):
         return False
     return _restore_encoded_blob(window, data.get(_KEY_GEOMETRY, ""), window.restoreGeometry)
 
 
-def restore_layout_geometry_rect(window, data: Dict[str, Any]) -> bool:
+def restore_layout_geometry_rect(window, data: dict[str, Any]) -> bool:
     """保存済みレイアウト辞書から明示矩形を再適用する。"""
     if not isinstance(data, dict):
         return False
@@ -178,7 +178,7 @@ def restore_layout_geometry_rect(window, data: Dict[str, Any]) -> bool:
     return True
 
 
-def restore_floating_dock_geometry(docks: Dict[str, Any], data: Dict[str, Any]) -> int:
+def restore_floating_dock_geometry(docks: dict[str, Any], data: dict[str, Any]) -> int:
     """保存済みフローティングドック矩形を再適用し、適用件数を返す。"""
     if not isinstance(data, dict):
         return 0
@@ -204,7 +204,7 @@ def restore_floating_dock_geometry(docks: Dict[str, Any], data: Dict[str, Any]) 
     return int(applied)
 
 
-def is_layout_display_topology_unchanged(data: Dict[str, Any]) -> bool:
+def is_layout_display_topology_unchanged(data: dict[str, Any]) -> bool:
     """保存時と現在でスクリーン構成が同一かを返す。"""
     if not isinstance(data, dict):
         return False

@@ -1,15 +1,13 @@
 """解析結果スナップショットの保持と各ドックへの復元処理。"""
 
+from typing import cast
+
 import cv2
 import numpy as np
 
-from ...analysis.frame_analysis import (
-    _compute_hsv_histograms,
-    _compute_wheel_stats_from_hs,
-    _prepare_hsv8_and_bgr8,
-    _sample_sv_and_rgb,
-    compute_top_bars_chromatic_medoid,
-)
+from ...analysis import live_graph_data
+from ...analysis.result_payloads import AnalyzerResultPayload, ResultFramePayload
+from ...analysis.frame_analysis import compute_hsv_histograms
 from ...util.image_ops import (
     clear_cvt_color_cache,
     clear_resize_cache,
@@ -17,10 +15,8 @@ from ...util.image_ops import (
     resize_by_long_edge,
 )
 from ...util.qt_helpers import is_widget_renderable
-from .result_color_band import (
-    _color_band_sat_threshold_from_ui,
-    render_color_band_dock_from_snapshot,
-)
+from .result_color_band import render_color_band_dock_from_snapshot
+from .settings_values import selected_effective_color_band_sat_threshold_safe
 
 _SNAPSHOT_DOCK_COLOR = "dock_color"
 _SNAPSHOT_DOCK_COLOR_BAND = "dock_color_band"
@@ -41,7 +37,15 @@ _GRAPH_DOCK_REQUIREMENTS = {
 }
 
 
-def _new_empty_result_snapshot() -> dict:
+class ResultSnapshot(ResultFramePayload):
+    """各ドック復元で共有する最新結果スナップショット。"""
+
+    top_colors_full: list[tuple] | None
+    top_colors_filtered: list[tuple] | None
+    top_colors_key: tuple | None
+
+
+def _new_empty_result_snapshot() -> ResultSnapshot:
     """解析結果スナップショットの初期値を返す。"""
     return {
         "bgr_preview": None,
@@ -79,14 +83,14 @@ def _ensure_snapshot_state(main_window) -> None:
 
 def _store_result_snapshot(
     main_window,
-    res: dict,
+    res: AnalyzerResultPayload,
     *,
     update_bgr: bool = True,
     bump_version: bool = True,
-) -> tuple[dict, int]:
+) -> tuple[ResultSnapshot, int]:
     """新しい結果を既存スナップショットへ反映し、必要なら版数を進める。"""
     _ensure_snapshot_state(main_window)
-    snap = dict(main_window._latest_result_snapshot)
+    snap = cast(ResultSnapshot, dict(main_window._latest_result_snapshot))
 
     if update_bgr:
         # 生画像は必要なときだけ更新する。
@@ -140,7 +144,7 @@ def _mark_docks_rendered(main_window, version: int, dock_names: set[str]) -> Non
         main_window._dock_rendered_version[name] = int(version)
 
 
-def _render_color_dock_from_snapshot(main_window, snapshot: dict) -> bool:
+def _render_color_dock_from_snapshot(main_window, snapshot: ResultSnapshot) -> bool:
     """色相環ドックへスナップショットを反映する。"""
     hist = snapshot.get("hist")
     if hist is None or not is_widget_renderable(main_window.dock_color):
@@ -149,7 +153,7 @@ def _render_color_dock_from_snapshot(main_window, snapshot: dict) -> bool:
     return True
 
 
-def _render_scatter_dock_from_snapshot(main_window, snapshot: dict) -> bool:
+def _render_scatter_dock_from_snapshot(main_window, snapshot: ResultSnapshot) -> bool:
     """散布図ドックへスナップショットを反映する。"""
     sv = snapshot.get("sv")
     rgb = snapshot.get("rgb")
@@ -159,14 +163,14 @@ def _render_scatter_dock_from_snapshot(main_window, snapshot: dict) -> bool:
     return True
 
 
-def _has_hsv_channel_data(snapshot: dict, channel: str) -> bool:
+def _has_hsv_channel_data(snapshot: ResultSnapshot, channel: str) -> bool:
     """指定HSVチャネルの描画に必要なデータがあるか判定する。"""
     return (
         snapshot.get(f"{channel}_hist") is not None or snapshot.get(f"{channel}_plane") is not None
     )
 
 
-def _hsv_hist_fallback_flags(snapshot: dict) -> tuple[bool, bool, bool]:
+def _hsv_hist_fallback_flags(snapshot: ResultSnapshot) -> tuple[bool, bool, bool]:
     """不足しているHSVヒストグラムチャネルを判定する。"""
     need_h = not _has_hsv_channel_data(snapshot, "h")
     need_s = not _has_hsv_channel_data(snapshot, "s")
@@ -174,7 +178,10 @@ def _hsv_hist_fallback_flags(snapshot: dict) -> tuple[bool, bool, bool]:
     return need_h, need_s, need_v
 
 
-def _apply_hsv_hist_fallback_from_bgr(snapshot: dict, bgr_preview) -> tuple[object, object, object]:
+def _apply_hsv_hist_fallback_from_bgr(
+    snapshot: ResultSnapshot,
+    bgr_preview,
+) -> tuple[object, object, object]:
     """ヒストデータ欠損時に bgr からH/S/Vヒストグラムを補完する。"""
     h_hist = snapshot.get("h_hist")
     s_hist = snapshot.get("s_hist")
@@ -190,21 +197,23 @@ def _apply_hsv_hist_fallback_from_bgr(snapshot: dict, bgr_preview) -> tuple[obje
             h_full = hsv_full[:, :, 0]
             s_full = hsv_full[:, :, 1]
             v_full = hsv_full[:, :, 2]
+            fallback_h, fallback_s, fallback_v = compute_hsv_histograms(h_full, s_full, v_full)
             if need_h_fallback:
-                h_hist = np.bincount(h_full[s_full > 0].ravel(), minlength=180)[:180]
+                h_hist = fallback_h
                 snapshot["h_hist"] = h_hist
             if need_s_fallback:
-                s_hist = np.bincount(s_full.ravel(), minlength=256)[:256]
+                s_hist = fallback_s
                 snapshot["s_hist"] = s_hist
             if need_v_fallback:
-                v_hist = np.bincount(v_full.ravel(), minlength=256)[:256]
+                v_hist = fallback_v
                 snapshot["v_hist"] = v_hist
-        except Exception:
+        except (cv2.error, TypeError, ValueError):
+            # 欠損補完に失敗しても既存の snapshot があればそちらを優先する。
             pass
     return h_hist, s_hist, v_hist
 
 
-def _render_hist_dock_from_snapshot(main_window, snapshot: dict) -> bool:
+def _render_hist_dock_from_snapshot(main_window, snapshot: ResultSnapshot) -> bool:
     """HSVヒストグラムドックへスナップショットを反映する。"""
     if not is_widget_renderable(main_window.dock_hist):
         return False
@@ -260,9 +269,20 @@ def _image_view_input_bgr(main_window, bgr_preview):
         return None
     try:
         max_dim = int(getattr(main_window.worker.cfg, "max_dim", 0))
-    except Exception:
+    except (AttributeError, TypeError, ValueError):
         max_dim = 0
     return resize_by_long_edge(np.asarray(bgr_preview), max_dim)
+
+
+def _selected_wheel_sat_threshold(main_window) -> int:
+    """現在 UI で有効な色相環彩度しきい値を安全に返す。"""
+    selector = getattr(main_window, "_selected_wheel_sat_threshold", None)
+    if selector is None:
+        return 0
+    try:
+        return int(selector())
+    except (TypeError, ValueError):
+        return 0
 
 
 def _apply_image_update_target(
@@ -316,7 +336,7 @@ def update_image_docks_from_frame(main_window, bgr_preview) -> set[str]:
     return updated_docks
 
 
-def _snapshot_has_graph_data_for_dock(snapshot: dict, dock_name: str) -> bool:
+def _snapshot_has_graph_data_for_dock(snapshot: ResultSnapshot, dock_name: str) -> bool:
     """指定ドックに必要なグラフデータが snapshot 内に揃っているか判定する。"""
     if dock_name in _GRAPH_COLOR_DOCKS:
         return snapshot.get("hist") is not None
@@ -325,60 +345,6 @@ def _snapshot_has_graph_data_for_dock(snapshot: dict, dock_name: str) -> bool:
     if dock_name == _SNAPSHOT_DOCK_HIST:
         return all(_has_hsv_channel_data(snapshot, ch) for ch in ("h", "s", "v"))
     return True
-
-
-def _compute_graph_subset_from_bgr(
-    main_window,
-    bgr_preview,
-    *,
-    need_color: bool,
-    need_color_band: bool,
-    need_scatter: bool,
-    need_hsv_hist: bool,
-) -> dict:
-    """必要な項目だけを解析し、snapshot更新用の辞書を返す。"""
-    bgr_small = resize_by_long_edge(np.asarray(bgr_preview), int(main_window.worker.cfg.max_dim))
-    bgr_u8, h, s, v = _prepare_hsv8_and_bgr8(bgr_small)
-
-    out = {
-        "hist": None,
-        "top_colors": None,
-        "sv": None,
-        "rgb": None,
-        "h_hist": None,
-        "s_hist": None,
-        "v_hist": None,
-        "warm_ratio": 0.0,
-        "cool_ratio": 0.0,
-        "other_ratio": 0.0,
-    }
-
-    if need_hsv_hist:
-        h_hist, s_hist, v_hist = _compute_hsv_histograms(h, s, v)
-        out["h_hist"] = h_hist
-        out["s_hist"] = s_hist
-        out["v_hist"] = v_hist
-
-    if need_color:
-        sat_th = int(main_window._selected_wheel_sat_threshold())
-        hist, warm_ratio, cool_ratio, other_ratio = _compute_wheel_stats_from_hs(h, s, sat_th)
-        out["hist"] = hist
-        out["warm_ratio"] = float(warm_ratio)
-        out["cool_ratio"] = float(cool_ratio)
-        out["other_ratio"] = float(other_ratio)
-
-    if need_scatter:
-        sv, rgb = _sample_sv_and_rgb(h, s, v, bgr_u8, int(main_window.spin_points.value()))
-        out["sv"] = sv
-        out["rgb"] = rgb
-    if need_color_band:
-        # ライブ解析と同様に、配色比率は解析解像度（max_dim適用後）で算出する。
-        out["top_colors"] = compute_top_bars_chromatic_medoid(
-            bgr_u8,
-            sat_threshold=_color_band_sat_threshold_from_ui(main_window),
-        )
-
-    return out
 
 
 def _is_worker_running(main_window) -> bool:
@@ -420,15 +386,22 @@ def _ensure_snapshot_graph_data_for_dock(main_window, dock_name: str) -> bool:
         return True
     try:
         # 必要な項目だけ部分再計算。
-        graph_res = _compute_graph_subset_from_bgr(
-            main_window,
-            bgr_preview,
+        graph_res = live_graph_data.collect_graph_data(
+            np.asarray(bgr_preview),
+            live_graph_data.GraphDataConfig(
+                sample_points=int(main_window.spin_points.value()),
+                max_dim=int(getattr(main_window.worker.cfg, "max_dim", 0)),
+                wheel_sat_threshold=_selected_wheel_sat_threshold(main_window),
+                color_band_sat_threshold=selected_effective_color_band_sat_threshold_safe(
+                    main_window
+                ),
+            ),
             need_color=need_color,
             need_color_band=need_color_band,
             need_scatter=need_scatter,
             need_hsv_hist=need_hsv_hist,
         )
-    except Exception:
+    except (cv2.error, TypeError, ValueError):
         return False
     graph_res["graph_update"] = True
     _store_result_snapshot(main_window, graph_res, update_bgr=False, bump_version=True)
@@ -466,7 +439,11 @@ def _ensure_graph_snapshot_for_restore(main_window, dock_name: str) -> bool:
     return bool(_ensure_snapshot_graph_data_for_dock(main_window, dock_name))
 
 
-def _render_graph_dock_by_name(main_window, dock_name: str, snapshot: dict) -> bool | None:
+def _render_graph_dock_by_name(
+    main_window,
+    dock_name: str,
+    snapshot: ResultSnapshot,
+) -> bool | None:
     """グラフ系ドック名なら描画し、非グラフ系なら None を返す。"""
     if dock_name == _SNAPSHOT_DOCK_COLOR:
         return bool(_render_color_dock_from_snapshot(main_window, snapshot))
@@ -479,7 +456,12 @@ def _render_graph_dock_by_name(main_window, dock_name: str, snapshot: dict) -> b
     return None
 
 
-def _render_dock_from_snapshot_by_name(main_window, dock_name: str, dock, snapshot: dict) -> bool:
+def _render_dock_from_snapshot_by_name(
+    main_window,
+    dock_name: str,
+    dock,
+    snapshot: ResultSnapshot,
+) -> bool:
     """ドック名に対応する復元描画を実行し、更新成否を返す。"""
     graph_updated = _render_graph_dock_by_name(main_window, dock_name, snapshot)
     if graph_updated is not None:
@@ -494,7 +476,7 @@ def _render_dock_from_snapshot_by_name(main_window, dock_name: str, dock, snapsh
     )
 
 
-def _render_all_graph_docks(main_window, snapshot: dict) -> set[str]:
+def _render_all_graph_docks(main_window, snapshot: ResultSnapshot) -> set[str]:
     """グラフ系ドックを順番に描画し、更新済み名を返す。"""
     rendered: set[str] = set()
     # 依存関係が弱い順で描画する。
@@ -520,7 +502,7 @@ def restore_dock_from_snapshot(main_window, dock, *, force: bool = False) -> Non
         _mark_docks_rendered(main_window, int(main_window._latest_result_version), {dock_name})
 
 
-def on_result(main_window, res: dict):
+def on_result(main_window, res: AnalyzerResultPayload):
     """ワーカー結果を受け取り、可視ドックへ反映して状態を更新する。"""
     # 例外時でも未消費フラグを解除するため、finallyで必ず後処理する。
     try:

@@ -8,6 +8,7 @@ from PySide6.QtGui import QColor, QPainter, QPainterPath, QPen
 from PySide6.QtWidgets import QHBoxLayout, QSizePolicy, QStackedLayout, QWidget
 
 from ..util import constants as C
+from ..util.theme import UiTheme, get_ui_theme, qcolor
 from ..util.value_utils import safe_choice
 
 _R_COLOR = QColor(228, 84, 84)
@@ -15,14 +16,9 @@ _G_COLOR = QColor(88, 176, 96)
 _B_COLOR = QColor(88, 126, 236)
 _HIST_MAX_TEXT_MIN_WIDTH = 190
 _HIST_MAX_TEXT_MIN_HEIGHT = 120
-_RGB_OVERLAY_PLOT_BG = QColor(26, 28, 32)
-_RGB_OVERLAY_GUIDE = QColor(92, 98, 108, 132)
 _RGB_OVERLAY_R_FILL = QColor(236, 88, 88, 86)
 _RGB_OVERLAY_G_FILL = QColor(96, 182, 104, 86)
 _RGB_OVERLAY_B_FILL = QColor(96, 134, 244, 86)
-_RGB_OVERLAY_RGB_OVERLAP_FILL = QColor(255, 255, 255, 122)
-_RGB_OVERLAY_TEXT_MAIN = QColor(238, 241, 246)
-_RGB_OVERLAY_MAX_BADGE_BG = QColor(12, 14, 18, 176)
 
 
 def _bucket_sum(hist: np.ndarray, bucket: int) -> np.ndarray:
@@ -46,14 +42,14 @@ def _fit_hist_size(hist: np.ndarray, size: int) -> np.ndarray:
     return fixed
 
 
-def _draw_plot_guides(painter: QPainter, plot: QRect) -> None:
+def _draw_plot_guides(painter: QPainter, plot: QRect, theme: UiTheme) -> None:
     """ヒストグラム背景の基準ガイド線を描画する。"""
-    painter.setPen(QColor(225, 225, 225))
+    painter.setPen(qcolor(theme.plot_grid))
     # 目盛りガイド線（横方向）を薄く引く。
     for i in range(1, 5):
         y = plot.top() + int(plot.height() * i / 5)
         painter.drawLine(plot.left(), y, plot.right(), y)
-    painter.setPen(QColor(180, 180, 180))
+    painter.setPen(qcolor(theme.plot_grid_subtle))
     painter.drawLine(plot.left(), plot.top(), plot.left(), plot.bottom())
     painter.drawLine(plot.left(), plot.bottom(), plot.right(), plot.bottom())
 
@@ -78,6 +74,12 @@ class ChannelHistogram(QWidget):
         self._std = 0.0
         self._total = 0
         self._shared_max_y: int | None = None
+        self._theme = get_ui_theme()
+
+    def set_theme(self, theme: UiTheme) -> None:
+        """テーマ色を更新して再描画する。"""
+        self._theme = theme
+        self.update()
 
     def _bucketed_hist(self) -> np.ndarray:
         """描画用にバケット集約したヒストグラムを返す。"""
@@ -139,20 +141,20 @@ class ChannelHistogram(QWidget):
         try:
             # バー描画主体のため AA を切って描画負荷を抑える。
             p.setRenderHint(QPainter.Antialiasing, False)
-            p.fillRect(self.rect(), QColor(255, 255, 255, 255))
+            p.fillRect(self.rect(), qcolor(self._theme.plot_bg))
 
             title_rect = self.rect().adjusted(10, 6, -10, -6)
-            p.setPen(QColor(30, 30, 30))
+            p.setPen(qcolor(self._theme.text_primary))
             p.drawText(title_rect, Qt.AlignLeft | Qt.AlignTop, self._title)
 
             if self._total == 0:
-                p.setPen(QColor(120, 120, 120))
+                p.setPen(qcolor(self._theme.text_muted))
                 p.drawText(self.rect(), Qt.AlignCenter, "データなし")
                 return
 
             plot = self.rect().adjusted(12, 26, -12, -44)
             if plot.width() <= 10 or plot.height() <= 10:
-                p.setPen(QColor(30, 30, 30))
+                p.setPen(qcolor(self._theme.text_primary))
                 p.drawText(
                     self.rect().adjusted(10, 24, -10, -8),
                     Qt.AlignLeft | Qt.AlignBottom,
@@ -160,7 +162,7 @@ class ChannelHistogram(QWidget):
                 )
                 return
 
-            _draw_plot_guides(p, plot)
+            _draw_plot_guides(p, plot, self._theme)
 
             # ビン数が多い場合は指定バケット幅でまとめて可読性を上げる。
             bins = self._bucketed_hist()
@@ -184,7 +186,7 @@ class ChannelHistogram(QWidget):
                 y = plot.bottom() - h
                 p.fillRect(QRect(x, y, bar_w, h), fill_color)
 
-            p.setPen(QColor(30, 30, 30))
+            p.setPen(qcolor(self._theme.text_primary))
             axis_rect = QRect(plot.left(), plot.bottom() + 4, plot.width(), 14)
             p.drawText(axis_rect, Qt.AlignLeft | Qt.AlignVCenter, "0")
             p.drawText(axis_rect, Qt.AlignRight | Qt.AlignVCenter, str(self._max_value))
@@ -220,6 +222,12 @@ class RgbOverlayHistogram(QWidget):
         self._bucket = 2
         self._x_vals_cache_key: tuple[int, int, int] | None = None
         self._x_vals_cache: np.ndarray | None = None
+        self._theme = get_ui_theme()
+
+    def set_theme(self, theme: UiTheme) -> None:
+        """テーマ色を更新して再描画する。"""
+        self._theme = theme
+        self.update()
 
     def _bucketed(self, hist: np.ndarray) -> np.ndarray:
         """描画負荷を抑えるためバケット集約した配列を返す。"""
@@ -290,13 +298,13 @@ class RgbOverlayHistogram(QWidget):
         p = QPainter(self)
         try:
             p.setRenderHint(QPainter.Antialiasing, True)
-            p.fillRect(self.rect(), QColor(255, 255, 255, 255))
+            p.fillRect(self.rect(), qcolor(self._theme.plot_bg))
             title_rect = self.rect().adjusted(10, 6, -10, -6)
-            p.setPen(QColor(30, 30, 30))
+            p.setPen(qcolor(self._theme.text_primary))
             p.drawText(title_rect, Qt.AlignLeft | Qt.AlignTop, "RGB")
 
             if self._total <= 0:
-                p.setPen(QColor(120, 120, 120))
+                p.setPen(qcolor(self._theme.text_muted))
                 p.drawText(self.rect(), Qt.AlignCenter, "データなし")
                 return
 
@@ -305,12 +313,12 @@ class RgbOverlayHistogram(QWidget):
                 return
 
             # 重ね表示の重複を視認しやすくするため、プロット領域は暗色背景にする。
-            p.fillRect(plot, _RGB_OVERLAY_PLOT_BG)
-            p.setPen(_RGB_OVERLAY_GUIDE)
+            p.fillRect(plot, qcolor(self._theme.panel_alt_bg))
+            p.setPen(qcolor(self._theme.plot_grid_subtle, 132))
             for i in range(1, 5):
                 y = plot.top() + int(plot.height() * i / 5)
                 p.drawLine(plot.left(), y, plot.right(), y)
-            p.setPen(QColor(128, 136, 149))
+            p.setPen(qcolor(self._theme.plot_border))
             p.drawRect(plot)
 
             h_r = self._bucketed(self._hist_r)
@@ -342,7 +350,7 @@ class RgbOverlayHistogram(QWidget):
             p.drawPath(self._build_area_path(plot, x_vals, y_g, n_bins))
             p.setBrush(_RGB_OVERLAY_B_FILL)
             p.drawPath(self._build_area_path(plot, x_vals, y_b, n_bins))
-            p.setBrush(_RGB_OVERLAY_RGB_OVERLAP_FILL)
+            p.setBrush(qcolor(self._theme.text_inverse, 122))
             p.drawPath(self._build_area_path(plot, x_vals, y_overlap, n_bins))
 
             color_r = QColor(_R_COLOR)
@@ -356,15 +364,15 @@ class RgbOverlayHistogram(QWidget):
             self._draw_curve(p, x_vals=x_vals, y_vals=y_b, n_bins=n_bins, color=color_b)
 
             axis_rect = QRect(plot.left(), plot.bottom() + 4, plot.width(), 14)
-            p.setPen(QColor(30, 30, 30))
+            p.setPen(qcolor(self._theme.text_primary))
             p.drawText(axis_rect, Qt.AlignLeft | Qt.AlignVCenter, "0")
             p.drawText(axis_rect, Qt.AlignRight | Qt.AlignVCenter, "255")
 
             badge_w = max(84, int(plot.width() * 0.18))
             badge_h = 16
             badge = QRect(plot.right() - badge_w + 1, plot.top() + 1, badge_w, badge_h)
-            p.fillRect(badge, _RGB_OVERLAY_MAX_BADGE_BG)
-            p.setPen(_RGB_OVERLAY_TEXT_MAIN)
+            p.fillRect(badge, qcolor(self._theme.scope_outer_bg, 176))
+            p.setPen(qcolor(self._theme.text_inverse))
             p.drawText(badge.adjusted(6, 0, -6, 0), Qt.AlignCenter, f"max {max_y}")
         finally:
             p.end()
@@ -396,7 +404,14 @@ class RgbHistogramWidget(QWidget):
         root.addWidget(side_widget)
         root.addWidget(self._overlay)
         self._stack = root
+        self._theme = get_ui_theme()
         self.set_display_mode(C.DEFAULT_RGB_HIST_MODE)
+
+    def set_theme(self, theme: UiTheme) -> None:
+        """子ヒストグラムを含めてテーマを反映する。"""
+        self._theme = theme
+        for view in (self._hist_r, self._hist_g, self._hist_b, self._overlay):
+            view.set_theme(theme)
 
     def set_display_mode(self, mode: str):
         """表示モードを切り替える。"""

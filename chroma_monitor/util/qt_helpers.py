@@ -1,7 +1,7 @@
 """Qt ウィジェット制御の共通補助関数。"""
 
+from collections.abc import Iterator
 from contextlib import contextmanager
-from typing import Iterator
 
 from PySide6.QtCore import QObject, QRect, QSignalBlocker
 from PySide6.QtGui import QGuiApplication

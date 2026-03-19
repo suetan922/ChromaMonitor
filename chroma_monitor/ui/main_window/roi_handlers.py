@@ -126,11 +126,11 @@ def pick_roi_in_window(main_window):
     if hwnd is None:
         QMessageBox.information(main_window, "情報", "まずターゲットウィンドウを選んでください。")
         return
-    bounds_native = main_window.worker._get_window_rect(int(hwnd))
+    bounds_native = main_window.worker.get_window_rect(int(hwnd))
     if bounds_native is None:
         QMessageBox.warning(main_window, "警告", "ウィンドウの表示範囲を取得できませんでした。")
         return
-    window_bounds_logical = main_window.worker._native_rect_to_logical(bounds_native)
+    window_bounds_logical = main_window.worker.native_rect_to_logical(bounds_native)
     help_text = "ターゲットウィンドウ内で領域をドラッグ選択（Escでキャンセル）"
     open_multi_screen_roi_selectors(
         main_window,
@@ -147,7 +147,7 @@ def on_roi_window_selected(main_window, hwnd: int, wrect: QRect, roi_abs_logical
     """ウィンドウ内ROIを確定し、相対座標としてワーカーへ設定する。"""
     close_roi_selectors(main_window)
     # 論理座標選択をネイティブ座標へ変換してからウィンドウ矩形と交差判定する。
-    roi_abs_native = main_window.worker._logical_rect_to_native(roi_abs_logical)
+    roi_abs_native = main_window.worker.logical_rect_to_native(roi_abs_logical)
     hit = roi_abs_native.intersected(wrect)
     if hit.width() < 10 or hit.height() < 10:
         main_window.on_status(

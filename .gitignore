@@ -11,18 +11,22 @@ venv/
 .mypy_cache/
 .ruff_cache/
 
-# Tests
-tests/
-
 # Build artifacts
 build/
 dist/
 *.spec
 *.egg-info/
+*.zip
+
+# Runtime logs / temp outputs
+*.log
+*.tmp
 
 # Editor / OS
 .vscode/
 .DS_Store
 
-# Local runtime config
+# Local runtime config (portable mode outputs)
 config/
+
+AGENTS.md

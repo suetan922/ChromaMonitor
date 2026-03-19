@@ -3,7 +3,6 @@
 import math
 import weakref
 from collections import OrderedDict
-from typing import Tuple
 
 import cv2
 import numpy as np
@@ -113,7 +112,7 @@ def clear_resize_cache() -> None:
     _resize_cache.clear()
 
 
-def clamp_render_size(width: int, height: int) -> Tuple[int, int]:
+def clamp_render_size(width: int, height: int) -> tuple[int, int]:
     """描画用サイズを安全上限に収める。"""
     w = max(1, int(width))
     h = max(1, int(height))

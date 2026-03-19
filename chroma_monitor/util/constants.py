@@ -297,6 +297,19 @@ DEFAULT_VECTORSCOPE_WARN_THRESHOLD = 100
 """高彩度警告しきい値(%)既定値。"""
 DEFAULT_ALWAYS_ON_TOP = False
 """常に最前面表示の既定値。"""
+UI_THEME_LIGHT = "light"
+"""ライトテーマ識別子。"""
+UI_THEME_DARK = "dark"
+"""ダークテーマ識別子。"""
+UI_THEMES = (UI_THEME_LIGHT, UI_THEME_DARK)
+"""利用可能なUIテーマ一覧。"""
+UI_THEME_LABELS = {
+    UI_THEME_LIGHT: "ライト",
+    UI_THEME_DARK: "ダーク",
+}
+"""UIテーマの表示ラベル。"""
+DEFAULT_UI_THEME = UI_THEME_LIGHT
+"""UIテーマの既定値。"""
 
 # Change-trigger defaults
 DEFAULT_MODE = UPDATE_MODE_INTERVAL
@@ -340,6 +353,7 @@ DEBUG_WINDOW_LAYOUT_LOG_PATH_ENV = "CHROMA_MONITOR_DEBUG_WINDOW_LAYOUT_LOG_PATH"
 # Settings page indices
 SETTINGS_PAGE_CAPTURE = 0
 SETTINGS_PAGE_LAYOUT = 9
+SETTINGS_PAGE_THEME = 15
 
 # Shared UI ranges
 WHEEL_SAT_THRESHOLD_MIN = 0
@@ -414,6 +428,7 @@ CFG_SQUINT_SCALE_PERCENT = "squint_scale_percent"
 CFG_SQUINT_BLUR_SIGMA = "squint_blur_sigma"
 CFG_VECTORSCOPE_SHOW_SKIN_LINE = "vectorscope_show_skin_line"
 CFG_VECTORSCOPE_WARN_THRESHOLD = "vectorscope_warn_threshold"
+CFG_UI_THEME = "ui_theme"
 CFG_ALWAYS_ON_TOP = "always_on_top"
 CFG_MODE = "mode"
 CFG_DIFF_THRESHOLD = "diff_threshold"

@@ -6,6 +6,7 @@ import numpy as np
 from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtWidgets import QLabel, QSizePolicy, QVBoxLayout, QWidget
 
+from ..util.theme import UiTheme, get_ui_theme
 from ..util.qt_image import bgr_to_qpixmap
 
 
@@ -31,12 +32,14 @@ class PreviewWindow(QWidget):
         super().__init__()
         self.setWindowTitle("領域プレビュー")
         self.resize(640, 420)
+        self.setProperty("chromaRole", "previewWindow")
         self._last_bgr: Optional[np.ndarray] = None
         self._last_render_key: Optional[tuple[int, int, int]] = None
+        self._theme = get_ui_theme()
 
         self.lbl = _PreviewImageLabel("領域プレビュー")
         self.lbl.setAlignment(Qt.AlignCenter)
-        self.lbl.setStyleSheet("background:#111; border:1px solid #333; color:#AAA;")
+        self.lbl.setProperty("chromaViewRole", "image")
         # QLabel の pixmap sizeHint 肥大化でウィンドウ最小サイズが増えるのを防ぐ。
         self.lbl.setMinimumSize(0, 0)
         self.lbl.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Ignored)
@@ -44,6 +47,11 @@ class PreviewWindow(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 8, 8, 8)
         layout.addWidget(self.lbl)
+
+    def set_theme(self, theme: UiTheme) -> None:
+        """現在テーマを保持する。"""
+        self._theme = theme
+        self.update()
 
     def update_preview(self, bgr: np.ndarray):
         """現在のROI画像をラベルサイズに合わせて表示更新する。"""

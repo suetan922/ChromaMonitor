@@ -8,6 +8,7 @@ import numpy as np
 from ..util import constants as C
 from ..util.image_math import normalize_map
 from ..util.qt_image import bgr_to_qpixmap
+from ..util.theme import UiTheme, get_ui_theme, hex_to_bgr
 from ..util.value_utils import clamp_int
 from .base_image_view import BaseImageLabelView
 
@@ -26,10 +27,7 @@ class VectorScopeView(BaseImageLabelView):
 
     def __init__(self):
         """表示設定と描画キャッシュを初期化する。"""
-        super().__init__(
-            "ベクトルスコープなし",
-            style="background:#0d1015; border:1px solid #2c3440; color:#9aa7ba;",
-        )
+        super().__init__("ベクトルスコープなし")
         self._show_skin_tone_line = C.DEFAULT_VECTORSCOPE_SHOW_SKIN_LINE
         self._warn_threshold = C.DEFAULT_VECTORSCOPE_WARN_THRESHOLD
         self._last_high_sat_ratio = 0.0
@@ -38,7 +36,15 @@ class VectorScopeView(BaseImageLabelView):
         self._ref_vectors_cache = None
         self._red_raw_angle_deg = self._ref_angle_from_bgr((0, 0, 255))
         self._uv_transform = self._build_uv_transform()
+        self._theme = get_ui_theme()
         self.set_resize_renderer(self.update_scope)
+
+    def set_theme(self, theme: UiTheme) -> None:
+        """背景グリッド色をテーマに合わせて更新する。"""
+        self._theme = theme
+        self._bg_cache.clear()
+        if self._last_bgr is not None:
+            self.update_scope(self._last_bgr)
 
     def _display_angle_from_raw(self, raw_angle_deg: float) -> float:
         """生のU/V角度を表示系の角度へ変換する。"""
@@ -153,23 +159,37 @@ class VectorScopeView(BaseImageLabelView):
         cached = self._bg_cache.get(int(size))
         if cached is not None:
             return cached
-        bg = np.full((size, size, 3), (8, 10, 13), dtype=np.uint8)
+        bg = np.full((size, size, 3), hex_to_bgr(self._theme.scope_outer_bg), dtype=np.uint8)
         cx, cy, radius, _ = self._scope_geometry(size)
         mask = self._scope_mask(size)
-        bg[mask] = (12, 16, 22)
-        cv2.rectangle(bg, (0, 0), (size - 1, size - 1), (28, 34, 42), 1, cv2.LINE_AA)
+        bg[mask] = hex_to_bgr(self._theme.scope_inner_bg)
+        cv2.rectangle(bg, (0, 0), (size - 1, size - 1), hex_to_bgr(self._theme.scope_border), 1, cv2.LINE_AA)
 
         # グリッドは控えめにして、信号を見やすくする
         for ratio in (0.25, 0.5, 0.75):
             rr = max(1, int(round(radius * ratio)))
-            cv2.circle(bg, (cx, cy), rr, (42, 50, 60), 1, cv2.LINE_AA)
-        cv2.circle(bg, (cx, cy), radius, (74, 86, 102), 1, cv2.LINE_AA)
-        cv2.line(bg, (cx - radius, cy), (cx + radius, cy), (54, 62, 74), 1, cv2.LINE_AA)
-        cv2.line(bg, (cx, cy - radius), (cx, cy + radius), (54, 62, 74), 1, cv2.LINE_AA)
+            cv2.circle(bg, (cx, cy), rr, hex_to_bgr(self._theme.scope_grid_soft), 1, cv2.LINE_AA)
+        cv2.circle(bg, (cx, cy), radius, hex_to_bgr(self._theme.scope_grid), 1, cv2.LINE_AA)
+        cv2.line(
+            bg,
+            (cx - radius, cy),
+            (cx + radius, cy),
+            hex_to_bgr(self._theme.scope_grid),
+            1,
+            cv2.LINE_AA,
+        )
+        cv2.line(
+            bg,
+            (cx, cy - radius),
+            (cx, cy + radius),
+            hex_to_bgr(self._theme.scope_grid),
+            1,
+            cv2.LINE_AA,
+        )
         for _label, angle, _color in self._reference_vectors():
             px, py = self._angle_point(size, angle, 1.0)
-            cv2.line(bg, (cx, cy), (px, py), (35, 42, 51), 1, cv2.LINE_AA)
-        cv2.circle(bg, (cx, cy), 1, (120, 130, 142), -1, cv2.LINE_AA)
+            cv2.line(bg, (cx, cy), (px, py), hex_to_bgr(self._theme.scope_spoke), 1, cv2.LINE_AA)
+        cv2.circle(bg, (cx, cy), 1, hex_to_bgr(self._theme.scope_center), -1, cv2.LINE_AA)
         self._bg_cache[int(size)] = bg
         return bg
 
@@ -179,8 +199,8 @@ class VectorScopeView(BaseImageLabelView):
         size = view.shape[0]
         cx, cy, radius, _ = self._scope_geometry(size)
         rr = max(2, int(round(radius * (self._warn_threshold / 100.0))))
-        cv2.circle(view, (cx, cy), rr, (28, 36, 50), 2, cv2.LINE_AA)
-        cv2.circle(view, (cx, cy), rr, (124, 142, 166), 1, cv2.LINE_AA)
+        cv2.circle(view, (cx, cy), rr, hex_to_bgr(self._theme.scope_warn_outer), 2, cv2.LINE_AA)
+        cv2.circle(view, (cx, cy), rr, hex_to_bgr(self._theme.scope_warn_inner), 1, cv2.LINE_AA)
 
     def _draw_color_direction_legend(self, view: np.ndarray):
         """色方向ラベルと方位マーカーを描画する。"""
@@ -208,8 +228,8 @@ class VectorScopeView(BaseImageLabelView):
         p1 = (cx, cy)
         angle = self._display_angle_from_raw(_VECTORSCOPE_SKIN_LINE_ANGLE_DEG)
         p2 = self._angle_point(size, angle, 1.0)
-        cv2.line(view, p1, p2, (30, 38, 52), 2, cv2.LINE_AA)
-        cv2.line(view, p1, p2, (132, 166, 202), 1, cv2.LINE_AA)
+        cv2.line(view, p1, p2, hex_to_bgr(self._theme.scope_skin_line_outer), 2, cv2.LINE_AA)
+        cv2.line(view, p1, p2, hex_to_bgr(self._theme.scope_skin_line_inner), 1, cv2.LINE_AA)
 
     def update_scope(self, bgr: np.ndarray):
         """入力フレームをベクトルスコープ表示へ変換して描画する。"""

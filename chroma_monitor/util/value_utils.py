@@ -1,6 +1,7 @@
 """値の正規化や安全な変換を行う共通関数。"""
 
-from typing import Any, Sequence, TypeVar
+from collections.abc import Sequence
+from typing import Any, TypeVar
 
 T = TypeVar("T")
 
