@@ -50,6 +50,24 @@ def cancel_image_analysis(main_window):
         safe_call(main_window._image_worker.request_cancel)
 
 
+def _base_window_title(main_window) -> str:
+    """初期化時に決めたアプリの基本タイトルを返す。"""
+    return str(getattr(main_window, "_base_window_title", "") or "ChromaMonitor")
+
+
+def set_loaded_file_title(main_window, file_name: str | None) -> None:
+    """読み込んだファイル名をウィンドウタイトルへ反映する。"""
+    name = str(file_name or "").strip()
+    main_window._loaded_file_title_name = name
+    base_title = _base_window_title(main_window)
+    main_window.setWindowTitle(f"{base_title} - {name}" if name else base_title)
+
+
+def clear_loaded_file_title(main_window) -> None:
+    """ファイル名付きタイトルを基本タイトルへ戻す。"""
+    set_loaded_file_title(main_window, None)
+
+
 def on_load_image(main_window):
     """画像ファイル解析を開始する。"""
     if is_image_analysis_running(main_window):
@@ -67,6 +85,7 @@ def on_load_image(main_window):
 
     main_window.worker.stop()
     set_run_toggle_state(main_window, False)
+    set_loaded_file_title(main_window, Path(file_path).name)
 
     worker = ImageFileAnalyzeWorker(
         path=file_path,
@@ -136,6 +155,7 @@ def on_start(main_window):
         on_status(main_window, "画像解析中です。キャンセル完了後にStartしてください。")
         return
     sync_worker_view_flags(main_window)
+    clear_loaded_file_title(main_window)
     main_window.worker.start()
     set_run_toggle_state(main_window, True)
 

@@ -112,6 +112,8 @@ class MainWindow(QMainWindow):
         if is_window_layout_debug_enabled():
             title = f"{title} [DEBUG]"
         self.setWindowTitle(title)
+        self._base_window_title = title
+        self._loaded_file_title_name = ""
         self.resize(1120, 700)
         self._did_initial_screen_fit = False
         self._layout_autosave_enabled = False
