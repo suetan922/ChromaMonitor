@@ -117,6 +117,30 @@ def _build_button_styles(theme: UiTheme) -> str:
             color:{theme.text_disabled};
             border:1px solid {theme.border};
         }}
+        QToolButton#fileLoadSplitButton {{
+            font-weight:600;
+            border-radius:8px;
+            min-width:0px;
+            padding:4px 22px 4px 10px;
+        }}
+        QToolButton#fileLoadSplitButton::menu-button {{
+            width:15px;
+            subcontrol-origin: padding;
+            subcontrol-position: top right;
+            border-left:1px solid {theme.border};
+            border-top-right-radius:7px;
+            border-bottom-right-radius:7px;
+            padding:0;
+        }}
+        QToolButton#fileLoadSplitButton::menu-button:hover {{
+            border-left:1px solid {theme.border_strong};
+        }}
+        QToolButton#fileLoadSplitButton::menu-indicator {{
+            subcontrol-origin: padding;
+            subcontrol-position: center;
+            width:8px;
+            height:8px;
+        }}
         QPushButton#runStartBtn, QPushButton#runStopBtn {{
             font-weight:600;
             padding:6px 12px;

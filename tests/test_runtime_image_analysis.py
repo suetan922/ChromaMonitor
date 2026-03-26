@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import numpy as np
+
 from chroma_monitor.ui.main_window import runtime_image_analysis
 
 
@@ -130,6 +132,45 @@ class _FakeProgressDialog:
         self.shown = False
 
 
+class _FakeMimeData:
+    def hasUrls(self) -> bool:
+        return False
+
+    def urls(self) -> list[object]:
+        return []
+
+    def hasText(self) -> bool:
+        return False
+
+    def text(self) -> str:
+        return ""
+
+
+class _FakeClipboardImage:
+    def isNull(self) -> bool:
+        return False
+
+
+class _FakeClipboard:
+    def __init__(self, *, image=None, mime_data=None) -> None:
+        self._image = image
+        self._mime_data = mime_data or _FakeMimeData()
+
+    def image(self):
+        return self._image
+
+    def mimeData(self):
+        return self._mime_data
+
+
+class _FakeApplication:
+    def __init__(self, clipboard) -> None:
+        self._clipboard = clipboard
+
+    def clipboard(self):
+        return self._clipboard
+
+
 class _FakeMainWindow:
     def __init__(self) -> None:
         self._base_window_title = "ChromaMonitor"
@@ -174,6 +215,11 @@ def test_on_load_image_sets_window_title_to_loaded_file_name(monkeypatch) -> Non
         "getOpenFileName",
         lambda *_args, **_kwargs: ("/tmp/my_picture.png", "Images"),
     )
+    monkeypatch.setattr(
+        runtime_image_analysis,
+        "normalize_existing_image_path",
+        lambda path: str(path),
+    )
     monkeypatch.setattr(runtime_image_analysis, "ImageFileAnalyzeWorker", _FakeImageWorker)
     monkeypatch.setattr(runtime_image_analysis, "QThread", _FakeThread)
     monkeypatch.setattr(runtime_image_analysis, "QProgressDialog", _FakeProgressDialog)
@@ -205,3 +251,36 @@ def test_on_start_clears_loaded_file_title(monkeypatch) -> None:
     assert main_window.worker.start_calls == 1
     assert main_window.btn_start_bar.checked is True
     assert main_window.btn_stop_bar.checked is False
+
+
+def test_on_load_image_from_clipboard_sets_clipboard_title(monkeypatch) -> None:
+    main_window = _FakeMainWindow()
+    fake_clipboard = _FakeClipboard(image=_FakeClipboardImage())
+    monkeypatch.setattr(
+        runtime_image_analysis.QApplication,
+        "instance",
+        lambda: _FakeApplication(fake_clipboard),
+    )
+    monkeypatch.setattr(
+        runtime_image_analysis,
+        "qimage_to_bgr",
+        lambda _img: np.zeros((1, 1, 3), dtype=np.uint8),
+    )
+    monkeypatch.setattr(runtime_image_analysis, "ImageFileAnalyzeWorker", _FakeImageWorker)
+    monkeypatch.setattr(runtime_image_analysis, "QThread", _FakeThread)
+    monkeypatch.setattr(runtime_image_analysis, "QProgressDialog", _FakeProgressDialog)
+    monkeypatch.setattr(
+        runtime_image_analysis,
+        "selected_effective_color_band_sat_threshold",
+        lambda _mw: 0.25,
+    )
+
+    runtime_image_analysis.on_load_image_from_clipboard(main_window)
+
+    assert main_window._loaded_file_title_name == "Clipboard Image"
+    assert main_window.window_title == "ChromaMonitor - Clipboard Image"
+    assert main_window.worker.stop_calls == 1
+    assert main_window._image_thread is not None
+    assert main_window._image_worker is not None
+    assert main_window._image_worker.kwargs["path"] is None
+    assert main_window._image_worker.kwargs["source_bgr"].shape == (1, 1, 3)

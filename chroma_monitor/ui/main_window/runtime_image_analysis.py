@@ -1,11 +1,30 @@
 """画像解析の起動/停止とアプリ終了時の後始末。"""
 
+from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Sequence
+
+import numpy as np
 
 from PySide6.QtCore import Qt, QThread
-from PySide6.QtWidgets import QFileDialog, QMainWindow, QMessageBox, QProgressDialog
+from PySide6.QtWidgets import (
+    QApplication,
+    QFileDialog,
+    QMainWindow,
+    QMessageBox,
+    QProgressDialog,
+)
 
 from ...analysis.image_file_worker import ImageFileAnalyzeWorker
+from ...util import constants as C
+from ...util.image_inputs import (
+    is_supported_image_path as _is_supported_image_path,
+    normalize_existing_image_path,
+    qimage_to_bgr,
+    supported_image_paths_from_text,
+    supported_image_paths_from_urls,
+)
+from ...views.image_drop_target import install_dock_area_image_drop_target
 from .runtime_common import (
     on_status,
     restore_visible_docks_from_snapshot,
@@ -16,6 +35,15 @@ from .runtime_common import (
 )
 from .runtime_layout_pause import sync_worker_view_flags
 from .settings_logic import selected_effective_color_band_sat_threshold
+
+
+@dataclass(frozen=True, slots=True)
+class ImageAnalysisRequest:
+    """画像解析開始に必要な入力情報。"""
+
+    display_name: str
+    path: str | None = None
+    source_bgr: np.ndarray | None = None
 
 
 def is_image_analysis_running(main_window) -> bool:
@@ -68,31 +96,147 @@ def clear_loaded_file_title(main_window) -> None:
     set_loaded_file_title(main_window, None)
 
 
-def on_load_image(main_window):
-    """画像ファイル解析を開始する。"""
+def _show_input_message(
+    main_window,
+    title: str,
+    message: str,
+    *,
+    warning: bool,
+) -> None:
+    """入力関連メッセージを status とダイアログへ反映する。"""
+    on_status(main_window, message)
+    if warning:
+        QMessageBox.warning(main_window, title, message)
+        return
+    QMessageBox.information(main_window, title, message)
+
+
+def is_supported_image_path(main_window, path: str) -> bool:
+    """対応画像パスか判定する。"""
+    return bool(_is_supported_image_path(path))
+
+
+def can_accept_image_drop_target(main_window, *_args, **_kwargs) -> bool:
+    """dock 領域全体で新規ドロップを受け付けられるか返す。"""
+    return not is_image_analysis_running(main_window)
+
+
+def setup_image_input_drop_targets(main_window) -> None:
+    """dock 領域全体へ 1 枚 overlay の drag & drop 受付を追加する。"""
+    controller = install_dock_area_image_drop_target(
+        main_window,
+        dock_widgets=tuple(getattr(main_window, "_dock_map", {}).values()),
+        path_filter=main_window.is_supported_image_path,
+        can_drop_callback=lambda self=main_window: self.can_accept_image_drop_target(),
+        drop_handler=main_window.on_image_files_dropped,
+    )
+    main_window._image_drop_target_controller = controller
+    main_window._image_drop_target_controllers = [controller]
+
+
+def _image_request_from_path(
+    main_window,
+    path: str,
+    *,
+    error_title: str,
+    warning: bool,
+) -> ImageAnalysisRequest | None:
+    """ファイルパスから解析リクエストを組み立てる。"""
+    normalized = normalize_existing_image_path(path)
+    if normalized is None:
+        _show_input_message(
+            main_window,
+            error_title,
+            "対応している画像ファイルを選択してください。",
+            warning=warning,
+        )
+        return None
+    return ImageAnalysisRequest(
+        display_name=Path(normalized).name,
+        path=normalized,
+    )
+
+
+def _clipboard_image_request(main_window) -> ImageAnalysisRequest | None:
+    """クリップボードから画像解析リクエストを作る。"""
+    app = QApplication.instance()
+    if app is None:
+        _show_input_message(
+            main_window,
+            "クリップボード読込",
+            "クリップボードを利用できません。",
+            warning=True,
+        )
+        return None
+
+    clipboard = app.clipboard()
+    if clipboard is None:
+        _show_input_message(
+            main_window,
+            "クリップボード読込",
+            "クリップボードを利用できません。",
+            warning=True,
+        )
+        return None
+
+    image = clipboard.image()
+    if image is not None and not image.isNull():
+        bgr = qimage_to_bgr(image)
+        if bgr is None or bgr.size == 0:
+            _show_input_message(
+                main_window,
+                "クリップボード読込",
+                "クリップボード画像の変換に失敗しました。",
+                warning=True,
+            )
+            return None
+        return ImageAnalysisRequest(
+            display_name=C.CLIPBOARD_IMAGE_TITLE,
+            source_bgr=bgr,
+        )
+
+    mime_data = clipboard.mimeData()
+    if mime_data is not None:
+        paths = supported_image_paths_from_urls(mime_data.urls()) if mime_data.hasUrls() else []
+        if not paths and mime_data.hasText():
+            paths = supported_image_paths_from_text(mime_data.text())
+        if paths:
+            return ImageAnalysisRequest(
+                display_name=Path(paths[0]).name,
+                path=paths[0],
+            )
+
+    _show_input_message(
+        main_window,
+        "クリップボード読込",
+        "クリップボードに読み込める画像データまたは画像ファイルのパスがありません。",
+        warning=False,
+    )
+    return None
+
+
+def _start_image_analysis_request(
+    main_window,
+    request: ImageAnalysisRequest | None,
+) -> None:
+    """共通の画像解析開始処理。"""
+    if request is None:
+        return
     if is_image_analysis_running(main_window):
         on_status(main_window, "画像解析を実行中です。キャンセルしてから再実行してください。")
         return
 
-    file_path, _ = QFileDialog.getOpenFileName(
-        main_window,
-        "画像を読み込む",
-        "",
-        "Images (*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff);;All Files (*)",
-    )
-    if not file_path:
-        return
-
     main_window.worker.stop()
     set_run_toggle_state(main_window, False)
-    set_loaded_file_title(main_window, Path(file_path).name)
+    set_loaded_file_title(main_window, request.display_name)
 
     worker = ImageFileAnalyzeWorker(
-        path=file_path,
+        path=request.path,
         sample_points=int(main_window.spin_points.value()),
         wheel_sat_threshold=main_window._selected_wheel_sat_threshold(),
         color_band_sat_threshold=selected_effective_color_band_sat_threshold(main_window),
         max_dim=int(getattr(main_window.worker.cfg, "max_dim", 0)),
+        source_bgr=request.source_bgr,
     )
     thread = QThread(main_window)
     worker.moveToThread(thread)
@@ -115,9 +259,55 @@ def on_load_image(main_window):
     main_window._image_progress = dlg
     set_image_analysis_busy(main_window, True)
 
-    on_status(main_window, f"画像解析を開始: {Path(file_path).name}")
+    on_status(main_window, f"画像解析を開始: {request.display_name}")
     thread.start()
     dlg.show()
+
+
+def on_load_image(main_window):
+    """ファイルダイアログから画像ファイル解析を開始する。"""
+    if is_image_analysis_running(main_window):
+        on_status(main_window, "画像解析を実行中です。キャンセルしてから再実行してください。")
+        return
+
+    file_path, _ = QFileDialog.getOpenFileName(
+        main_window,
+        "画像を読み込む",
+        "",
+        C.IMAGE_INPUT_FILE_DIALOG_FILTER,
+    )
+    if not file_path:
+        return
+    _start_image_analysis_request(
+        main_window,
+        _image_request_from_path(
+            main_window,
+            file_path,
+            error_title="ファイル読込",
+            warning=True,
+        ),
+    )
+
+
+def on_load_image_from_clipboard(main_window):
+    """クリップボードから画像ファイル解析を開始する。"""
+    _start_image_analysis_request(main_window, _clipboard_image_request(main_window))
+
+
+def on_image_files_dropped(main_window, paths: Sequence[str]) -> None:
+    """dock 領域 overlay へドロップされた画像ファイルを読み込む。"""
+    first_path = next((str(path) for path in paths if str(path).strip()), "")
+    if not first_path:
+        return
+    _start_image_analysis_request(
+        main_window,
+        _image_request_from_path(
+            main_window,
+            first_path,
+            error_title="ドラッグ＆ドロップ",
+            warning=False,
+        ),
+    )
 
 
 def on_image_analysis_progress(main_window, percent: int, text: str):

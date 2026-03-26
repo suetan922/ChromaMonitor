@@ -1,9 +1,9 @@
 """MainWindow のメニュー、ツールバー、ドック初期化。"""
 
-from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QMenuBar, QPushButton
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import QMenu, QMenuBar, QPushButton
 
-from ...ui.input_widgets import add_checkable_action
+from ...ui.input_widgets import SplitMenuToolButton, add_checkable_action
 from ...ui.view_docks import setup_view_docks
 from ...util import constants as C
 from ...views.preview import PreviewWindow
@@ -24,6 +24,24 @@ WINDOW_DOCK_MENU_ITEMS = (
     ("act_squint", "スクイント表示", True, "dock_squint"),
     ("act_saliency", "サリエンシーマップ", True, "dock_saliency"),
 )
+
+
+def _sync_toolbar_button_geometry(main_window) -> None:
+    """split button の実サイズを Start / Stop 基準へ揃える。"""
+    start_button = getattr(main_window, "btn_start_bar", None)
+    load_button = getattr(main_window, "btn_load_image_bar", None)
+    if start_button is None or load_button is None:
+        return
+    start_button.ensurePolished()
+    load_button.ensurePolished()
+    target_height = int(start_button.sizeHint().height())
+    if target_height <= 0:
+        return
+    load_button.setFixedHeight(target_height)
+    target_width = int(load_button.minimumSizeHint().width())
+    if target_width > 0:
+        load_button.setMinimumWidth(target_width)
+    load_button.updateGeometry()
 
 
 def build_menu_bar(main_window, *, window_dock_menu_items=WINDOW_DOCK_MENU_ITEMS) -> None:
@@ -96,7 +114,7 @@ def ensure_menu_popup_width(main_window, menu) -> None:
 
 
 def build_toolbar(main_window) -> None:
-    """Start/Stop/画像読み込みのツールバーを構築する。"""
+    """Start/Stop/画像入力のツールバーを構築する。"""
     toolbar = main_window.addToolBar("コントロール")
     toolbar.setObjectName("controlToolbar")
     toolbar.setMovable(False)
@@ -108,12 +126,23 @@ def build_toolbar(main_window) -> None:
     main_window.btn_stop_bar.setCheckable(True)
     main_window.btn_start_bar.clicked.connect(main_window.on_start)
     main_window.btn_stop_bar.clicked.connect(main_window.on_stop)
-    main_window.btn_load_image_bar = QPushButton("画像読み込み")
+    main_window.btn_load_image_bar = SplitMenuToolButton()
+    main_window.btn_load_image_bar.setObjectName("fileLoadSplitButton")
+    main_window.btn_load_image_bar.setText("ファイル読込")
+    main_window.btn_load_image_bar.setToolButtonStyle(Qt.ToolButtonTextOnly)
+    main_window.btn_load_image_bar.setPopupMode(SplitMenuToolButton.MenuButtonPopup)
     main_window.btn_load_image_bar.clicked.connect(main_window.on_load_image)
+    load_menu = QMenu(main_window.btn_load_image_bar)
+    main_window.act_load_image_from_clipboard = load_menu.addAction("クリップボードから読み込み")
+    main_window.act_load_image_from_clipboard.triggered.connect(
+        main_window.on_load_image_from_clipboard
+    )
+    main_window.btn_load_image_bar.setMenu(load_menu)
     toolbar.addWidget(main_window.btn_start_bar)
     toolbar.addWidget(main_window.btn_stop_bar)
     toolbar.addWidget(main_window.btn_load_image_bar)
     main_window.btn_stop_bar.setChecked(True)
+    QTimer.singleShot(0, lambda mw=main_window: _sync_toolbar_button_geometry(mw))
 
 
 def setup_preview_and_docks(main_window) -> None:
@@ -121,6 +150,7 @@ def setup_preview_and_docks(main_window) -> None:
     main_window.preview_window = PreviewWindow()
     main_window.preview_window.closed.connect(main_window.on_preview_closed)
     setup_view_docks(main_window)
+    main_window._setup_image_input_drop_targets()
     if hasattr(main_window, "tabifiedDockWidgetActivated"):
         main_window.tabifiedDockWidgetActivated.connect(main_window._on_tabified_dock_activated)
     main_window.top_colors_bar.installEventFilter(main_window)

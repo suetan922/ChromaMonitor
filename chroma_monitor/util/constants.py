@@ -32,6 +32,24 @@ CAPTURE_SOURCE_SCREEN = "screen"
 CAPTURE_SOURCES = (CAPTURE_SOURCE_WINDOW, CAPTURE_SOURCE_SCREEN)
 """キャプチャ元の許可値一覧。"""
 
+# Image input sources
+IMAGE_INPUT_SUFFIXES = (
+    ".png",
+    ".jpg",
+    ".jpeg",
+    ".bmp",
+    ".webp",
+    ".tif",
+    ".tiff",
+)
+"""画像入力で受け付ける拡張子一覧。"""
+IMAGE_INPUT_FILE_DIALOG_FILTER = (
+    "Images (*.png *.jpg *.jpeg *.bmp *.webp *.tif *.tiff);;All Files (*)"
+)
+"""画像入力ダイアログで使うフィルタ。"""
+CLIPBOARD_IMAGE_TITLE = "Clipboard Image"
+"""ファイル名を持たないクリップボード画像用の仮タイトル。"""
+
 # Scatter plot shapes
 SCATTER_SHAPE_SQUARE = "square"
 """散布図形状: 四角座標。"""

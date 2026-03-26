@@ -2,13 +2,12 @@
 
 import threading
 import time
-from typing import Optional
 
-import cv2
 import numpy as np
 from PySide6.QtCore import QObject, Signal
 
 from .frame_analysis import analyze_bgr_frame
+from ..util.image_inputs import load_image_path_to_bgr
 
 
 class ImageFileAnalyzeWorker(QObject):
@@ -21,19 +20,21 @@ class ImageFileAnalyzeWorker(QObject):
 
     def __init__(
         self,
-        path: str,
+        path: str | None,
         sample_points: int,
         wheel_sat_threshold: int,
         color_band_sat_threshold: int,
         max_dim: int,
+        source_bgr: np.ndarray | None = None,
     ):
         """解析対象画像と解析パラメータを保持してワーカーを初期化する。"""
         super().__init__()
-        self.path = str(path)
+        self.path = "" if path is None else str(path)
         self.sample_points = int(sample_points)
         self.wheel_sat_threshold = int(wheel_sat_threshold)
         self.color_band_sat_threshold = int(color_band_sat_threshold)
         self.max_dim = int(max_dim)
+        self.source_bgr = None if source_bgr is None else np.ascontiguousarray(source_bgr)
         self._cancel = threading.Event()
 
     def request_cancel(self):
@@ -66,14 +67,16 @@ class ImageFileAnalyzeWorker(QObject):
         if self._is_canceled_and_emit():
             return None
 
-        # OpenCVの日本語パス対応のため、imdecode経路で読み込む。
-        buf = np.fromfile(self.path, dtype=np.uint8)
-        if buf.size == 0:
-            self.failed.emit("画像ファイルを読み込めませんでした。")
-            return None
-        bgr = self._decode_to_bgr_preserve_depth(buf)
+        if self.source_bgr is not None:
+            bgr = np.ascontiguousarray(self.source_bgr)
+            if bgr.size == 0:
+                self.failed.emit("画像データの取得に失敗しました。")
+                return None
+            return bgr
+
+        bgr = load_image_path_to_bgr(self.path)
         if bgr is None or bgr.size == 0:
-            self.failed.emit("画像データのデコードに失敗しました。")
+            self.failed.emit("画像ファイルを読み込めませんでした。")
             return None
         return bgr
 
@@ -103,25 +106,6 @@ class ImageFileAnalyzeWorker(QObject):
             return None
         res["dt_ms"] = (time.perf_counter() - t0) * 1000.0
         return res
-
-    @staticmethod
-    def _decode_to_bgr_preserve_depth(buf: np.ndarray) -> Optional[np.ndarray]:
-        """デコード結果をBGR 3chへ正規化して返す。"""
-        img = cv2.imdecode(buf, cv2.IMREAD_UNCHANGED)
-        if img is None or img.size == 0:
-            return None
-        if img.ndim == 2:
-            return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        if img.ndim != 3:
-            return None
-        channels = int(img.shape[2])
-        if channels == 3:
-            return img
-        if channels == 4:
-            return cv2.cvtColor(img, cv2.COLOR_BGRA2BGR)
-        if channels == 1:
-            return cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
-        return None
 
     def run(self):
         """画像読み込みから解析実行までの単発ジョブを処理する。"""

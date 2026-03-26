@@ -3,8 +3,16 @@
 import inspect
 import time
 
-from PySide6.QtCore import QEvent, Qt, QTimer
-from PySide6.QtWidgets import QAbstractSpinBox, QComboBox, QLineEdit, QSpinBox
+from PySide6.QtCore import QEvent, QPoint, QSize, Qt, QTimer
+from PySide6.QtWidgets import (
+    QAbstractSpinBox,
+    QComboBox,
+    QLineEdit,
+    QSpinBox,
+    QStyle,
+    QStyleOptionToolButton,
+    QToolButton,
+)
 
 
 class SelectAllLineEdit(QLineEdit):
@@ -157,6 +165,80 @@ class RefreshOnInteractComboBox(QComboBox):
         if obj is self.lineEdit() and event.type() == QEvent.FocusIn:
             self._maybe_refresh_items(force=False)
         return super().eventFilter(obj, event)
+
+
+class SplitMenuToolButton(QToolButton):
+    """主アクションと小さなメニュー領域を分けた split button。"""
+
+    _MENU_BUTTON_WIDTH = 15
+    _TEXT_LEFT_PADDING = 10
+    _TEXT_MENU_GAP = 8
+
+    def _uses_split_menu(self) -> bool:
+        """右端に独立した menu 領域を持つ状態か返す。"""
+        return (
+            self.menu() is not None and self.popupMode() == QToolButton.MenuButtonPopup
+        )
+
+    def _split_width_hint(self) -> int:
+        """テキスト領域と menu 領域を分けた最小幅を返す。"""
+        text_width = int(self.fontMetrics().horizontalAdvance(self.text() or ""))
+        if text_width <= 0:
+            return 0
+        extra_width = self._TEXT_LEFT_PADDING + self._TEXT_MENU_GAP
+        if self._uses_split_menu():
+            extra_width += self._MENU_BUTTON_WIDTH
+        return text_width + extra_width
+
+    def _expanded_size_hint(self, base_size: QSize) -> QSize:
+        """split button 用の右側予約幅を加味した size hint を返す。"""
+        width = max(int(base_size.width()), self._split_width_hint())
+        return QSize(width, int(base_size.height()))
+
+    def sizeHint(self) -> QSize:
+        """テキストと ▼ が重ならない幅を確保した size hint を返す。"""
+        return self._expanded_size_hint(super().sizeHint())
+
+    def minimumSizeHint(self) -> QSize:
+        """split button の最小幅にも menu 領域予約を反映する。"""
+        return self._expanded_size_hint(super().minimumSizeHint())
+
+    def _menu_button_rect(self):
+        """現在 style が計算したメニュー領域を返す。"""
+        option = QStyleOptionToolButton()
+        self.initStyleOption(option)
+        return self.style().subControlRect(
+            QStyle.CC_ToolButton,
+            option,
+            QStyle.SC_ToolButtonMenu,
+            self,
+        )
+
+    def _menu_popup_pos(self) -> QPoint:
+        """ボタン直下へメニューを開く座標を返す。"""
+        return self.mapToGlobal(QPoint(0, int(self.height())))
+
+    def showMenu(self) -> None:
+        """Qt 既定位置ではなく ▼ 領域直下へメニューを出す。"""
+        menu = self.menu()
+        if menu is None:
+            return
+        menu.popup(self._menu_popup_pos())
+
+    def mousePressEvent(self, event):
+        """▼ 領域クリック時だけ独自位置で menu を開く。"""
+        menu = self.menu()
+        if (
+            menu is not None
+            and event.button() == Qt.LeftButton
+            and self.popupMode() == QToolButton.MenuButtonPopup
+        ):
+            pos = event.position().toPoint() if hasattr(event, "position") else event.pos()
+            if self._menu_button_rect().contains(pos):
+                self.showMenu()
+                event.accept()
+                return
+        super().mousePressEvent(event)
 
 
 def configure_numeric_input(

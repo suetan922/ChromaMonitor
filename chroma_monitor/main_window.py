@@ -287,7 +287,12 @@ class MainWindow(QMainWindow):
     _restore_dock_from_snapshot = _MW.snapshot.restore_dock_from_snapshot
     on_status = _MW.runtime.on_status
     _cancel_image_analysis = _MW.runtime.cancel_image_analysis
+    can_accept_image_drop_target = _MW.runtime.can_accept_image_drop_target
+    is_supported_image_path = _MW.runtime.is_supported_image_path
+    _setup_image_input_drop_targets = _MW.runtime.setup_image_input_drop_targets
+    on_image_files_dropped = _MW.runtime.on_image_files_dropped
     on_load_image = _MW.runtime.on_load_image
+    on_load_image_from_clipboard = _MW.runtime.on_load_image_from_clipboard
     on_image_analysis_progress = _MW.runtime.on_image_analysis_progress
     on_image_analysis_finished = _MW.runtime.on_image_analysis_finished
     on_image_analysis_failed = _MW.runtime.on_image_analysis_failed
