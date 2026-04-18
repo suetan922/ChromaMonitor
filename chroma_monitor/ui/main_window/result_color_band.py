@@ -34,6 +34,7 @@ from .settings_values import (
 _TOP_BAR_MIN_HEIGHT = 12
 _TOP_BAR_TEXT_MIN_WIDTH = 240
 _TOP_BAR_TEXT_MIN_SEGMENT_PX = 42
+_TOP_BAR_LIGHT_TEXT_RGB_SUM_THRESHOLD = 400
 # 配色比率の表示優先度:
 # 1) カラーバー 2) 暖色寒色 3) 一覧 4) 詳細
 # 高さ不足時は下位から順に隠す。
@@ -115,6 +116,15 @@ class ColorBandVisibilityWidgets:
     methods_preview: object
 
 
+@dataclass(frozen=True, slots=True)
+class ColorBandSelectionInfo:
+    """配色詳細計算に使う選択行情報。"""
+
+    entry: dict
+    render_key: tuple
+    achromatic: bool
+
+
 def _default_color_band_detail_state() -> ColorBandDetailState:
     """未選択時の既定詳細状態を返す。"""
     return ColorBandDetailState(render_key=("initial",))
@@ -171,7 +181,9 @@ def render_top_color_bar(
                 if show_text and w >= _TOP_BAR_TEXT_MIN_SEGMENT_PX:
                     pct = f"{ratio*100:.1f}%"
                     painter.setPen(
-                        QColor(255, 255, 255) if sum(color) < 400 else QColor(40, 40, 40)
+                        QColor(255, 255, 255)
+                        if sum(color) < _TOP_BAR_LIGHT_TEXT_RGB_SUM_THRESHOLD
+                        else QColor(40, 40, 40)
                     )
                     painter.drawText(QRect(x + 2, 0, w - 4, pm.height()), Qt.AlignCenter, pct)
                 x += w
@@ -367,38 +379,68 @@ def _current_color_band_detail_state(main_window) -> ColorBandDetailState:
     return _default_color_band_detail_state()
 
 
-def compute_color_band_detail_state(
-    entries,
-    row: int,
+def _empty_color_band_detail_state(
+    entries_signature: tuple,
     *,
     harmony_enabled: bool,
     guide_type: str,
-    entries_signature: tuple,
 ) -> ColorBandDetailState:
-    """選択行と色彩調和設定から詳細表示状態を計算する。"""
-    if not entries or row < 0 or row >= len(entries):
-        return ColorBandDetailState(
-            render_key=("empty", entries_signature, bool(harmony_enabled), str(guide_type)),
-        )
+    """未選択時の詳細状態を返す。"""
+    return ColorBandDetailState(
+        render_key=("empty", entries_signature, bool(harmony_enabled), str(guide_type)),
+    )
 
-    entry = entries[int(row)]
-    is_achromatic = str(entry.get("label", "")) == "無彩色"
-    render_key = (
+
+def _is_achromatic_color_entry(entry) -> bool:
+    """無彩色行かどうかを返す。"""
+    return str(entry.get("label", "")) == "無彩色"
+
+
+def _color_band_detail_render_key(
+    *,
+    row: int,
+    harmony_enabled: bool,
+    guide_type: str,
+    entries_signature: tuple,
+    is_achromatic: bool,
+) -> tuple:
+    """詳細パネルの再描画判定キーを返す。"""
+    return (
         int(row),
         bool(harmony_enabled),
         str(guide_type),
         entries_signature,
         bool(is_achromatic),
     )
-    if is_achromatic:
-        return ColorBandDetailState(
-            render_key=render_key,
-            has_selection=True,
-            achromatic=True,
-            detail_text=_COLOR_DETAIL_HINT_ACHROMATIC,
-        )
 
+
+def _color_band_harmony_text(
+    *,
+    harmony_enabled: bool,
+    guide_type: str,
+    merge_complement: bool,
+) -> str:
+    """詳細ヘッダへ表示する色彩調和ラベルを返す。"""
     guide_name = C.WHEEL_HARMONY_GUIDE_LABELS.get(guide_type, "色彩調和")
+    if merge_complement:
+        return f"{_COLOR_DETAIL_LABEL_HARMONY}（{guide_name} / {_COLOR_DETAIL_LABEL_COMPLEMENT}）"
+    if harmony_enabled:
+        return f"{_COLOR_DETAIL_LABEL_HARMONY}（{guide_name}）"
+    return _COLOR_DETAIL_LABEL_HARMONY
+
+
+def _color_band_palette_state(
+    entry,
+    *,
+    harmony_enabled: bool,
+    guide_type: str,
+) -> tuple[
+    bool,
+    tuple[tuple[int, int, int], ...],
+    tuple[tuple[int, int, int], ...],
+    tuple[tuple[str, tuple[tuple[int, int, int], ...]], ...],
+]:
+    """選択色から詳細表示用 palette 群を構築する。"""
     merge_complement = bool(harmony_enabled and guide_type == C.WHEEL_HARMONY_GUIDE_COMPLEMENTARY)
     harmony_palette = (
         harmony_palette_from_base(entry["rgb"], guide_type)
@@ -409,31 +451,149 @@ def compute_color_band_detail_state(
         entry["rgb"], C.WHEEL_HARMONY_GUIDE_COMPLEMENTARY
     )
     method_palettes = method_palettes_from_base(entry["rgb"])
-    harmony_text = (
-        f"{_COLOR_DETAIL_LABEL_HARMONY}（{guide_name} / {_COLOR_DETAIL_LABEL_COMPLEMENT}）"
-        if merge_complement
-        else (
-            f"{_COLOR_DETAIL_LABEL_HARMONY}（{guide_name}）"
-            if harmony_enabled
-            else _COLOR_DETAIL_LABEL_HARMONY
-        )
-    )
-    return ColorBandDetailState(
-        render_key=render_key,
-        has_selection=True,
-        show_info=False,
-        merge_complement=merge_complement,
-        harmony_text=harmony_text,
-        harmony_colors=tuple(rgb for _h, rgb, _name in harmony_palette),
-        complement_colors=tuple(
-            ()
-            if merge_complement
-            else (rgb for _h, rgb, _name in complement_palette)
-        ),
-        method_palettes=tuple(
+    return (
+        merge_complement,
+        tuple(rgb for _h, rgb, _name in harmony_palette),
+        tuple(() if merge_complement else (rgb for _h, rgb, _name in complement_palette)),
+        tuple(
             (str(method_name), tuple(tuple(int(c) for c in rgb) for rgb in colors))
             for method_name, colors in method_palettes
         ),
+    )
+
+
+def _detail_preview_colors(colors: tuple[tuple[int, int, int], ...]) -> list[tuple[int, int, int]]:
+    """詳細 preview row 用にタプル列を list 化する。"""
+    return list(colors)
+
+
+def _detail_method_preview_items(
+    method_palettes: tuple[tuple[str, tuple[tuple[int, int, int], ...]], ...],
+) -> list[tuple[str, list[tuple[int, int, int]]]]:
+    """手法 preview 用に palette 構造を list ベースへ変換する。"""
+    return [(name, list(colors)) for name, colors in method_palettes]
+
+
+def _validate_color_band_detail_selection(
+    entries,
+    row: int,
+    *,
+    harmony_enabled: bool,
+    guide_type: str,
+    entries_signature: tuple,
+) -> ColorBandSelectionInfo | None:
+    """選択行を検証し、有効なら詳細計算用の情報を返す。"""
+    if not entries or row < 0 or row >= len(entries):
+        return None
+    entry = entries[int(row)]
+    achromatic = _is_achromatic_color_entry(entry)
+    return ColorBandSelectionInfo(
+        entry=entry,
+        render_key=_color_band_detail_render_key(
+            row=row,
+            harmony_enabled=harmony_enabled,
+            guide_type=guide_type,
+            entries_signature=entries_signature,
+            is_achromatic=achromatic,
+        ),
+        achromatic=achromatic,
+    )
+
+
+def _achromatic_color_band_detail_state(render_key: tuple) -> ColorBandDetailState:
+    """無彩色選択時の詳細状態を返す。"""
+    return ColorBandDetailState(
+        render_key=render_key,
+        has_selection=True,
+        achromatic=True,
+        detail_text=_COLOR_DETAIL_HINT_ACHROMATIC,
+    )
+
+
+def _color_band_detail_texts(
+    *,
+    harmony_enabled: bool,
+    guide_type: str,
+    merge_complement: bool,
+) -> tuple[str, str, str, str]:
+    """詳細表示に使う見出し文言を返す。"""
+    return (
+        "",
+        _color_band_harmony_text(
+            harmony_enabled=harmony_enabled,
+            guide_type=guide_type,
+            merge_complement=merge_complement,
+        ),
+        _COLOR_DETAIL_LABEL_COMPLEMENT,
+        _COLOR_DETAIL_LABEL_METHODS,
+    )
+
+
+def _chromatic_color_band_detail_state(
+    selection: ColorBandSelectionInfo,
+    *,
+    harmony_enabled: bool,
+    guide_type: str,
+) -> ColorBandDetailState:
+    """有彩色選択時の詳細状態を返す。"""
+    (
+        merge_complement,
+        harmony_colors,
+        complement_colors,
+        method_palettes,
+    ) = _color_band_palette_state(
+        selection.entry,
+        harmony_enabled=harmony_enabled,
+        guide_type=guide_type,
+    )
+    detail_text, harmony_text, complement_text, methods_text = _color_band_detail_texts(
+        harmony_enabled=harmony_enabled,
+        guide_type=guide_type,
+        merge_complement=merge_complement,
+    )
+    return ColorBandDetailState(
+        render_key=selection.render_key,
+        has_selection=True,
+        show_info=False,
+        merge_complement=merge_complement,
+        detail_text=detail_text,
+        harmony_text=harmony_text,
+        complement_text=complement_text,
+        methods_text=methods_text,
+        harmony_colors=harmony_colors,
+        complement_colors=complement_colors,
+        method_palettes=method_palettes,
+    )
+
+
+def compute_color_band_detail_state(
+    entries,
+    row: int,
+    *,
+    harmony_enabled: bool,
+    guide_type: str,
+    entries_signature: tuple,
+) -> ColorBandDetailState:
+    """選択行と色彩調和設定から詳細表示状態を計算する。"""
+    selection = _validate_color_band_detail_selection(
+        entries,
+        row,
+        harmony_enabled=harmony_enabled,
+        guide_type=guide_type,
+        entries_signature=entries_signature,
+    )
+    if selection is None:
+        return _empty_color_band_detail_state(
+            entries_signature,
+            harmony_enabled=harmony_enabled,
+            guide_type=guide_type,
+        )
+    if selection.achromatic:
+        return _achromatic_color_band_detail_state(selection.render_key)
+    return _chromatic_color_band_detail_state(
+        selection,
+        harmony_enabled=harmony_enabled,
+        guide_type=guide_type,
     )
 
 
@@ -447,11 +607,15 @@ def _apply_color_band_detail_state(
     """計算済みの配色詳細状態を Qt ウィジェットへ反映する。"""
     main_window._color_palette_render_key = state.render_key
     main_window._color_detail_state = state
-    set_preview_row(widgets.harmony_layout, list(state.harmony_colors), theme)
-    set_preview_row(widgets.complement_layout, list(state.complement_colors), theme)
+    set_preview_row(widgets.harmony_layout, _detail_preview_colors(state.harmony_colors), theme)
+    set_preview_row(
+        widgets.complement_layout,
+        _detail_preview_colors(state.complement_colors),
+        theme,
+    )
     set_methods_preview(
         widgets.methods_layout,
-        [(name, list(colors)) for name, colors in state.method_palettes],
+        _detail_method_preview_items(state.method_palettes),
         theme,
     )
     _set_color_detail_headers(

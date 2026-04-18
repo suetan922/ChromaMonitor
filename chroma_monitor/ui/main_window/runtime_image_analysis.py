@@ -33,6 +33,7 @@ from .runtime_common import (
     schedule_snapshot_restore,
     set_run_toggle_state,
 )
+from .runtime_capture import capture_preflight_result
 from .runtime_layout_pause import sync_worker_view_flags
 from .settings_logic import selected_effective_color_band_sat_threshold
 
@@ -49,6 +50,39 @@ class ImageAnalysisRequest:
 def is_image_analysis_running(main_window) -> bool:
     """画像ファイル解析スレッドの実行状態を返す。"""
     return main_window._image_thread is not None and main_window._image_thread.isRunning()
+
+
+def is_live_analysis_running(main_window) -> bool:
+    """ライブ解析ワーカーが実行状態なら True を返す。"""
+    worker = getattr(main_window, "worker", None)
+    is_running = getattr(worker, "is_running", None)
+    if callable(is_running):
+        try:
+            return bool(is_running())
+        except Exception:
+            pass
+    thread = getattr(worker, "_thread", None)
+    return bool(thread is not None and getattr(thread, "is_alive", lambda: False)())
+
+
+def _sync_live_run_toggle_state(main_window) -> None:
+    """Start/Stop ボタン表示を現在のライブ解析状態へ戻す。"""
+    set_run_toggle_state(main_window, is_live_analysis_running(main_window))
+
+
+def _abort_live_start(
+    main_window,
+    message: str,
+    *,
+    warning: bool,
+) -> None:
+    """Start 不可時の通知とトグル復元を共通化する。"""
+    on_status(main_window, message)
+    if bool(warning):
+        QMessageBox.warning(main_window, "画像解析", message)
+    # checkable QPushButton は click 時点で ON になるため、失敗時は明示的に戻す。
+    set_run_toggle_state(main_window, False)
+    main_window.btn_stop_bar.setChecked(False)
 
 
 def set_image_analysis_busy(main_window, busy: bool):
@@ -96,6 +130,47 @@ def clear_loaded_file_title(main_window) -> None:
     set_loaded_file_title(main_window, None)
 
 
+def _clear_pending_loaded_image_source(main_window) -> None:
+    """次回完了時に反映予定の読み込み画像情報を消す。"""
+    main_window._pending_loaded_image_source_path = ""
+    main_window._pending_loaded_image_source_name = ""
+    main_window._pending_loaded_image_source_bgr = None
+
+
+def _clear_loaded_image_source(main_window) -> None:
+    """現在有効な読み込み画像情報を消す。"""
+    main_window._loaded_image_source_path = ""
+    main_window._loaded_image_source_name = ""
+    main_window._loaded_image_source_bgr = None
+    _clear_pending_loaded_image_source(main_window)
+
+
+def _set_pending_loaded_image_source(main_window, request: ImageAnalysisRequest) -> None:
+    """画像解析完了後に有効化する読み込み画像情報を保持する。"""
+    _clear_pending_loaded_image_source(main_window)
+    main_window._pending_loaded_image_source_name = str(request.display_name or "").strip()
+    if request.path:
+        main_window._pending_loaded_image_source_path = str(request.path)
+        return
+    if request.source_bgr is not None and request.source_bgr.size > 0:
+        main_window._pending_loaded_image_source_bgr = np.ascontiguousarray(request.source_bgr)
+
+
+def _promote_pending_loaded_image_source(main_window) -> None:
+    """完了した読み込み画像情報を現在有効なものとして反映する。"""
+    main_window._loaded_image_source_path = str(
+        getattr(main_window, "_pending_loaded_image_source_path", "") or ""
+    )
+    main_window._loaded_image_source_name = str(
+        getattr(main_window, "_pending_loaded_image_source_name", "") or ""
+    )
+    pending_bgr = getattr(main_window, "_pending_loaded_image_source_bgr", None)
+    main_window._loaded_image_source_bgr = (
+        None if pending_bgr is None else np.ascontiguousarray(pending_bgr)
+    )
+    _clear_pending_loaded_image_source(main_window)
+
+
 def _show_input_message(
     main_window,
     title: str,
@@ -113,6 +188,7 @@ def _show_input_message(
 
 def is_supported_image_path(main_window, path: str) -> bool:
     """対応画像パスか判定する。"""
+    _ = main_window
     return bool(_is_supported_image_path(path))
 
 
@@ -226,6 +302,7 @@ def _start_image_analysis_request(
         on_status(main_window, "画像解析を実行中です。キャンセルしてから再実行してください。")
         return
 
+    _set_pending_loaded_image_source(main_window, request)
     main_window.worker.stop()
     set_run_toggle_state(main_window, False)
     set_loaded_file_title(main_window, request.display_name)
@@ -320,6 +397,7 @@ def on_image_analysis_progress(main_window, percent: int, text: str):
 def on_image_analysis_finished(main_window, res: dict):
     """画像解析完了時に結果反映と後処理を行う。"""
     cleanup_image_analysis(main_window)
+    _promote_pending_loaded_image_source(main_window)
     main_window.on_result(res)
     restore_visible_docks_from_snapshot(main_window)
     schedule_snapshot_restore(main_window, 0, 80)
@@ -329,6 +407,7 @@ def on_image_analysis_finished(main_window, res: dict):
 def on_image_analysis_failed(main_window, message: str):
     """画像解析失敗時の共通エラーハンドリング。"""
     cleanup_image_analysis(main_window)
+    _clear_pending_loaded_image_source(main_window)
     on_status(main_window, message)
     QMessageBox.warning(main_window, "画像解析", message)
 
@@ -336,18 +415,32 @@ def on_image_analysis_failed(main_window, message: str):
 def on_image_analysis_canceled(main_window):
     """画像解析キャンセル完了時の後処理。"""
     cleanup_image_analysis(main_window)
+    _clear_pending_loaded_image_source(main_window)
     on_status(main_window, "画像解析をキャンセルしました")
 
 
 def on_start(main_window):
     """ライブ解析を開始する。"""
     if is_image_analysis_running(main_window):
-        on_status(main_window, "画像解析中です。キャンセル完了後にStartしてください。")
+        _abort_live_start(
+            main_window,
+            "画像解析中です。キャンセル完了後にStartしてください。",
+            warning=False,
+        )
+        return
+    preflight = capture_preflight_result(main_window)
+    if not preflight.ready:
+        _abort_live_start(
+            main_window,
+            str(preflight.message or ""),
+            warning=True,
+        )
         return
     sync_worker_view_flags(main_window)
     clear_loaded_file_title(main_window)
+    _clear_loaded_image_source(main_window)
     main_window.worker.start()
-    set_run_toggle_state(main_window, True)
+    _sync_live_run_toggle_state(main_window)
 
 
 def on_stop(main_window):
@@ -355,9 +448,10 @@ def on_stop(main_window):
     if is_image_analysis_running(main_window):
         cancel_image_analysis(main_window)
         on_status(main_window, "画像解析のキャンセルを要求しました")
+        _sync_live_run_toggle_state(main_window)
         return
     main_window.worker.stop()
-    set_run_toggle_state(main_window, False)
+    _sync_live_run_toggle_state(main_window)
 
 
 def close_event(main_window, event):
@@ -370,5 +464,6 @@ def close_event(main_window, event):
     main_window.worker.stop()
     safe_close_widget(getattr(main_window, "preview_window", None), only_if_visible=True)
     safe_close_widget(getattr(main_window, "_settings_window", None))
+    safe_close_widget(getattr(main_window, "_canvas_preview_window", None))
     safe_call(main_window._close_roi_selectors)
     QMainWindow.closeEvent(main_window, event)

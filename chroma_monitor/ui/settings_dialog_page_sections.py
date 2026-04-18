@@ -240,6 +240,7 @@ def add_layout_settings_page(main_window, pages: QStackedWidget) -> None:
 
 def add_legacy_and_app_pages(main_window, pages: QStackedWidget) -> None:
     """互換用 legacy ページを追加する。"""
+    _ = main_window
     page_ternary_legacy, ternary_legacy_layout = create_settings_page()
     ternary_legacy_layout.addWidget(
         make_hint_label("3値化設定は「2値化/3値化」へ統合しました。")

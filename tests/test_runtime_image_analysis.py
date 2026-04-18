@@ -49,17 +49,39 @@ class _FakeSpin:
         return self._value
 
 
+class _FakeCombo:
+    def __init__(self, data) -> None:
+        self._data = data
+
+    def currentData(self):
+        return self._data
+
+
 class _FakeLiveWorker:
-    def __init__(self) -> None:
+    def __init__(self, *, capture=None) -> None:
         self.cfg = SimpleNamespace(max_dim=1024)
         self.stop_calls = 0
         self.start_calls = 0
+        self._running = False
+        self._capture = capture or SimpleNamespace(
+            target_hwnd=123,
+            roi_rel=None,
+            roi_abs=object(),
+        )
 
     def stop(self) -> None:
         self.stop_calls += 1
+        self._running = False
 
     def start(self) -> None:
         self.start_calls += 1
+        self._running = True
+
+    def capture_selection(self):
+        return self._capture
+
+    def is_running(self) -> bool:
+        return bool(self._running)
 
 
 class _FakeImageWorker:
@@ -184,6 +206,7 @@ class _FakeMainWindow:
         self.btn_load_image_bar = _FakeButton()
         self.btn_start_bar = _FakeButton()
         self.btn_stop_bar = _FakeButton()
+        self.combo_capture_source = _FakeCombo(runtime_image_analysis.C.CAPTURE_SOURCE_WINDOW)
         self.window_title = self._base_window_title
 
     def _selected_wheel_sat_threshold(self) -> float:
@@ -242,6 +265,8 @@ def test_on_start_clears_loaded_file_title(monkeypatch) -> None:
     main_window = _FakeMainWindow()
     main_window._loaded_file_title_name = "sample.psd"
     main_window.window_title = "ChromaMonitor - sample.psd"
+    main_window.btn_start_bar.checked = True
+    main_window.btn_stop_bar.checked = False
     monkeypatch.setattr(runtime_image_analysis, "sync_worker_view_flags", lambda _mw: None)
 
     runtime_image_analysis.on_start(main_window)
@@ -250,6 +275,122 @@ def test_on_start_clears_loaded_file_title(monkeypatch) -> None:
     assert main_window.window_title == "ChromaMonitor"
     assert main_window.worker.start_calls == 1
     assert main_window.btn_start_bar.checked is True
+    assert main_window.btn_stop_bar.checked is False
+
+
+def test_on_start_warns_when_window_capture_target_is_missing(monkeypatch) -> None:
+    warnings: list[tuple[str, str]] = []
+    cleared_titles: list[bool] = []
+    cleared_sources: list[bool] = []
+    main_window = _FakeMainWindow()
+    main_window.worker = _FakeLiveWorker(
+        capture=SimpleNamespace(target_hwnd=None, roi_rel=None, roi_abs=None)
+    )
+    main_window._loaded_file_title_name = "sample.psd"
+    main_window.window_title = "ChromaMonitor - sample.psd"
+    main_window.combo_capture_source = _FakeCombo(runtime_image_analysis.C.CAPTURE_SOURCE_WINDOW)
+    main_window.btn_start_bar.checked = True
+    main_window.btn_stop_bar.checked = False
+    monkeypatch.setattr(runtime_image_analysis, "sync_worker_view_flags", lambda _mw: None)
+    monkeypatch.setattr(
+        runtime_image_analysis,
+        "clear_loaded_file_title",
+        lambda _mw: cleared_titles.append(True),
+    )
+    monkeypatch.setattr(
+        runtime_image_analysis,
+        "_clear_loaded_image_source",
+        lambda _mw: cleared_sources.append(True),
+    )
+    monkeypatch.setattr(
+        runtime_image_analysis.QMessageBox,
+        "warning",
+        lambda _parent, title, message: warnings.append((str(title), str(message))),
+    )
+
+    runtime_image_analysis.on_start(main_window)
+
+    assert warnings == [("画像解析", "ターゲットウィンドウを選択してください")]
+    assert main_window.worker.start_calls == 0
+    assert cleared_titles == []
+    assert cleared_sources == []
+    assert main_window._loaded_file_title_name == "sample.psd"
+    assert main_window.window_title == "ChromaMonitor - sample.psd"
+    assert main_window.btn_start_bar.checked is False
+    assert main_window.btn_stop_bar.checked is False
+
+
+def test_on_start_warns_when_screen_capture_roi_is_missing(monkeypatch) -> None:
+    warnings: list[tuple[str, str]] = []
+    cleared_titles: list[bool] = []
+    cleared_sources: list[bool] = []
+    main_window = _FakeMainWindow()
+    main_window.worker = _FakeLiveWorker(
+        capture=SimpleNamespace(target_hwnd=None, roi_rel=None, roi_abs=None)
+    )
+    main_window._loaded_file_title_name = "sample.psd"
+    main_window.window_title = "ChromaMonitor - sample.psd"
+    main_window.combo_capture_source = _FakeCombo(runtime_image_analysis.C.CAPTURE_SOURCE_SCREEN)
+    main_window.btn_start_bar.checked = True
+    main_window.btn_stop_bar.checked = False
+    monkeypatch.setattr(runtime_image_analysis, "sync_worker_view_flags", lambda _mw: None)
+    monkeypatch.setattr(
+        runtime_image_analysis,
+        "clear_loaded_file_title",
+        lambda _mw: cleared_titles.append(True),
+    )
+    monkeypatch.setattr(
+        runtime_image_analysis,
+        "_clear_loaded_image_source",
+        lambda _mw: cleared_sources.append(True),
+    )
+    monkeypatch.setattr(
+        runtime_image_analysis.QMessageBox,
+        "warning",
+        lambda _parent, title, message: warnings.append((str(title), str(message))),
+    )
+
+    runtime_image_analysis.on_start(main_window)
+
+    assert warnings == [("画像解析", "キャプチャ領域を選択してください")]
+    assert main_window.worker.start_calls == 0
+    assert cleared_titles == []
+    assert cleared_sources == []
+    assert main_window._loaded_file_title_name == "sample.psd"
+    assert main_window.window_title == "ChromaMonitor - sample.psd"
+    assert main_window.btn_start_bar.checked is False
+    assert main_window.btn_stop_bar.checked is False
+
+
+def test_on_start_during_image_analysis_restores_run_toggle_state(monkeypatch) -> None:
+    cleared_titles: list[bool] = []
+    cleared_sources: list[bool] = []
+    main_window = _FakeMainWindow()
+    main_window._loaded_file_title_name = "sample.psd"
+    main_window.window_title = "ChromaMonitor - sample.psd"
+    main_window.btn_start_bar.checked = True
+    main_window.btn_stop_bar.checked = False
+    main_window._image_thread = SimpleNamespace(isRunning=lambda: True)
+    monkeypatch.setattr(runtime_image_analysis, "sync_worker_view_flags", lambda _mw: None)
+    monkeypatch.setattr(
+        runtime_image_analysis,
+        "clear_loaded_file_title",
+        lambda _mw: cleared_titles.append(True),
+    )
+    monkeypatch.setattr(
+        runtime_image_analysis,
+        "_clear_loaded_image_source",
+        lambda _mw: cleared_sources.append(True),
+    )
+
+    runtime_image_analysis.on_start(main_window)
+
+    assert main_window.worker.start_calls == 0
+    assert cleared_titles == []
+    assert cleared_sources == []
+    assert main_window._loaded_file_title_name == "sample.psd"
+    assert main_window.window_title == "ChromaMonitor - sample.psd"
+    assert main_window.btn_start_bar.checked is False
     assert main_window.btn_stop_bar.checked is False
 
 

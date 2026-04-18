@@ -1,6 +1,7 @@
 """解析処理の補助関数。"""
 
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Optional, TypeAlias
 
 import cv2
@@ -13,12 +14,57 @@ from ..util import constants as C
 from ..util.image_ops import resize_by_long_edge
 from ..util.value_utils import clamp_int
 
+_BGR_CHANNEL_COUNT = 3
+_OPENCV_HUE_MAX = 179
+_OPENCV_HUE_BINS = 180
+_UINT8_MAX_FLOAT = 255.0
+_UINT8_BINS = 256
+_HUE_FLOAT_TO_OPENCV_SCALE = 0.5
 _WARM_HUE_LOW_END = 45
 _WARM_HUE_HIGH_START = 150
 _COOL_HUE_START = 60
 _COOL_HUE_END = 135
+_ANALYZE_STEP_CONVERT_HSV = (15, "HSVへ変換中…")
+_ANALYZE_STEP_WHEEL_HIST = (30, "色相ヒストグラム集計中…")
+_ANALYZE_STEP_SCATTER = (45, "散布図サンプル生成中…")
+_ANALYZE_STEP_FINISH_STATS = (65, "統計を仕上げ中…")
+_ANALYZE_STEP_BUILD_RESULT = (85, "結果を反映中…")
 ProgressCb: TypeAlias = Optional[Callable[[int, str], None]]
 CancelCb: TypeAlias = Optional[Callable[[], bool]]
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedAnalysisFrame:
+    """解析用に前処理済みの BGR/HSV 各チャネル。"""
+
+    bgr_u8: np.ndarray
+    h: np.ndarray
+    s: np.ndarray
+    v: np.ndarray
+
+
+@dataclass(frozen=True, slots=True)
+class AnalysisResultData:
+    """UI 互換 payload 組み立て直前の集計結果。"""
+
+    bgr_u8: np.ndarray
+    hist: np.ndarray
+    sv: np.ndarray
+    rgb: np.ndarray
+    h_hist: np.ndarray
+    s_hist: np.ndarray
+    v_hist: np.ndarray
+    top_colors: list[TopColorBar] | None
+    warm_ratio: float
+    cool_ratio: float
+    other_ratio: float
+
+
+def _has_bgr_color_channels(arr: np.ndarray) -> bool:
+    """配色計算に必要な BGR 3ch 配列かどうかを返す。"""
+    return bool(
+        arr.size > 0 and arr.ndim == _BGR_CHANNEL_COUNT and arr.shape[2] >= _BGR_CHANNEL_COUNT
+    )
 
 
 def _normalize_bgr_to_float01(bgr: np.ndarray) -> np.ndarray:
@@ -40,8 +86,8 @@ def _normalize_bgr_to_float01(bgr: np.ndarray) -> np.ndarray:
         max_v = float(np.nanmax(out))
         # 0..1 以外のfloat入力は代表的なレンジを推定して正規化する。
         if min_v < 0.0 or max_v > 1.0:
-            if 0.0 <= min_v and max_v <= 255.0:
-                out = out / 255.0
+            if min_v >= 0.0 and max_v <= _UINT8_MAX_FLOAT:
+                out = out / _UINT8_MAX_FLOAT
             else:
                 out = out / max(1.0, max_v)
 
@@ -63,10 +109,16 @@ def prepare_hsv8_and_bgr8(
 
     bgr_f = _normalize_bgr_to_float01(arr)
     hsv_f = cv2.cvtColor(bgr_f, cv2.COLOR_BGR2HSV)
-    h = np.clip(np.round(hsv_f[:, :, 0] * 0.5), 0, 179).astype(np.uint8)
-    s = np.clip(np.round(hsv_f[:, :, 1] * 255.0), 0, 255).astype(np.uint8)
-    v = np.clip(np.round(hsv_f[:, :, 2] * 255.0), 0, 255).astype(np.uint8)
-    bgr_u8 = np.clip(np.round(bgr_f * 255.0), 0, 255).astype(np.uint8)
+    h = np.clip(np.round(hsv_f[:, :, 0] * _HUE_FLOAT_TO_OPENCV_SCALE), 0, _OPENCV_HUE_MAX).astype(
+        np.uint8
+    )
+    s = np.clip(np.round(hsv_f[:, :, 1] * _UINT8_MAX_FLOAT), 0, _UINT8_MAX_FLOAT).astype(
+        np.uint8
+    )
+    v = np.clip(np.round(hsv_f[:, :, 2] * _UINT8_MAX_FLOAT), 0, _UINT8_MAX_FLOAT).astype(
+        np.uint8
+    )
+    bgr_u8 = np.clip(np.round(bgr_f * _UINT8_MAX_FLOAT), 0, _UINT8_MAX_FLOAT).astype(np.uint8)
     return bgr_u8, h, s, v
 
 
@@ -78,9 +130,17 @@ def compute_hsv_histograms(
     """H/S/V のヒストグラムを集計する。"""
     # Hヒストグラムは従来どおり色相未定義(S=0)を除外する。
     h_mask = cv2.compare(s, 0, cv2.CMP_GT)
-    h_hist = cv2.calcHist([h], [0], h_mask, [180], [0, 180]).reshape(180).astype(np.int64)
-    s_hist = cv2.calcHist([s], [0], None, [256], [0, 256]).reshape(256).astype(np.int64)
-    v_hist = cv2.calcHist([v], [0], None, [256], [0, 256]).reshape(256).astype(np.int64)
+    h_hist = (
+        cv2.calcHist([h], [0], h_mask, [_OPENCV_HUE_BINS], [0, _OPENCV_HUE_BINS])
+        .reshape(_OPENCV_HUE_BINS)
+        .astype(np.int64)
+    )
+    s_hist = cv2.calcHist([s], [0], None, [_UINT8_BINS], [0, _UINT8_BINS]).reshape(
+        _UINT8_BINS
+    ).astype(np.int64)
+    v_hist = cv2.calcHist([v], [0], None, [_UINT8_BINS], [0, _UINT8_BINS]).reshape(
+        _UINT8_BINS
+    ).astype(np.int64)
     return h_hist, s_hist, v_hist
 
 
@@ -162,7 +222,7 @@ def compute_top_bars_chromatic_medoid(
     if bgr_preview is None:
         return []
     bgr = np.asarray(bgr_preview)
-    if bgr.ndim != 3 or bgr.shape[2] < 3 or bgr.size == 0:
+    if not _has_bgr_color_channels(bgr):
         return []
 
     bgr_u8, h, s, _v = prepare_hsv8_and_bgr8(bgr)
@@ -207,38 +267,92 @@ def _emit_step_and_check_cancel(
     return _is_canceled_safe(cancel_cb)
 
 
-def _build_analysis_result(
-    *,
+def _check_analysis_step(
+    progress_cb: ProgressCb,
+    cancel_cb: CancelCb,
+    step: tuple[int, str],
+) -> bool:
+    """解析進捗1ステップを通知し、その直後にキャンセル要求を確認する。"""
+    percent, text = step
+    return _emit_step_and_check_cancel(
+        progress_cb,
+        cancel_cb,
+        percent=int(percent),
+        text=str(text),
+    )
+
+
+def _compute_optional_top_colors(
     bgr_u8: np.ndarray,
-    hist: np.ndarray,
-    sv: np.ndarray,
-    rgb: np.ndarray,
-    h_hist: np.ndarray,
-    s_hist: np.ndarray,
-    v_hist: np.ndarray,
-    top_colors: list[TopColorBar] | None,
-    warm_ratio: float,
-    cool_ratio: float,
-    other_ratio: float,
-) -> AnalyzerResultPayload:
+    h: np.ndarray,
+    s: np.ndarray,
+    color_band_sat_threshold: int | None,
+) -> list[TopColorBar] | None:
+    """配色比率が必要な場合だけ上位色を計算する。"""
+    if color_band_sat_threshold is None:
+        return None
+    # 配色比率は必要時のみ計算。
+    return compute_top_bars_chromatic_medoid_from_hs(
+        bgr_u8,
+        h,
+        s,
+        sat_threshold=int(color_band_sat_threshold),
+        top_count=int(C.TOP_COLORS_COUNT),
+    )
+
+
+def _normalize_analysis_input(bgr: np.ndarray, max_dim: int) -> np.ndarray:
+    """入力フレームを解析用サイズへ正規化する。"""
+    return resize_by_long_edge(np.asarray(bgr), int(max_dim))
+
+
+def _prepare_analysis_frame(bgr_work: np.ndarray) -> PreparedAnalysisFrame:
+    """解析に必要な BGR/HSV 各チャネルを前計算する。"""
+    bgr_u8, h, s, v = prepare_hsv8_and_bgr8(bgr_work)
+    return PreparedAnalysisFrame(bgr_u8=bgr_u8, h=h, s=s, v=v)
+
+
+def _compute_wheel_and_hsv_histograms(
+    frame: PreparedAnalysisFrame,
+    wheel_sat_threshold: int,
+) -> tuple[np.ndarray, float, float, float, np.ndarray, np.ndarray, np.ndarray]:
+    """色相環統計と H/S/V ヒストグラムをまとめて計算する。"""
+    hist, warm_ratio, cool_ratio, other_ratio = compute_wheel_stats_from_hs(
+        frame.h,
+        frame.s,
+        int(wheel_sat_threshold),
+    )
+    h_hist, s_hist, v_hist = compute_hsv_histograms(frame.h, frame.s, frame.v)
+    return hist, warm_ratio, cool_ratio, other_ratio, h_hist, s_hist, v_hist
+
+
+def _compute_scatter_samples(
+    frame: PreparedAnalysisFrame,
+    sample_points: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    """散布図用の SV / RGB サンプルを返す。"""
+    return sample_sv_and_rgb(frame.h, frame.s, frame.v, frame.bgr_u8, sample_points)
+
+
+def _build_analysis_result(data: AnalysisResultData) -> AnalyzerResultPayload:
     """解析結果を UI 互換の辞書形式で構築する。"""
-    h_img, w_img = bgr_u8.shape[:2]
+    h_img, w_img = data.bgr_u8.shape[:2]
     return {
-        "bgr_preview": bgr_u8,
-        "hist": hist,
-        "sv": sv,
-        "rgb": rgb,
+        "bgr_preview": data.bgr_u8,
+        "hist": data.hist,
+        "sv": data.sv,
+        "rgb": data.rgb,
         # ヒストグラムを優先して返し、平面配列の転送を抑える。
         "h_plane": None,
         "s_plane": None,
         "v_plane": None,
-        "h_hist": h_hist,
-        "s_hist": s_hist,
-        "v_hist": v_hist,
-        "top_colors": top_colors,
-        "warm_ratio": warm_ratio,
-        "cool_ratio": cool_ratio,
-        "other_ratio": other_ratio,
+        "h_hist": data.h_hist,
+        "s_hist": data.s_hist,
+        "v_hist": data.v_hist,
+        "top_colors": data.top_colors,
+        "warm_ratio": data.warm_ratio,
+        "cool_ratio": data.cool_ratio,
+        "other_ratio": data.other_ratio,
         "dt_ms": 0.0,  # caller fills actual timing
         "cap": (0, 0, int(w_img), int(h_img)),
         "graph_update": True,
@@ -260,78 +374,48 @@ def analyze_bgr_frame(
     if bgr is None or bgr.size == 0:
         raise ValueError("empty frame")
     # 設定サイズで前処理。
-    bgr_work = resize_by_long_edge(np.asarray(bgr), int(max_dim))
+    bgr_work = _normalize_analysis_input(bgr, max_dim)
 
-    if _emit_step_and_check_cancel(
-        progress_cb,
-        cancel_cb,
-        percent=15,
-        text="HSVへ変換中…",
-    ):
+    if _check_analysis_step(progress_cb, cancel_cb, _ANALYZE_STEP_CONVERT_HSV):
         return None
-    bgr_u8, h, s, v = prepare_hsv8_and_bgr8(bgr_work)
+    frame = _prepare_analysis_frame(bgr_work)
 
-    if _emit_step_and_check_cancel(
-        progress_cb,
-        cancel_cb,
-        percent=30,
-        text="色相ヒストグラム集計中…",
-    ):
+    if _check_analysis_step(progress_cb, cancel_cb, _ANALYZE_STEP_WHEEL_HIST):
         return None
-    hist, warm_ratio, cool_ratio, other_ratio = compute_wheel_stats_from_hs(
-        h,
-        s,
-        int(wheel_sat_threshold),
+    hist, warm_ratio, cool_ratio, other_ratio, h_hist, s_hist, v_hist = (
+        _compute_wheel_and_hsv_histograms(frame, int(wheel_sat_threshold))
     )
-    h_hist, s_hist, v_hist = compute_hsv_histograms(h, s, v)
 
-    if _emit_step_and_check_cancel(
-        progress_cb,
-        cancel_cb,
-        percent=45,
-        text="散布図サンプル生成中…",
-    ):
+    if _check_analysis_step(progress_cb, cancel_cb, _ANALYZE_STEP_SCATTER):
         return None
-    sv, rgb = sample_sv_and_rgb(h, s, v, bgr_u8, sample_points)
+    sv, rgb = _compute_scatter_samples(frame, sample_points)
 
-    if _emit_step_and_check_cancel(
-        progress_cb,
-        cancel_cb,
-        percent=65,
-        text="統計を仕上げ中…",
-    ):
+    if _check_analysis_step(progress_cb, cancel_cb, _ANALYZE_STEP_FINISH_STATS):
         return None
-    top_colors = None
-    if color_band_sat_threshold is not None:
-        # 配色比率は必要時のみ計算。
-        top_colors = compute_top_bars_chromatic_medoid_from_hs(
-            bgr_u8,
-            h,
-            s,
-            sat_threshold=int(color_band_sat_threshold),
-            top_count=int(C.TOP_COLORS_COUNT),
-        )
+    top_colors = _compute_optional_top_colors(
+        frame.bgr_u8,
+        frame.h,
+        frame.s,
+        color_band_sat_threshold,
+    )
 
-    if _emit_step_and_check_cancel(
-        progress_cb,
-        cancel_cb,
-        percent=85,
-        text="結果を反映中…",
-    ):
+    if _check_analysis_step(progress_cb, cancel_cb, _ANALYZE_STEP_BUILD_RESULT):
         return None
     # 呼び出し側と互換のキーを返す（UI側 on_result がこの形を前提にする）。
     return _build_analysis_result(
-        bgr_u8=bgr_u8,
-        hist=hist,
-        sv=sv,
-        rgb=rgb,
-        h_hist=h_hist,
-        s_hist=s_hist,
-        v_hist=v_hist,
-        top_colors=top_colors,
-        warm_ratio=float(warm_ratio),
-        cool_ratio=float(cool_ratio),
-        other_ratio=float(other_ratio),
+        AnalysisResultData(
+            bgr_u8=frame.bgr_u8,
+            hist=hist,
+            sv=sv,
+            rgb=rgb,
+            h_hist=h_hist,
+            s_hist=s_hist,
+            v_hist=v_hist,
+            top_colors=top_colors,
+            warm_ratio=float(warm_ratio),
+            cool_ratio=float(cool_ratio),
+            other_ratio=float(other_ratio),
+        )
     )
 
 

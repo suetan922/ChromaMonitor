@@ -28,6 +28,7 @@ from .window_layout_common import (
 
 def desktop_available_geometry(main_window) -> QRect:
     """メインウィンドウ基準の利用可能デスクトップ領域を返す。"""
+    _ = main_window
     rect = screen_union_geometry(available=True)
     if rect.isValid() and rect.width() > 0 and rect.height() > 0:
         return rect
@@ -45,10 +46,12 @@ def _available_geometry_for_widget(main_window, widget: QWidget | None = None) -
         except Exception:
             pass
         try:
-            center = widget.frameGeometry().center()
-            at_center = QGuiApplication.screenAt(center)
-            if at_center is not None and at_center not in screen_candidates:
-                screen_candidates.append(at_center)
+            if widget.isVisible() or bool(widget.property("_chroma_dialog_position_initialized")):
+                rect = widget.frameGeometry() if widget.isVisible() else widget.geometry()
+                center = rect.center()
+                at_center = QGuiApplication.screenAt(center)
+                if at_center is not None and at_center not in screen_candidates:
+                    screen_candidates.append(at_center)
         except Exception:
             pass
     try:
@@ -114,6 +117,39 @@ def _clamp_top_left_in_available(
     return min(max(int(x), min_x), max_x), min(max(int(y), min_y), max_y)
 
 
+def _prepare_top_level_widget_for_fit(widget: QWidget) -> QRect:
+    """未表示でも安定した位置決めに使える現在 geometry を返す。"""
+    saved_geom = QRect(widget.geometry())
+    widget.ensurePolished()
+    layout = widget.layout()
+    if layout is not None:
+        layout.activate()
+    if widget.isWindow() and not widget.isVisible():
+        try:
+            widget.winId()
+        except Exception:
+            pass
+        if saved_geom.isValid():
+            try:
+                widget.setGeometry(saved_geom)
+            except Exception:
+                pass
+    geom = QRect(widget.geometry())
+    if geom.width() > 0 and geom.height() > 0:
+        return geom
+    size_hint = widget.sizeHint().expandedTo(widget.minimumSizeHint())
+    geom.setSize(size_hint)
+    return geom
+
+
+def _stable_top_level_frame(widget: QWidget, geom: QRect) -> QRect:
+    """表示状態に依らず位置決め用に使える矩形を返す。"""
+    frame = QRect(widget.frameGeometry() if widget.isVisible() else geom)
+    if frame.width() > 0 and frame.height() > 0:
+        return frame
+    return QRect(geom)
+
+
 def fit_window_to_desktop(main_window):
     """メインウィンドウを利用可能領域内へ収める。"""
     if main_window.isMaximized() or main_window.isFullScreen():
@@ -164,16 +200,24 @@ def fit_dialog_to_desktop(main_window, dialog: QDialog, center_on_parent: bool =
     if avail.width() <= 0 or avail.height() <= 0:
         return
 
+    geom = _prepare_top_level_widget_for_fit(dialog)
     margin = _DIALOG_FIT_MARGIN_PX
     max_w = max(_DIALOG_MIN_W, avail.width() - margin * 2)
     max_h = max(_DIALOG_MIN_H, avail.height() - margin * 2)
-    target_w = min(max(_DIALOG_MIN_W, dialog.width()), max_w)
-    target_h = min(max(_DIALOG_MIN_H, dialog.height()), max_h)
+    base_w = int(geom.width())
+    base_h = int(geom.height())
+    target_w = min(max(_DIALOG_MIN_W, base_w), max_w)
+    target_h = min(max(_DIALOG_MIN_H, base_h), max_h)
     if target_w != dialog.width() or target_h != dialog.height():
         dialog.resize(target_w, target_h)
-
-    frame = dialog.frameGeometry()
-    use_center = center_on_parent or not avail.intersects(frame)
+        geom = QRect(dialog.geometry())
+    frame = _stable_top_level_frame(dialog, geom)
+    if frame.width() <= 0 or frame.height() <= 0:
+        frame.setSize(QSize(int(target_w), int(target_h)))
+    position_initialized = bool(dialog.property("_chroma_dialog_position_initialized"))
+    use_center = center_on_parent or (
+        (not position_initialized and not dialog.isVisible()) or not avail.intersects(frame)
+    )
     if use_center:
         base = main_window.frameGeometry().center() if main_window.isVisible() else avail.center()
         target_x = base.x() - frame.width() // 2
@@ -190,6 +234,7 @@ def fit_dialog_to_desktop(main_window, dialog: QDialog, center_on_parent: bool =
         target_y,
     )
     dialog.move(target_x, target_y)
+    dialog.setProperty("_chroma_dialog_position_initialized", True)
 
 
 def fit_top_level_widget_to_desktop(
@@ -207,12 +252,12 @@ def fit_top_level_widget_to_desktop(
         return
 
     margin = _TOPLEVEL_FIT_MARGIN_PX
-    frame = widget.frameGeometry()
+    geom = _prepare_top_level_widget_for_fit(widget)
+    frame = _stable_top_level_frame(widget, geom)
     if allow_resize:
         max_w = max(_TOPLEVEL_MAX_W_FLOOR, avail.width() - margin * 2)
         max_h = max(_TOPLEVEL_MAX_H_FLOOR, avail.height() - margin * 2)
 
-        geom = widget.geometry()
         extra_w = max(0, int(frame.width() - geom.width()))
         extra_h = max(0, int(frame.height() - geom.height()))
         max_client_w = max(_TOPLEVEL_MAX_W_FLOOR, max_w - extra_w)
@@ -221,7 +266,8 @@ def fit_top_level_widget_to_desktop(
         target_client_h = min(max(_TOPLEVEL_MIN_H, int(geom.height())), max_client_h)
         if target_client_w != int(geom.width()) or target_client_h != int(geom.height()):
             widget.resize(target_client_w, target_client_h)
-            frame = widget.frameGeometry()
+            geom = QRect(widget.geometry())
+            frame = _stable_top_level_frame(widget, geom)
 
     if allow_move:
         move_avail = screen_union_geometry(available=True)

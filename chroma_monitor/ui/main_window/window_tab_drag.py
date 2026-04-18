@@ -127,6 +127,7 @@ def _start_system_move_for_dock(dock: QDockWidget) -> bool:
 
 def _detach_dock_if_vertical_drag(main_window, bar: QTabBar, state: dict, event) -> bool:
     """縦方向ドラッグ時のみタブをドックから切り離す。"""
+    _ = bar
     current = _global_pos_from_event(event)
     start = state.get("start_global")
     if current is None or start is None:

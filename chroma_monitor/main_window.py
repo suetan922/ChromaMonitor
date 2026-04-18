@@ -13,6 +13,7 @@ from .ui.main_window import result_snapshot as mw_snapshot
 from .ui.main_window import roi_handlers as mw_roi
 from .ui.main_window import runtime_actions as mw_runtime
 from .ui.main_window import settings_logic as mw_settings
+from .ui.main_window import tools_actions as mw_tools
 from .ui.main_window import window_events as mw_window_events
 from .ui.main_window import window_layout as mw_windowing
 from .ui.main_window import window_shell as mw_window_shell
@@ -70,6 +71,7 @@ class _MainWindowFacades:
     snapshot = mw_snapshot
     roi = mw_roi
     runtime = mw_runtime
+    tools = mw_tools
     # Settings / event entry points / shell
     settings = mw_settings
     events = mw_window_events
@@ -159,6 +161,13 @@ class MainWindow(QMainWindow):
         self._ui_theme = None
         # ROI選択オーバーレイ（マルチモニタ対応）管理。
         self._roi_selectors = []
+        self._canvas_preview_window = None
+        self._loaded_image_source_path = ""
+        self._loaded_image_source_name = ""
+        self._loaded_image_source_bgr = None
+        self._pending_loaded_image_source_path = ""
+        self._pending_loaded_image_source_name = ""
+        self._pending_loaded_image_source_bgr = None
 
     def _init_analyzer_workers(self) -> None:
         """ライブ解析と画像解析のワーカー参照を初期化する。"""
@@ -278,6 +287,10 @@ class MainWindow(QMainWindow):
     apply_always_on_top = _MW.topmost.apply_always_on_top
     _refresh_topmost_if_enabled = _MW.topmost.refresh_topmost_if_enabled
     _present_settings_window = _MW.topmost.present_settings_window
+
+    # Tools delegates
+    show_canvas_preview_window = _MW.tools.show_canvas_preview_window
+    _close_canvas_preview_window = _MW.tools.close_canvas_preview_window
 
     # Result snapshot / runtime delegates
     # Read: ui/main_window/result_snapshot.py, runtime_actions.py, runtime_*.py

@@ -33,6 +33,7 @@ def _decode_qbytearray(text: str) -> QByteArray:
 
 def _restore_encoded_blob(window, encoded: Any, restore_fn) -> bool:
     """エンコード済み状態を復元関数へ渡して適用する。"""
+    _ = window
     if not isinstance(encoded, str) or not encoded:
         return False
     return bool(restore_fn(_decode_qbytearray(encoded)))

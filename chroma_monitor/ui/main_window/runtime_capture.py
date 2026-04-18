@@ -39,6 +39,45 @@ class WindowComboSelection:
     text: str
 
 
+@dataclass(frozen=True, slots=True)
+class WindowRefreshState:
+    """一覧更新前に退避したウィンドウ選択状態。"""
+
+    prev_hwnd: int | None
+    prev_text: str
+    prev_title: str
+    preserved_text: str
+    restore_title: str
+    restore_text: str
+
+
+@dataclass(frozen=True, slots=True)
+class WindowRefreshResult:
+    """一覧更新後に UI へ反映する結果。"""
+
+    wins: list[tuple[int, str]]
+    selected_idx: int
+    announce: bool
+    force: bool
+
+
+@dataclass(frozen=True, slots=True)
+class WindowTextCommitState:
+    """入力欄確定時点のコンボ状態。"""
+
+    text: str
+    current_idx: int
+    current_hwnd: int | None
+
+
+@dataclass(frozen=True, slots=True)
+class CapturePreflightResult:
+    """現在の取得元で処理を開始できるか表す。"""
+
+    ready: bool
+    message: str | None = None
+
+
 def _find_combo_index_by_data(combo, data) -> int:
     """コンボボックス内で data が一致する最初のインデックスを返す。"""
     if data is None:
@@ -85,6 +124,13 @@ def _find_combo_index_by_hints(combo, *hints: str) -> int:
         if idx >= 0:
             return int(idx)
     return -1
+
+
+def _find_combo_index_for_text(combo, text: str, *, allow_partial: bool) -> int:
+    """入力テキストから候補 index を解決する。"""
+    if allow_partial:
+        return _find_combo_index_by_text_hint(combo, text)
+    return _find_combo_index_by_text_casefold(combo, text)
 
 
 def _debug_capture_target(event: str, **fields) -> None:
@@ -148,6 +194,67 @@ def _rebuild_window_combo_items(combo, wins: list[tuple[int, str]]) -> None:
         combo.addItem(title, hwnd)
 
 
+def _should_skip_window_refresh(
+    combo,
+    editor,
+    *,
+    announce: bool,
+    force: bool,
+) -> bool:
+    """編集中は一覧更新を見送り、入力中テキストの破壊を避ける。"""
+    return bool(
+        (not bool(force))
+        and (not announce)
+        and combo.count() > 0
+        and (
+            (editor is not None and editor.hasFocus())
+            or (combo.hasFocus() and not combo.view().isVisible())
+        )
+    )
+
+
+def _window_refresh_state(
+    combo,
+    editor,
+    *,
+    preferred_title: str,
+    preferred_text: str,
+) -> WindowRefreshState:
+    """一覧再構築後の復元に必要な状態を退避する。"""
+    prev_hwnd = combo.currentData()
+    prev_text = str(combo.currentText() or "").strip()
+    prev_idx = int(combo.currentIndex())
+    prev_title = ""
+    if prev_idx >= 0 and combo.itemData(prev_idx) is not None:
+        prev_title = str(combo.itemText(prev_idx) or "").strip()
+    preserved_text = _preserved_window_editor_text(combo, editor)
+    restore_text = str(preferred_text or "").strip() or prev_text
+    restore_title = str(preferred_title or "").strip() or prev_title
+    return WindowRefreshState(
+        prev_hwnd=None if prev_hwnd is None else int(prev_hwnd),
+        prev_text=prev_text,
+        prev_title=prev_title,
+        preserved_text=preserved_text,
+        restore_title=restore_title,
+        restore_text=restore_text,
+    )
+
+
+def _window_refresh_candidates() -> list[tuple[int, str]]:
+    """現在環境で取得できるウィンドウ候補一覧を返す。"""
+    return list_windows() if HAS_WIN32 else []
+
+
+def _announce_window_refresh(main_window, wins: list[tuple[int, str]], *, announce: bool) -> None:
+    """ウィンドウ一覧更新後の状態メッセージを反映する。"""
+    if not announce:
+        return
+    if not HAS_WIN32:
+        on_status(main_window, "この環境ではウィンドウ選択は使えません（画面の領域選択を使用）")
+        return
+    on_status(main_window, f"ウィンドウ {len(wins)} 件")
+
+
 def _restore_window_combo_after_refresh(
     combo,
     editor,
@@ -174,6 +281,132 @@ def _restore_window_combo_after_refresh(
         elif selected_idx < 0:
             combo.clearEditText()
     return int(selected_idx)
+
+
+def _prepare_window_refresh_state(
+    combo,
+    editor,
+    *,
+    preferred_title: str,
+    preferred_text: str,
+) -> WindowRefreshState:
+    """一覧更新前に必要な退避状態を返す。"""
+    return _window_refresh_state(
+        combo,
+        editor,
+        preferred_title=preferred_title,
+        preferred_text=preferred_text,
+    )
+
+
+def _rebuild_window_refresh_items(combo, wins: list[tuple[int, str]]) -> None:
+    """一覧更新時にコンボ項目だけを再構築する。"""
+    _rebuild_window_combo_items(combo, wins)
+
+
+def _restore_window_refresh_selection(
+    combo,
+    editor,
+    state: WindowRefreshState,
+) -> int:
+    """一覧再構築後に退避済み選択状態を復元する。"""
+    return _restore_window_combo_after_refresh(
+        combo,
+        editor,
+        prev_hwnd=state.prev_hwnd,
+        preserved_text=state.preserved_text,
+        preferred_title=state.restore_title,
+        preferred_text=state.restore_text,
+    )
+
+
+def _apply_window_refresh_result(
+    main_window,
+    state: WindowRefreshState,
+    result: WindowRefreshResult,
+) -> None:
+    """更新後の debug/status/UI 同期をまとめて反映する。"""
+    combo = main_window.combo_win
+    selected_idx = int(result.selected_idx)
+    wins = result.wins
+    new_hwnd = combo.itemData(selected_idx) if selected_idx >= 0 else None
+    _debug_capture_target(
+        "refresh",
+        count=int(len(wins)),
+        prev_hwnd=state.prev_hwnd,
+        new_hwnd=new_hwnd,
+        selected_idx=int(selected_idx),
+        preferred_title=state.restore_title,
+        preferred_text=state.restore_text,
+        preserved_text=str(state.preserved_text or ""),
+        prev_title=state.prev_title,
+        prev_text=state.prev_text,
+        force=bool(result.force),
+    )
+    _announce_window_refresh(main_window, wins, announce=result.announce)
+    sync_capture_source_ui(main_window)
+    if _is_window_capture_source(main_window) and new_hwnd != state.prev_hwnd:
+        on_window_changed(main_window, selected_idx)
+
+
+def _current_window_text_commit_state(combo) -> WindowTextCommitState:
+    """入力確定時点のテキストと現在選択を返す。"""
+    current_hwnd = combo.currentData()
+    return WindowTextCommitState(
+        text=str(combo.currentText() or "").strip(),
+        current_idx=int(combo.currentIndex()),
+        current_hwnd=None if current_hwnd is None else int(current_hwnd),
+    )
+
+
+def _sync_window_editor_to_item_text(combo, editor, idx: int) -> None:
+    """エディタ表示を指定 index の項目テキストへ揃える。"""
+    if editor is None:
+        return
+    item_text = combo.itemText(int(idx))
+    if editor.text() != item_text:
+        editor.setText(item_text)
+
+
+def _handle_empty_window_text_commit(main_window, combo, editor, *, text: str) -> bool:
+    """空文字確定時の解除処理を行い、処理済みなら True を返す。"""
+    if text:
+        return False
+    if _has_any_capture_selection(main_window, combo):
+        _debug_capture_target("text_commit_clear")
+        _clear_window_selection(main_window, combo, editor, text_to_keep=None)
+    return True
+
+
+def _window_text_commit_keeps_current(combo, state: WindowTextCommitState) -> bool:
+    """現在選択をそのまま維持できる確定入力かを返す。"""
+    return bool(
+        state.current_idx >= 0
+        and state.current_hwnd is not None
+        and combo.itemText(state.current_idx).casefold() == state.text.casefold()
+    )
+
+
+def _resolved_window_text_commit_index(combo, text: str) -> int:
+    """確定テキストから候補 index を解決する。"""
+    return _find_combo_index_for_text(combo, text, allow_partial=True)
+
+
+def _handle_unresolved_window_text_commit(
+    main_window,
+    combo,
+    editor,
+    state: WindowTextCommitState,
+    *,
+    resolved_idx: int,
+) -> bool:
+    """確定テキストが候補へ解決できない場合の処理を行う。"""
+    if resolved_idx >= 0:
+        return False
+    if state.current_hwnd is not None or state.current_idx >= 0:
+        _debug_capture_target("text_commit_no_match", text=state.text)
+        _clear_window_selection(main_window, combo, editor, text_to_keep=state.text)
+    return True
 
 
 def _clear_window_selection(main_window, combo, editor, *, text_to_keep: str | None = None) -> None:
@@ -332,15 +565,7 @@ def refresh_windows(
     """ウィンドウ候補一覧を再取得してコンボへ反映する。"""
     combo = main_window.combo_win
     editor = combo.lineEdit()
-    if (
-        (not bool(force))
-        and (not announce)
-        and combo.count() > 0
-        and (
-            (editor is not None and editor.hasFocus())
-            or (combo.hasFocus() and not combo.view().isVisible())
-        )
-    ):
+    if _should_skip_window_refresh(combo, editor, announce=announce, force=force):
         _debug_capture_target(
             "refresh_skipped_interaction",
             count=int(combo.count()),
@@ -350,53 +575,48 @@ def refresh_windows(
             force=bool(force),
         )
         return
-    wins = list_windows() if HAS_WIN32 else []
-    prev_hwnd = combo.currentData()
-    prev_text = str(combo.currentText() or "").strip()
-    prev_idx = int(combo.currentIndex())
-    prev_title = ""
-    if prev_idx >= 0 and combo.itemData(prev_idx) is not None:
-        prev_title = str(combo.itemText(prev_idx) or "").strip()
-    preserved_text = _preserved_window_editor_text(combo, editor)
-    restore_text = str(preferred_text or "").strip() or prev_text
-    restore_title = str(preferred_title or "").strip() or prev_title
-    with blocked_signals(combo):
-        _rebuild_window_combo_items(combo, wins)
-        selected_idx = _restore_window_combo_after_refresh(
-            combo,
-            editor,
-            prev_hwnd=prev_hwnd,
-            preserved_text=preserved_text,
-            preferred_title=restore_title,
-            preferred_text=restore_text,
-        )
-    new_hwnd = combo.itemData(selected_idx) if selected_idx >= 0 else None
-    _debug_capture_target(
-        "refresh",
-        count=int(len(wins)),
-        prev_hwnd=prev_hwnd,
-        new_hwnd=new_hwnd,
-        selected_idx=int(selected_idx),
-        preferred_title=restore_title,
-        preferred_text=restore_text,
-        preserved_text=str(preserved_text or ""),
-        prev_title=prev_title,
-        prev_text=prev_text,
-        force=bool(force),
+    wins = _window_refresh_candidates()
+    restore_state = _prepare_window_refresh_state(
+        combo,
+        editor,
+        preferred_title=preferred_title,
+        preferred_text=preferred_text,
     )
-    if announce and not HAS_WIN32:
-        on_status(main_window, "この環境ではウィンドウ選択は使えません（画面の領域選択を使用）")
-    elif announce:
-        on_status(main_window, f"ウィンドウ {len(wins)} 件")
-    sync_capture_source_ui(main_window)
-    if _is_window_capture_source(main_window) and new_hwnd != prev_hwnd:
-        on_window_changed(main_window, int(selected_idx))
+    with blocked_signals(combo):
+        _rebuild_window_refresh_items(combo, wins)
+        selected_idx = _restore_window_refresh_selection(combo, editor, restore_state)
+    _apply_window_refresh_result(
+        main_window,
+        restore_state,
+        WindowRefreshResult(
+            wins=wins,
+            selected_idx=selected_idx,
+            announce=bool(announce),
+            force=bool(force),
+        ),
+    )
 
 
 def selected_capture_source(main_window) -> str:
     """UI選択から取得元種別を安全な値で返す。"""
     source = main_window.combo_capture_source.currentData()
     return safe_choice(source, C.CAPTURE_SOURCES, C.DEFAULT_CAPTURE_SOURCE)
+
+
+def capture_preflight_result(main_window) -> CapturePreflightResult:
+    """現在の取得設定で処理可能かどうかを返す。"""
+    capture = main_window.worker.capture_selection()
+    source = selected_capture_source(main_window)
+    if source == C.CAPTURE_SOURCE_WINDOW and capture.target_hwnd is None:
+        return CapturePreflightResult(False, "ターゲットウィンドウを選択してください")
+    if source == C.CAPTURE_SOURCE_SCREEN and capture.roi_abs is None:
+        return CapturePreflightResult(False, "キャプチャ領域を選択してください")
+    return CapturePreflightResult(True)
+
+
+def capture_preflight_message(main_window) -> str | None:
+    """現在の取得設定で実行前に不足している入力があれば返す。"""
+    return capture_preflight_result(main_window).message
 
 
 def _capture_source_row_widget(main_window, row_attr: str, fallback_widget):
@@ -556,7 +776,7 @@ def on_window_text_changed(main_window, text: str):
     normalized = str(text or "").strip()
     if not normalized:
         return
-    idx = _find_combo_index_by_text_casefold(combo, normalized)
+    idx = _find_combo_index_for_text(combo, normalized, allow_partial=False)
     if idx < 0:
         return
     hwnd = combo.itemData(idx)
@@ -596,43 +816,35 @@ def on_window_text_committed(main_window):
         return
     combo = main_window.combo_win
     editor = combo.lineEdit()
-    text = combo.currentText().strip()
-    current_idx = int(combo.currentIndex())
-    current_hwnd = combo.currentData()
-    if not text:
-        if _has_any_capture_selection(main_window, combo):
-            _debug_capture_target("text_commit_clear")
-            _clear_window_selection(main_window, combo, editor, text_to_keep=None)
+    state = _current_window_text_commit_state(combo)
+    if _handle_empty_window_text_commit(main_window, combo, editor, text=state.text):
         return
 
-    if (
-        current_idx >= 0
-        and current_hwnd is not None
-        and combo.itemText(current_idx).casefold() == text.casefold()
-    ):
-        if editor is not None and editor.text() != combo.itemText(current_idx):
-            editor.setText(combo.itemText(current_idx))
+    if _window_text_commit_keeps_current(combo, state):
+        _sync_window_editor_to_item_text(combo, editor, state.current_idx)
         _debug_capture_target(
             "text_commit_keep_current",
-            text=text,
-            idx=current_idx,
-            hwnd=current_hwnd,
+            text=state.text,
+            idx=state.current_idx,
+            hwnd=state.current_hwnd,
         )
         return
 
-    idx = _find_combo_index_by_text_hint(combo, text)
-    if idx < 0:
-        if current_hwnd is not None or current_idx >= 0:
-            _debug_capture_target("text_commit_no_match", text=text)
-            _clear_window_selection(main_window, combo, editor, text_to_keep=text)
+    idx = _resolved_window_text_commit_index(combo, state.text)
+    if _handle_unresolved_window_text_commit(
+        main_window,
+        combo,
+        editor,
+        state,
+        resolved_idx=idx,
+    ):
         return
 
-    if idx == current_idx and current_hwnd is not None:
-        if editor is not None and editor.text() != combo.itemText(idx):
-            editor.setText(combo.itemText(idx))
-        _debug_capture_target("text_commit_same", text=text, idx=idx)
+    if idx == state.current_idx and state.current_hwnd is not None:
+        _sync_window_editor_to_item_text(combo, editor, idx)
+        _debug_capture_target("text_commit_same", text=state.text, idx=idx)
         return
 
     set_current_index_blocked(combo, idx)
-    _debug_capture_target("text_commit_select", text=text, idx=idx, hwnd=combo.itemData(idx))
+    _debug_capture_target("text_commit_select", text=state.text, idx=idx, hwnd=combo.itemData(idx))
     on_window_changed(main_window, idx)

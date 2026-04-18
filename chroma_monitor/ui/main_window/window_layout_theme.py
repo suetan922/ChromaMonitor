@@ -39,6 +39,7 @@ def apply_ui_style(main_window, theme_name: str | None = None):
         getattr(main_window, "hist_v", None),
         getattr(main_window, "rgb_hist_view", None),
         getattr(main_window, "vectorscope_view", None),
+        getattr(main_window, "_canvas_preview_window", None),
     )
     for widget in themed_widgets:
         if widget is not None and hasattr(widget, "set_theme"):

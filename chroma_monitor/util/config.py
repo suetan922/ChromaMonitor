@@ -50,6 +50,7 @@ DEFAULT_CONFIG = {
     C.CFG_LAYOUT_ENGINE_VERSION: 0,
     C.CFG_LAYOUT_CURRENT: {},
     C.CFG_LAYOUT_PRESETS: {},
+    C.CFG_CANVAS_RATIO_PRESETS: [],
 }
 #: 設定ファイルパスの探索結果キャッシュ。
 _CONFIG_PATH_CACHE: Path | None = None
@@ -149,6 +150,8 @@ def load_config() -> dict[str, Any]:
             cfg[C.CFG_LAYOUT_CURRENT] = {}
         if not isinstance(cfg.get(C.CFG_LAYOUT_PRESETS), dict):
             cfg[C.CFG_LAYOUT_PRESETS] = {}
+        if not isinstance(cfg.get(C.CFG_CANVAS_RATIO_PRESETS), list):
+            cfg[C.CFG_CANVAS_RATIO_PRESETS] = []
         return cfg
     except Exception:
         return defaults

@@ -27,6 +27,7 @@ from .window_layout_rebalance import schedule_dock_rebalance
 from .window_layout_theme import retint_dock_title_button_icons
 from .window_tabs import clear_force_dock_drop_active, sync_tabbed_dock_title_bars
 from .window_topmost import (
+    present_top_level_widget,
     refresh_topmost_if_enabled,
     schedule_dock_on_top_refresh,
     sync_dock_on_top,
@@ -324,13 +325,17 @@ def toggle_dock(main_window, dock: QDockWidget, visible: bool):
     if visible:
         was_hidden = dock.isHidden()
         if dock.isFloating():
-            dock.setVisible(True)
-            sync_dock_on_top(main_window, dock)
-            fit_top_level_widget_to_desktop(main_window, dock, allow_resize=False)
+            present_top_level_widget(
+                main_window,
+                dock,
+                fit_before_show=lambda: fit_top_level_widget_to_desktop(
+                    main_window,
+                    dock,
+                    allow_resize=False,
+                ),
+            )
             schedule_dock_on_top_refresh(main_window, dock, delay_ms=0)
             schedule_dock_on_top_refresh(main_window, dock, delay_ms=140)
-            dock.raise_()
-            dock.activateWindow()
         else:
             area = _default_area_for_dock(main_window, dock)
             attach_on_next_show = bool(getattr(dock, "_attach_on_next_show", False))

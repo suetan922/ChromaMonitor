@@ -117,6 +117,16 @@ def _build_button_styles(theme: UiTheme) -> str:
             color:{theme.text_disabled};
             border:1px solid {theme.border};
         }}
+        QPushButton[chromaRole="canvasPreviewToggle"] {{
+            min-width:40px;
+            padding:4px 10px;
+            background:{theme.panel_bg};
+        }}
+        QPushButton[chromaRole="canvasPreviewToggle"]:checked {{
+            background:{theme.panel_alt_bg};
+            border:1px solid {theme.accent};
+            font-weight:600;
+        }}
         QToolButton#fileLoadSplitButton {{
             font-weight:600;
             border-radius:8px;
@@ -244,6 +254,19 @@ def _build_input_styles(theme: UiTheme) -> str:
             color:{theme.text_primary};
             spacing:7px;
         }}
+        QRadioButton {{
+            background:transparent;
+            color:{theme.text_primary};
+            spacing:6px;
+        }}
+        QRadioButton[chromaRole="canvasOrientation"] {{
+            color:{theme.text_secondary};
+            padding:2px 0;
+        }}
+        QRadioButton[chromaRole="canvasOrientation"]:checked {{
+            color:{theme.text_primary};
+            font-weight:600;
+        }}
         QCheckBox::indicator {{
             width:18px;
             height:18px;
@@ -315,6 +338,28 @@ def _build_container_styles(theme: UiTheme) -> str:
             background:{theme.chip_list_bg};
             border:1px solid {theme.chip_list_border};
             border-radius:6px;
+        }}
+        QListWidget[chromaRole="canvasPresetList"] {{
+            background:{theme.panel_bg};
+            border:1px solid {theme.border};
+            border-radius:6px;
+            padding:4px;
+        }}
+        QListWidget[chromaRole="canvasPresetList"]:focus {{
+            outline:none;
+            border:1px solid {theme.border_strong};
+        }}
+        QListWidget[chromaRole="canvasPresetList"]::item {{
+            padding:6px 8px;
+            border-radius:4px;
+        }}
+        QListWidget[chromaRole="canvasPresetList"]::item:hover {{
+            background:{theme.button_hover_bg};
+        }}
+        QListWidget[chromaRole="canvasPresetList"]::item:selected {{
+            background:{theme.panel_alt_bg};
+            border:1px solid {theme.chip_selected_border};
+            color:{theme.text_primary};
         }}
         QListWidget[chromaRole="colorChipList"]::item {{
             padding:2px 4px;

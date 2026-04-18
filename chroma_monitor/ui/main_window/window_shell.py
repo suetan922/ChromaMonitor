@@ -74,6 +74,10 @@ def build_menu_bar(main_window, *, window_dock_menu_items=WINDOW_DOCK_MENU_ITEMS
     main_window.settings_action = menu.addAction("設定ウィンドウを開く")
     main_window.settings_action.triggered.connect(lambda: main_window.show_settings_window())
 
+    tools_menu = mb.addMenu("ツール")
+    main_window.act_open_canvas_preview = tools_menu.addAction("キャンバスプレビュー")
+    main_window.act_open_canvas_preview.triggered.connect(main_window.show_canvas_preview_window)
+
     layout_menu = mb.addMenu("レイアウト")
     main_window.presets_menu = layout_menu.addMenu("プリセットを適用")
     main_window.act_open_layout_settings = layout_menu.addAction("レイアウト設定を開く")
@@ -84,6 +88,7 @@ def build_menu_bar(main_window, *, window_dock_menu_items=WINDOW_DOCK_MENU_ITEMS
     for popup in (
         win_menu,
         menu,
+        tools_menu,
         layout_menu,
         main_window.presets_menu,
         getattr(main_window, "help_menu", None),
@@ -93,6 +98,7 @@ def build_menu_bar(main_window, *, window_dock_menu_items=WINDOW_DOCK_MENU_ITEMS
 
 def ensure_menu_popup_width(main_window, menu) -> None:
     """メニュー項目文言が見切れないようポップアップ最小幅を調整する。"""
+    _ = main_window
     if menu is None:
         return
 

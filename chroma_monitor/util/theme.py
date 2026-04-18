@@ -1,6 +1,7 @@
 """アプリ全体のテーマ定義と共通スタイル補助。"""
 
 from PySide6.QtGui import QColor, QPalette
+from PySide6.QtWidgets import QAbstractItemView, QWidget
 
 from .theme_definitions import UiTheme, get_ui_theme
 from .theme_stylesheet import build_app_stylesheet
@@ -35,7 +36,13 @@ def refresh_widget_style(widget) -> None:
         return
     style.unpolish(widget)
     style.polish(widget)
-    widget.update()
+    # PySide6 on Windows can resolve QListWidget.update() to the item-view overload
+    # instead of QWidget.update(), which raises `takes exactly one argument`.
+    QWidget.update(widget)
+    if isinstance(widget, QAbstractItemView):
+        viewport = widget.viewport()
+        if viewport is not None:
+            QWidget.update(viewport)
 
 
 def build_palette(theme: UiTheme) -> QPalette:

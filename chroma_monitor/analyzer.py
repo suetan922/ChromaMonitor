@@ -79,6 +79,57 @@ class AnalyzerRuntimeSnapshot:
     capture: AnalyzerCaptureSelection
 
 
+@dataclass(frozen=True, slots=True)
+class AnalyzerLoopState:
+    """ループ1回分で使う判定条件を束ねた状態。"""
+
+    cfg: AnalyzerConfig
+    capture: AnalyzerCaptureSelection
+    need_color: bool
+    need_color_band: bool
+    need_scatter: bool
+    need_hsv_hist: bool
+    need_graph_data: bool
+    need_bgr_emit: bool
+    loop_interval: float
+    idle_sleep_sec: float
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyzerFrameState:
+    """取得済み1フレームに対する通知判定結果。"""
+
+    started_at: float
+    bgr: np.ndarray
+    cap: QRect
+    emit_now: bool
+    graph_update: bool
+    graph_data: GraphData
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyzerFrameDecision:
+    """現在フレームの通知可否とグラフ更新可否。"""
+
+    emit_now: bool
+    graph_update: bool
+
+
+@dataclass(frozen=True, slots=True)
+class AnalyzerGraphRequest:
+    """グラフ計算に必要な入力群。"""
+
+    can_emit_now: bool
+    graph_update: bool
+    need_graph_data: bool
+    bgr: np.ndarray
+    cfg: AnalyzerConfig
+    need_color: bool
+    need_color_band: bool
+    need_scatter: bool
+    need_hsv_hist: bool
+
+
 def _copy_rect(rect: Optional[QRect]) -> Optional[QRect]:
     """`QRect` を共有しないようコピーして返す。"""
     return None if rect is None else QRect(rect)
@@ -198,6 +249,11 @@ class AnalyzerWorker(QObject):
         self._stop.set()
         self._result_inflight.clear()
         self.status.emit("停止")
+
+    def is_running(self) -> bool:
+        """ライブ解析が実行状態なら True を返す。"""
+        thread = self._thread
+        return bool(thread is not None and thread.is_alive() and not self._stop.is_set())
 
     def mark_result_consumed(self):
         """UI側で結果消費完了したことをワーカーへ通知する。"""
@@ -561,30 +617,76 @@ class AnalyzerWorker(QObject):
         graph_update = self._frame % cfg.graph_every == 0
         return True, bool(graph_update)
 
-    def _graph_data_for_frame(
+    def _frame_decision_for_loop(
         self,
-        *,
-        emit_now: bool,
-        graph_update: bool,
-        need_graph_data: bool,
-        bgr: np.ndarray,
         cfg: AnalyzerConfig,
-        need_color: bool,
-        need_color_band: bool,
-        need_scatter: bool,
-        need_hsv_hist: bool,
-    ) -> GraphData:
+        bgr: np.ndarray,
+    ) -> AnalyzerFrameDecision:
+        """現在フレームの通知/グラフ更新判定を返す。"""
+        emit_now, graph_update = self._emit_and_graph_update_flags(cfg, bgr)
+        return AnalyzerFrameDecision(
+            emit_now=bool(emit_now),
+            graph_update=bool(graph_update),
+        )
+
+    def _graph_request_for_frame(
+        self,
+        state: AnalyzerLoopState,
+        bgr: np.ndarray,
+        decision: AnalyzerFrameDecision,
+    ) -> AnalyzerGraphRequest:
+        """現在フレームの graph 計算要求を組み立てる。"""
+        return AnalyzerGraphRequest(
+            can_emit_now=bool(decision.emit_now and not self._result_inflight.is_set()),
+            graph_update=bool(decision.graph_update),
+            need_graph_data=bool(state.need_graph_data),
+            bgr=bgr,
+            cfg=state.cfg,
+            need_color=bool(state.need_color),
+            need_color_band=bool(state.need_color_band),
+            need_scatter=bool(state.need_scatter),
+            need_hsv_hist=bool(state.need_hsv_hist),
+        )
+
+    def _graph_data_for_frame(self, request: AnalyzerGraphRequest) -> GraphData:
         """必要なときだけグラフ計算を実行する。"""
-        if not (emit_now and graph_update and need_graph_data):
+        if not (request.can_emit_now and request.graph_update and request.need_graph_data):
             return _EMPTY_GRAPH_DATA
         return live_graph_data.collect_graph_data(
-            bgr,
-            cfg,
-            need_color=need_color,
-            need_color_band=need_color_band,
-            need_scatter=need_scatter,
-            need_hsv_hist=need_hsv_hist,
+            request.bgr,
+            request.cfg,
+            need_color=request.need_color,
+            need_color_band=request.need_color_band,
+            need_scatter=request.need_scatter,
+            need_hsv_hist=request.need_hsv_hist,
         )
+
+    def _frame_state_for_loop(
+        self,
+        state: AnalyzerLoopState,
+        *,
+        started_at: float,
+        bgr: np.ndarray,
+        cap,
+    ) -> AnalyzerFrameState:
+        """今回キャプチャ済みフレームの通知状態をまとめる。"""
+        decision = self._frame_decision_for_loop(state.cfg, bgr)
+        graph_request = self._graph_request_for_frame(state, bgr, decision)
+        return AnalyzerFrameState(
+            started_at=float(started_at),
+            bgr=bgr,
+            cap=cap,
+            emit_now=bool(graph_request.can_emit_now),
+            graph_update=bool(graph_request.graph_update),
+            graph_data=self._graph_data_for_frame(graph_request),
+        )
+
+    @staticmethod
+    def _sleep_remaining_loop_interval(state: AnalyzerLoopState, started_at: float) -> None:
+        """ループ周期を維持するため残り時間だけ待機する。"""
+        remain = state.loop_interval - (time.perf_counter() - started_at)
+        if remain > 0:
+            time.sleep(remain)
 
     def _emit_result_if_possible(self, payload: dict, *, cfg: AnalyzerConfig) -> None:
         """未消費キューが空いている場合のみ結果を通知する。"""
@@ -598,74 +700,95 @@ class AnalyzerWorker(QObject):
             with self._change_state_lock:
                 self._cooldown_until = time.perf_counter() + _ANALYZER_CHANGE_COOLDOWN_SEC
 
+    def _loop_state(self) -> AnalyzerLoopState:
+        """ループ1回分で必要な設定・表示要求をまとめて返す。"""
+        runtime = self.runtime_snapshot()
+        cfg = runtime.cfg
+        capture = runtime.capture
+        # 可視ビューから必要計算を決める。
+        (
+            need_color,
+            need_color_band,
+            need_scatter,
+            need_hsv_hist,
+            need_graph_data,
+            need_bgr_emit,
+        ) = live_graph_data.view_requirements(cfg)
+        loop_interval = self._loop_interval_sec(cfg)
+        return AnalyzerLoopState(
+            cfg=cfg,
+            capture=capture,
+            need_color=bool(need_color),
+            need_color_band=bool(need_color_band),
+            need_scatter=bool(need_scatter),
+            need_hsv_hist=bool(need_hsv_hist),
+            need_graph_data=bool(need_graph_data),
+            need_bgr_emit=bool(need_bgr_emit),
+            loop_interval=float(loop_interval),
+            idle_sleep_sec=max(0.01, float(loop_interval)),
+        )
+
+    def _should_skip_loop_iteration(self, state: AnalyzerLoopState) -> bool:
+        """表示要求や UI 側の消費状況に応じて1ループ休止する。"""
+        if not state.need_graph_data and not state.need_bgr_emit:
+            # 表示先が1つもない間はキャプチャ/解析を休止してCPU使用率を下げる。
+            time.sleep(state.idle_sleep_sec)
+            return True
+        if self._result_inflight.is_set():
+            # UIが前フレームを消費中の間は新規キャプチャを抑止して無駄負荷を避ける。
+            time.sleep(state.idle_sleep_sec)
+            return True
+        return False
+
+    def _maybe_emit_loop_payload(
+        self,
+        state: AnalyzerLoopState,
+        frame: AnalyzerFrameState,
+    ) -> None:
+        """通知条件を満たす場合だけ payload を組み立てて emit する。"""
+        if not frame.emit_now:
+            return
+        # グラフ更新なしでも画像プレビューが必要なら通知する。
+        should_emit_payload = state.need_bgr_emit or (frame.graph_update and state.need_graph_data)
+        if not should_emit_payload:
+            return
+        dt_ms = (time.perf_counter() - frame.started_at) * 1000.0
+        payload = live_graph_data.build_result_payload(
+            bgr=frame.bgr,
+            cap=frame.cap,
+            graph_data=frame.graph_data,
+            graph_update=bool(frame.graph_update),
+            need_bgr_emit=bool(state.need_bgr_emit),
+            dt_ms=float(dt_ms),
+        )
+        self._emit_result_if_possible(payload, cfg=state.cfg)
+
+    def _run_loop_iteration(self, sct) -> None:
+        """メインループ1回分の判定・取得・通知を実行する。"""
+        t0 = time.perf_counter()
+        state = self._loop_state()
+        if self._should_skip_loop_iteration(state):
+            return
+
+        # 1フレーム取得。
+        bgr, cap = self._capture_frame_for_loop(sct, state.capture)
+        if bgr is None or cap is None:
+            return
+
+        frame = self._frame_state_for_loop(
+            state,
+            started_at=float(t0),
+            bgr=bgr,
+            cap=cap,
+        )
+        self._maybe_emit_loop_payload(state, frame)
+
+        # ループ周期を維持。
+        self._sleep_remaining_loop_interval(state, float(t0))
+
     def _run(self):
         """キャプチャ/解析/通知を繰り返すメインループ。"""
         # mss は with 内で使い回し、毎フレーム初期化コストを避ける。
         with mss.mss() as sct:
             while not self._stop.is_set():
-                t0 = time.perf_counter()
-
-                runtime = self.runtime_snapshot()
-                cfg = runtime.cfg
-                capture = runtime.capture
-                # 可視ビューから必要計算を決める。
-                (
-                    need_color,
-                    need_color_band,
-                    need_scatter,
-                    need_hsv_hist,
-                    need_graph_data,
-                    need_bgr_emit,
-                ) = live_graph_data.view_requirements(cfg)
-                loop_interval = self._loop_interval_sec(cfg)
-                idle_sleep_sec = max(0.01, loop_interval)
-                if not need_graph_data and not need_bgr_emit:
-                    # 表示先が1つもない間はキャプチャ/解析を休止してCPU使用率を下げる。
-                    time.sleep(idle_sleep_sec)
-                    continue
-                if self._result_inflight.is_set():
-                    # UIが前フレームを消費中の間は新規キャプチャを抑止して無駄負荷を避ける。
-                    time.sleep(idle_sleep_sec)
-                    continue
-
-                # 1フレーム取得。
-                bgr, cap = self._capture_frame_for_loop(sct, capture)
-                if bgr is None or cap is None:
-                    continue
-
-                # 今回フレームを通知するか判定。
-                emit_now, graph_update = self._emit_and_graph_update_flags(cfg, bgr)
-                # UI未消費で結果が捨てられる状態なら重い計算を省く。
-                can_emit_now = bool(emit_now and not self._result_inflight.is_set())
-                # 必要時のみ重い集計を走らせる。
-                graph_data = self._graph_data_for_frame(
-                    emit_now=can_emit_now,
-                    graph_update=graph_update,
-                    need_graph_data=need_graph_data,
-                    bgr=bgr,
-                    cfg=cfg,
-                    need_color=need_color,
-                    need_color_band=need_color_band,
-                    need_scatter=need_scatter,
-                    need_hsv_hist=need_hsv_hist,
-                )
-
-                if can_emit_now:
-                    # グラフ更新なしでも画像プレビューが必要なら通知する。
-                    should_emit_payload = need_bgr_emit or (graph_update and need_graph_data)
-                    if should_emit_payload:
-                        dt_ms = (time.perf_counter() - t0) * 1000.0
-                        payload = live_graph_data.build_result_payload(
-                            bgr=bgr,
-                            cap=cap,
-                            graph_data=graph_data,
-                            graph_update=bool(graph_update),
-                            need_bgr_emit=bool(need_bgr_emit),
-                            dt_ms=float(dt_ms),
-                        )
-                        self._emit_result_if_possible(payload, cfg=cfg)
-
-                # ループ周期を維持。
-                remain = loop_interval - (time.perf_counter() - t0)
-                if remain > 0:
-                    time.sleep(remain)
+                self._run_loop_iteration(sct)

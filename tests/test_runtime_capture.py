@@ -238,3 +238,53 @@ def test_apply_screen_capture_source_restore_applies_saved_screen_roi() -> None:
     assert call["target_hwnd"] is None
     assert call["roi_rel"] is None
     assert _rect_tuple(call["roi_abs"]) == (5, 6, 70, 80)
+
+
+def test_capture_preflight_message_returns_shared_window_message() -> None:
+    main_window = SimpleNamespace(
+        combo_capture_source=SimpleNamespace(currentData=lambda: runtime_capture.C.CAPTURE_SOURCE_WINDOW),
+        worker=SimpleNamespace(
+            capture_selection=lambda: SimpleNamespace(target_hwnd=None, roi_rel=None, roi_abs=None)
+        ),
+    )
+
+    assert runtime_capture.capture_preflight_message(main_window) == "ターゲットウィンドウを選択してください"
+
+
+def test_capture_preflight_result_returns_not_ready_for_window_without_target() -> None:
+    main_window = SimpleNamespace(
+        combo_capture_source=SimpleNamespace(currentData=lambda: runtime_capture.C.CAPTURE_SOURCE_WINDOW),
+        worker=SimpleNamespace(
+            capture_selection=lambda: SimpleNamespace(target_hwnd=None, roi_rel=None, roi_abs=None)
+        ),
+    )
+
+    result = runtime_capture.capture_preflight_result(main_window)
+
+    assert result.ready is False
+    assert result.message == "ターゲットウィンドウを選択してください"
+
+
+def test_capture_preflight_message_returns_shared_screen_message() -> None:
+    main_window = SimpleNamespace(
+        combo_capture_source=SimpleNamespace(currentData=lambda: runtime_capture.C.CAPTURE_SOURCE_SCREEN),
+        worker=SimpleNamespace(
+            capture_selection=lambda: SimpleNamespace(target_hwnd=None, roi_rel=None, roi_abs=None)
+        ),
+    )
+
+    assert runtime_capture.capture_preflight_message(main_window) == "キャプチャ領域を選択してください"
+
+
+def test_capture_preflight_result_returns_not_ready_for_screen_without_roi() -> None:
+    main_window = SimpleNamespace(
+        combo_capture_source=SimpleNamespace(currentData=lambda: runtime_capture.C.CAPTURE_SOURCE_SCREEN),
+        worker=SimpleNamespace(
+            capture_selection=lambda: SimpleNamespace(target_hwnd=None, roi_rel=None, roi_abs=None)
+        ),
+    )
+
+    result = runtime_capture.capture_preflight_result(main_window)
+
+    assert result.ready is False
+    assert result.message == "キャプチャ領域を選択してください"

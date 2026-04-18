@@ -246,14 +246,9 @@ def _restore_visibility_after_flag_change(
     saved_geometry: QRect,
 ) -> None:
     """WindowFlag 切替後の表示状態を復元する。"""
-    widget.show()
-    if (
-        widget.isWindow()
-        and saved_geometry.isValid()
-        and widget.geometry() != saved_geometry
-        and not isinstance(widget, QDockWidget)
-    ):
+    if widget.isWindow() and saved_geometry.isValid():
         widget.setGeometry(saved_geometry)
+    widget.show()
     if HAS_WIN32 and widget.isWindow():
         _set_native_window_topmost_if_needed(widget, desired, force=True)
     if desired or was_active:
@@ -315,6 +310,8 @@ def sync_all_on_top_widgets(main_window):
         set_widget_on_top(main_window, main_window.preview_window, enabled)
     if hasattr(main_window, "_settings_window") and main_window._settings_window is not None:
         set_widget_on_top(main_window, main_window._settings_window, enabled)
+    if hasattr(main_window, "_canvas_preview_window") and main_window._canvas_preview_window is not None:
+        set_widget_on_top(main_window, main_window._canvas_preview_window, enabled)
     for dock in getattr(main_window, "_dock_map", {}).values():
         sync_dock_on_top(main_window, dock)
 
@@ -324,6 +321,37 @@ def refresh_topmost_if_enabled(main_window) -> None:
     if not is_always_on_top_enabled(main_window):
         return
     _refresh_native_topmost_windows(main_window)
+
+
+def present_top_level_widget(
+    main_window,
+    widget: QWidget | None,
+    *,
+    fit_before_show,
+    on_top: bool | None = None,
+    raise_window: bool = True,
+    activate_window: bool = True,
+) -> None:
+    """トップレベルウィジェットを位置確定後に前面表示する。"""
+    if widget is None:
+        return
+    desired = is_always_on_top_enabled(main_window) if on_top is None else bool(on_top)
+    was_visible = bool(widget.isVisible())
+    was_minimized = bool(widget.windowState() & Qt.WindowMinimized)
+    set_widget_on_top(main_window, widget, desired)
+    fit_before_show()
+    if was_minimized:
+        widget.setWindowState(widget.windowState() & ~Qt.WindowMinimized)
+        widget.showNormal()
+    elif not was_visible:
+        widget.show()
+    if was_minimized or not was_visible:
+        # hidden/minimized からの再表示では、表示後に native HWND へも最前面状態を同期する。
+        set_widget_on_top(main_window, widget, desired)
+    if bool(raise_window):
+        widget.raise_()
+    if bool(activate_window):
+        widget.activateWindow()
 
 
 def _sync_on_top_widgets_after_toggle(main_window, *, desired: bool) -> None:
@@ -365,11 +393,11 @@ def present_settings_window(main_window, center_on_parent: bool = False):
     if not hasattr(main_window, "_settings_window"):
         return
     win = main_window._settings_window
-    set_widget_on_top(main_window, win, is_always_on_top_enabled(main_window))
-    main_window._fit_dialog_to_desktop(win, center_on_parent=center_on_parent)
-    if win.windowState() & Qt.WindowMinimized:
-        win.setWindowState((win.windowState() & ~Qt.WindowMinimized) | Qt.WindowActive)
-        win.showNormal()
-    win.show()
-    win.raise_()
-    win.activateWindow()
+    present_top_level_widget(
+        main_window,
+        win,
+        fit_before_show=lambda: main_window._fit_dialog_to_desktop(
+            win,
+            center_on_parent=center_on_parent,
+        ),
+    )
