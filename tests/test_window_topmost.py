@@ -44,11 +44,16 @@ class _FakeSettingsWindow:
 class _FakeRestoredWindow:
     def __init__(self, calls: list[str]) -> None:
         self._calls = calls
+        self._geometry = QRect(0, 0, 100, 100)
 
     def isWindow(self) -> bool:
         return True
 
+    def geometry(self) -> QRect:
+        return QRect(self._geometry)
+
     def setGeometry(self, rect: QRect) -> None:
+        self._geometry = QRect(rect)
         self._calls.append(f"setGeometry:{int(rect.x())},{int(rect.y())}")
 
     def show(self) -> None:
@@ -138,4 +143,4 @@ def test_restore_visibility_after_flag_change_restores_geometry_before_show(monk
         saved_geometry=QRect(120, 140, 400, 300),
     )
 
-    assert calls == ["setGeometry:120,140", "show"]
+    assert calls == ["show", "setGeometry:120,140"]

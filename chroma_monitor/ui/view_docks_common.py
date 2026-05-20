@@ -11,6 +11,10 @@ from PySide6.QtWidgets import (
 
 from ..util import constants as C
 
+_GRAPH_REFRESH_DOCK_NAMES = frozenset(
+    ("dock_color", "dock_color_band", "dock_scatter", "dock_hist")
+)
+
 
 class UniformMinDockWidget(QDockWidget):
     """全ビューで共通の最小サイズヒントを返すドック。"""
@@ -75,11 +79,7 @@ def configure_view_dock(main_window, dock: QDockWidget) -> None:
     dock.visibilityChanged.connect(main_window._sync_tabbed_dock_title_bars)
 
     def _on_visibility_changed(visible: bool, *, mw=main_window, d=dock) -> None:
-        is_visible = bool(visible)
-        if is_visible and getattr(d, "_attach_on_next_show", False):
-            d._attach_on_next_show = False
-        if is_visible:
-            mw._restore_dock_from_snapshot(d)
+        _handle_view_dock_visibility_changed(mw, d, bool(visible))
 
     dock.visibilityChanged.connect(_on_visibility_changed)
 
@@ -112,6 +112,35 @@ def build_dock_actions(main_window) -> dict[str, object]:
         if action is not None:
             dock_actions[dock_name] = action
     return dock_actions
+
+
+def _dock_name_from_object(main_window, dock) -> str | None:
+    """Return the registered dock name for a dock widget."""
+    dock_name_map = getattr(main_window, "_dock_name_by_object", None)
+    if isinstance(dock_name_map, dict):
+        dock_name = dock_name_map.get(dock)
+        if dock_name is not None:
+            return str(dock_name)
+    for name, mapped in getattr(main_window, "_dock_map", {}).items():
+        if mapped is dock:
+            return str(name)
+    return None
+
+
+def _handle_view_dock_visibility_changed(main_window, dock, visible: bool) -> None:
+    """Handle dock visibility in the order worker sync -> refresh -> restore."""
+    is_visible = bool(visible)
+    if is_visible and getattr(dock, "_attach_on_next_show", False):
+        dock._attach_on_next_show = False
+    main_window._sync_worker_view_flags()
+    if not is_visible:
+        return
+    dock_name = _dock_name_from_object(main_window, dock)
+    if dock_name in _GRAPH_REFRESH_DOCK_NAMES:
+        request_graph_refresh_once = getattr(main_window.worker, "request_graph_refresh_once", None)
+        if callable(request_graph_refresh_once):
+            request_graph_refresh_once()
+    main_window._restore_dock_from_snapshot(dock)
 
 
 def detach_initially_hidden_docks(main_window) -> None:

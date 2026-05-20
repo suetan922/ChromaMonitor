@@ -76,8 +76,25 @@ def maybe_restore_dock_snapshot_after_event(main_window, dock, event_type) -> No
         main_window._restore_dock_from_snapshot(dock)
 
 
+def remember_last_docked_size(main_window, dock) -> None:
+    """フロートでないドックの直近サイズを必要時のみ記録する。"""
+    _ = main_window
+    if bool(dock.isFloating()):
+        return
+    size = dock.size()
+    if size.width() <= 0 or size.height() <= 0:
+        return
+    try:
+        is_tabbed = len(main_window.tabifiedDockWidgets(dock)) > 0
+    except Exception:
+        is_tabbed = False
+    if (not is_tabbed) or int(size.height()) >= 96:
+        dock._last_docked_size = (int(size.width()), int(size.height()))
+
+
 def handle_dock_layout_event(main_window, dock, event_type) -> None:
     """共通ドックレイアウトイベントを処理する。"""
+    remember_last_docked_size(main_window, dock)
     is_floating = bool(dock.isFloating())
     should_pause = bool(
         event_type == QEvent.Resize

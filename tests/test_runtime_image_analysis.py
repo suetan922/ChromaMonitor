@@ -317,7 +317,7 @@ def test_on_start_warns_when_window_capture_target_is_missing(monkeypatch) -> No
     assert main_window._loaded_file_title_name == "sample.psd"
     assert main_window.window_title == "ChromaMonitor - sample.psd"
     assert main_window.btn_start_bar.checked is False
-    assert main_window.btn_stop_bar.checked is False
+    assert main_window.btn_stop_bar.checked is True
 
 
 def test_on_start_warns_when_screen_capture_roi_is_missing(monkeypatch) -> None:
@@ -359,9 +359,7 @@ def test_on_start_warns_when_screen_capture_roi_is_missing(monkeypatch) -> None:
     assert main_window._loaded_file_title_name == "sample.psd"
     assert main_window.window_title == "ChromaMonitor - sample.psd"
     assert main_window.btn_start_bar.checked is False
-    assert main_window.btn_stop_bar.checked is False
-
-
+    assert main_window.btn_stop_bar.checked is True
 def test_on_start_during_image_analysis_restores_run_toggle_state(monkeypatch) -> None:
     cleared_titles: list[bool] = []
     cleared_sources: list[bool] = []
@@ -391,7 +389,7 @@ def test_on_start_during_image_analysis_restores_run_toggle_state(monkeypatch) -
     assert main_window._loaded_file_title_name == "sample.psd"
     assert main_window.window_title == "ChromaMonitor - sample.psd"
     assert main_window.btn_start_bar.checked is False
-    assert main_window.btn_stop_bar.checked is False
+    assert main_window.btn_stop_bar.checked is True
 
 
 def test_on_load_image_from_clipboard_sets_clipboard_title(monkeypatch) -> None:

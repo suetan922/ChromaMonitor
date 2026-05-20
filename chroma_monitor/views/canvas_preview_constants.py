@@ -18,16 +18,6 @@ class CanvasRatioPreset:
     default_name: str = ""
 
 
-@dataclass(frozen=True, slots=True)
-class CanvasSplitPreset:
-    """分割表示プリセット。"""
-
-    key: str
-    label: str
-    cols: int
-    rows: int
-
-
 CANVAS_ORIENTATION_LANDSCAPE = "landscape"
 CANVAS_ORIENTATION_PORTRAIT = "portrait"
 CANVAS_ORIENTATIONS = (
@@ -37,31 +27,7 @@ CANVAS_ORIENTATIONS = (
 
 CANVAS_FIT_CONTAIN = "contain"
 CANVAS_FIT_COVER = "cover"
-CANVAS_FIT_ACTUAL = "actual"
 CANVAS_FIT_CUSTOM = "custom"
-CANVAS_FIT_MODES = (
-    CANVAS_FIT_CONTAIN,
-    CANVAS_FIT_COVER,
-    CANVAS_FIT_ACTUAL,
-    CANVAS_FIT_CUSTOM,
-)
-CANVAS_FIT_LABELS = {
-    CANVAS_FIT_CONTAIN: "全体を収める",
-    CANVAS_FIT_COVER: "埋める",
-    CANVAS_FIT_ACTUAL: "等倍",
-    CANVAS_FIT_CUSTOM: "カスタム",
-}
-
-CANVAS_PREVIEW_MODE_CANVAS = "canvas"
-CANVAS_PREVIEW_MODE_SPLIT = "split"
-CANVAS_PREVIEW_MODES = (
-    CANVAS_PREVIEW_MODE_CANVAS,
-    CANVAS_PREVIEW_MODE_SPLIT,
-)
-CANVAS_PREVIEW_MODE_LABELS = {
-    CANVAS_PREVIEW_MODE_CANVAS: "キャンバス",
-    CANVAS_PREVIEW_MODE_SPLIT: "分割",
-}
 
 CANVAS_RATIO_PRESETS = (
     CanvasRatioPreset(
@@ -114,17 +80,8 @@ CANVAS_RATIO_PRESETS = (
     ),
 )
 
-CANVAS_SPLIT_PRESETS = (
-    CanvasSplitPreset("v2", "縦2", 2, 1),
-    CanvasSplitPreset("v3", "縦3", 3, 1),
-    CanvasSplitPreset("v4", "縦4", 4, 1),
-    CanvasSplitPreset("g2", "2x2", 2, 2),
-    CanvasSplitPreset("g3", "3x3", 3, 3),
-)
-
 DEFAULT_CANVAS_RATIO_PRESET_ID = "standard_4_3"
 DEFAULT_CANVAS_RATIO_PRESET_NAME = DEFAULT_CANVAS_RATIO_PRESET_ID
-DEFAULT_CANVAS_SPLIT_PRESET_KEY = "v2"
 CANVAS_PREVIEW_BACKGROUND_LIGHT = "light"
 CANVAS_PREVIEW_BACKGROUND_DARK = "dark"
 CANVAS_PREVIEW_BACKGROUND_MODES = (

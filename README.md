@@ -20,6 +20,12 @@ ChromaMonitor は、キャプチャした画面や画像ファイルをもとに
 2. Start を押して解析開始
 3. 必要なウィンドウを表示して確認
 
+## 開発環境
+- PySide6 は `6.8.1.1` に固定しています。
+- 開発・検証は Python 3.11 から 3.13 を推奨します。
+- EXE 同梱環境に合わせる場合は Python 3.11 + PySide6 6.8.1.1 を推奨します。
+- テスト実行は `.\.venv311\Scripts\python.exe -B -m pytest -p no:cacheprovider` を推奨します。
+
 ## ダウンロード
 Releases からダウンロードしてください。
 

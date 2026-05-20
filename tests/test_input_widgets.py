@@ -6,6 +6,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QMenu, QPushButton
 
 from chroma_monitor.ui.input_widgets import SplitMenuToolButton
+from chroma_monitor.ui.main_window import window_shell
 from chroma_monitor.util.theme import get_ui_theme
 from chroma_monitor.util.theme_stylesheet import build_app_stylesheet
 
@@ -39,3 +40,26 @@ def test_split_menu_tool_button_matches_run_button_height_and_reserves_menu_spac
 
     assert load_button.sizeHint().height() == start_button.sizeHint().height()
     assert load_button.minimumSizeHint().width() >= text_width + menu_width + 16
+
+
+def test_menu_popup_width_fits_clipboard_load_action() -> None:
+    app = _app()
+    app.setStyleSheet(build_app_stylesheet(get_ui_theme(None)))
+
+    menu = QMenu()
+    action_text = "クリップボードから読み込み"
+    menu.addAction(action_text)
+    window_shell.ensure_menu_popup_width(None, menu)
+
+    text_width = menu.fontMetrics().horizontalAdvance(action_text)
+    assert menu.minimumWidth() >= text_width + 96
+
+
+def test_split_button_stylesheet_has_named_selector_and_menu_separator() -> None:
+    dark = build_app_stylesheet(get_ui_theme("dark"))
+
+    assert "QToolButton#fileLoadSplitButton" in dark
+    assert "QToolButton#fileLoadSplitButton:focus" in dark
+    assert "QToolButton#fileLoadSplitButton:open" in dark
+    assert "QToolButton#fileLoadSplitButton:open:focus" in dark
+    assert "border-left:1px solid" in dark

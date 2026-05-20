@@ -2,6 +2,7 @@
 
 from dataclasses import FrozenInstanceError
 
+import numpy as np
 import pytest
 from PySide6.QtCore import QRect
 
@@ -38,3 +39,37 @@ def test_cfg_property_returns_frozen_replaced_snapshot() -> None:
     assert before.interval_sec == C.DEFAULT_INTERVAL_SEC
     assert after.interval_sec == 0.5
     assert after.sample_points == C.ANALYZER_MIN_SAMPLE_POINTS
+
+
+def test_request_graph_refresh_once_forces_next_interval_graph_update_once() -> None:
+    worker = AnalyzerWorker()
+    frame = np.zeros((8, 8, 3), dtype=np.uint8)
+    worker.set_mode(C.UPDATE_MODE_INTERVAL)
+    worker.set_graph_every(5)
+
+    before = worker._frame_decision_for_loop(worker.cfg, frame)
+    worker.request_graph_refresh_once()
+    forced = worker._frame_decision_for_loop(worker.cfg, frame)
+    after = worker._frame_decision_for_loop(worker.cfg, frame)
+
+    assert before.emit_now is True
+    assert before.graph_update is False
+    assert forced.emit_now is True
+    assert forced.graph_update is True
+    assert after.emit_now is True
+    assert after.graph_update is False
+
+
+def test_request_graph_refresh_once_forces_next_change_emit_once() -> None:
+    worker = AnalyzerWorker()
+    frame = np.zeros((16, 16, 3), dtype=np.uint8)
+    worker.set_mode(C.UPDATE_MODE_CHANGE)
+
+    worker.request_graph_refresh_once()
+    forced = worker._frame_decision_for_loop(worker.cfg, frame)
+    after = worker._frame_decision_for_loop(worker.cfg, frame)
+
+    assert forced.emit_now is True
+    assert forced.graph_update is True
+    assert after.emit_now is False
+    assert after.graph_update is False

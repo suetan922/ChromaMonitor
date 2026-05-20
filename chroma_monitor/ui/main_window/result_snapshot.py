@@ -360,12 +360,12 @@ def _ensure_snapshot_graph_data_for_dock(main_window, dock_name: str) -> bool:
     # 既に足りていれば再計算しない。
     if _snapshot_has_graph_data_for_dock(snapshot, dock_name):
         return True
-    # 稼働中はワーカーの更新を待つ。
-    if _is_worker_running(main_window):
-        return False
 
     bgr_preview = snapshot.get("bgr_preview")
     if bgr_preview is None:
+        # 稼働中はワーカーの更新を待つ。
+        if _is_worker_running(main_window):
+            return False
         # 停止中は1回だけ手動キャプチャする。
         bgr_preview, cap, err = main_window.worker.capture_once()
         if bgr_preview is None:

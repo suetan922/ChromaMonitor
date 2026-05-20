@@ -7,6 +7,8 @@ from PySide6.QtWidgets import QApplication, QMainWindow, QWidget
 
 from chroma_monitor.views.image_drop_target import (
     DockAreaImageDropController,
+    _apply_overlay_label_style,
+    _extract_supported_drop_paths,
     dock_area_overlay_rect,
     dock_area_union_rect,
 )
@@ -33,6 +35,37 @@ class _FakeDock:
 
     def geometry(self) -> QRect:
         return QRect(self._rect)
+
+
+class _FakeOverlay:
+    def __init__(self) -> None:
+        self.styles: list[str] = []
+
+    def setStyleSheet(self, stylesheet: str) -> None:
+        self.styles.append(str(stylesheet))
+
+
+class _FakeUrl:
+    def __init__(self, path: str, *, local: bool = True) -> None:
+        self._path = str(path)
+        self._local = bool(local)
+
+    def isLocalFile(self) -> bool:
+        return self._local
+
+    def toLocalFile(self) -> str:
+        return self._path
+
+
+class _FakeMimeData:
+    def __init__(self, urls) -> None:
+        self._urls = list(urls)
+
+    def hasUrls(self) -> bool:
+        return bool(self._urls)
+
+    def urls(self):
+        return list(self._urls)
 
 
 def test_dock_area_union_rect_uses_visible_non_floating_docks_only() -> None:
@@ -82,3 +115,31 @@ def test_dock_area_drop_controller_uses_central_widget_when_all_docks_hidden() -
     assert central.acceptDrops() is True
     assert controller._dock_area_rect() == central.geometry()
     main_window.close()
+
+
+def test_apply_overlay_label_style_skips_reapply_when_theme_is_unchanged() -> None:
+    overlay = _FakeOverlay()
+
+    style_key = _apply_overlay_label_style(overlay, theme_name=None, cached_key=None)
+    repeated_key = _apply_overlay_label_style(overlay, theme_name=None, cached_key=style_key)
+
+    assert repeated_key == style_key
+    assert len(overlay.styles) == 1
+
+
+def test_extract_supported_drop_paths_filters_duplicates_and_non_matching_files() -> None:
+    mime_data = _FakeMimeData(
+        (
+            _FakeUrl("C:/images/a.png"),
+            _FakeUrl("C:/images/a.png"),
+            _FakeUrl("C:/images/b.jpg"),
+            _FakeUrl("C:/images/remote.png", local=False),
+        )
+    )
+
+    paths = _extract_supported_drop_paths(
+        mime_data,
+        lambda path: str(path).lower().endswith(".png"),
+    )
+
+    assert paths == ["C:/images/a.png"]

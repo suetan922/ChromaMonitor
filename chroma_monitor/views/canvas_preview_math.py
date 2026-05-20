@@ -9,12 +9,10 @@ from fractions import Fraction
 
 from ..util.debug_log import write_window_layout_debug_log
 from .canvas_preview_constants import (
-    CANVAS_FIT_ACTUAL,
     CANVAS_FIT_COVER,
     CANVAS_ORIENTATION_LANDSCAPE,
     CANVAS_ORIENTATION_PORTRAIT,
     CanvasRatioPreset,
-    CanvasSplitPreset,
 )
 
 _SPECIAL_RATIO_TEXTS = {
@@ -276,31 +274,28 @@ def fit_scale_for_mode(
         image_height = max(1, int(image_height))
         canvas_width = max(1, int(canvas_width))
         canvas_height = max(1, int(canvas_height))
-        if fit_mode == CANVAS_FIT_ACTUAL:
-            scale = 1.0
+        radians = math.radians(float(rotation_deg))
+        cos_v = abs(math.cos(radians))
+        sin_v = abs(math.sin(radians))
+        if fit_mode == CANVAS_FIT_COVER:
+            required_width = float(canvas_width) * cos_v + float(canvas_height) * sin_v
+            required_height = float(canvas_width) * sin_v + float(canvas_height) * cos_v
+            scale = max(
+                required_width / float(image_width),
+                required_height / float(image_height),
+            ) * _COVER_SCALE_EPSILON
         else:
-            radians = math.radians(float(rotation_deg))
-            cos_v = abs(math.cos(radians))
-            sin_v = abs(math.sin(radians))
-            if fit_mode == CANVAS_FIT_COVER:
-                required_width = float(canvas_width) * cos_v + float(canvas_height) * sin_v
-                required_height = float(canvas_width) * sin_v + float(canvas_height) * cos_v
-                scale = max(
-                    required_width / float(image_width),
-                    required_height / float(image_height),
-                ) * _COVER_SCALE_EPSILON
+            bounds_width, bounds_height = rotated_bounds_size(
+                image_width,
+                image_height,
+                rotation_deg,
+            )
+            if bounds_width <= 0.0 or bounds_height <= 0.0:
+                scale = 1.0
             else:
-                bounds_width, bounds_height = rotated_bounds_size(
-                    image_width,
-                    image_height,
-                    rotation_deg,
-                )
-                if bounds_width <= 0.0 or bounds_height <= 0.0:
-                    scale = 1.0
-                else:
-                    scale_x = float(canvas_width) / float(bounds_width)
-                    scale_y = float(canvas_height) / float(bounds_height)
-                    scale = min(scale_x, scale_y)
+                scale_x = float(canvas_width) / float(bounds_width)
+                scale_y = float(canvas_height) / float(bounds_height)
+                scale = min(scale_x, scale_y)
         write_window_layout_debug_log(
             "canvas_preview_math_fit_scale_for_mode_ok",
             fit_mode=str(fit_mode),
@@ -575,16 +570,6 @@ def snap_transform_to_canvas_guides(
     )
 
 
-def split_line_fractions(split_preset: CanvasSplitPreset) -> tuple[tuple[float, bool], ...]:
-    """分割線位置を 0.0-1.0 比率で返す。`True` は縦線。"""
-    lines: list[tuple[float, bool]] = []
-    for col in range(1, max(1, int(split_preset.cols))):
-        lines.append((float(col) / float(split_preset.cols), True))
-    for row in range(1, max(1, int(split_preset.rows))):
-        lines.append((float(row) / float(split_preset.rows), False))
-    return tuple(lines)
-
-
 __all__ = [
     "CanvasPreviewExtents",
     "CanvasPreviewSnapResult",
@@ -601,5 +586,4 @@ __all__ = [
     "ratio_text_for_values",
     "rotated_bounds_size",
     "snap_transform_to_canvas_guides",
-    "split_line_fractions",
 ]

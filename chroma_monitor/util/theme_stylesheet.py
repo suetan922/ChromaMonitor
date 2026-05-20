@@ -33,6 +33,10 @@ def _build_base_styles(theme: UiTheme) -> str:
             color:{theme.text_muted};
             font-size:14px;
         }}
+        QLabel[chromaRole="vectorscopeWarning"] {{
+            color:{theme.warning_muted};
+            font-size:12px;
+        }}
         QLabel[chromaRole="detailTitle"] {{
             color:{theme.text_primary};
             font-size:12px;
@@ -88,6 +92,9 @@ def _build_base_styles(theme: UiTheme) -> str:
             color:{theme.text_primary};
             border:1px solid {theme.menu_border};
         }}
+        QMenu::item {{
+            padding:6px 28px 6px 18px;
+        }}
         QMenu::item:selected {{
             background:{theme.accent};
             color:{theme.text_inverse};
@@ -128,21 +135,74 @@ def _build_button_styles(theme: UiTheme) -> str:
             font-weight:600;
         }}
         QToolButton#fileLoadSplitButton {{
+            background:{theme.panel_alt_bg};
+            border:1px solid {theme.border_strong};
+            color:{theme.text_primary};
             font-weight:600;
             border-radius:8px;
             min-width:0px;
-            padding:4px 22px 4px 10px;
+            padding:4px 22px 5px 10px;
+        }}
+        QToolButton#fileLoadSplitButton:hover {{
+            background:{theme.button_hover_bg};
+            border:1px solid {theme.border_strong};
+        }}
+        QToolButton#fileLoadSplitButton:focus {{
+            outline:none;
+            background:{theme.panel_alt_bg};
+            border:1px solid {theme.border_strong};
+            color:{theme.text_primary};
+        }}
+        QToolButton#fileLoadSplitButton:hover:focus {{
+            background:{theme.button_hover_bg};
+            border:1px solid {theme.border_strong};
+        }}
+        QToolButton#fileLoadSplitButton:pressed {{
+            background:{theme.button_pressed_bg};
+            border:1px solid {theme.border_strong};
+            color:{theme.text_primary};
+        }}
+        QToolButton#fileLoadSplitButton:pressed:focus {{
+            background:{theme.button_pressed_bg};
+            border:1px solid {theme.border_strong};
+            color:{theme.text_primary};
+        }}
+        QToolButton#fileLoadSplitButton:open {{
+            outline:none;
+            background:{theme.button_pressed_bg};
+            border:1px solid {theme.border_strong};
+            color:{theme.text_primary};
+        }}
+        QToolButton#fileLoadSplitButton:open:focus {{
+            outline:none;
+            background:{theme.button_pressed_bg};
+            border:1px solid {theme.border_strong};
+            color:{theme.text_primary};
+        }}
+        QToolButton#fileLoadSplitButton:disabled {{
+            background:{theme.input_disabled_bg};
+            color:{theme.text_disabled};
+            border:1px solid {theme.border};
         }}
         QToolButton#fileLoadSplitButton::menu-button {{
             width:15px;
             subcontrol-origin: padding;
             subcontrol-position: top right;
-            border-left:1px solid {theme.border};
+            border-left:1px solid {theme.border_strong};
             border-top-right-radius:7px;
             border-bottom-right-radius:7px;
             padding:0;
         }}
         QToolButton#fileLoadSplitButton::menu-button:hover {{
+            background:{theme.button_hover_bg};
+            border-left:1px solid {theme.border_strong};
+        }}
+        QToolButton#fileLoadSplitButton::menu-button:pressed {{
+            background:{theme.button_pressed_bg};
+            border-left:1px solid {theme.border_strong};
+        }}
+        QToolButton#fileLoadSplitButton::menu-button:open {{
+            background:{theme.button_pressed_bg};
             border-left:1px solid {theme.border_strong};
         }}
         QToolButton#fileLoadSplitButton::menu-indicator {{
@@ -166,20 +226,6 @@ def _build_button_styles(theme: UiTheme) -> str:
             background:{theme.danger_bg};
             border:1px solid {theme.danger_border};
             color:{theme.text_inverse};
-        }}
-        QToolButton[chromaDockTabCloseButton="true"] {{
-            border:none;
-            background:transparent;
-            color:{theme.text_muted};
-            padding:0;
-            font-size:13px;
-            font-weight:700;
-        }}
-        QToolButton[chromaDockTabCloseButton="true"]:hover {{
-            color:{theme.danger_bg};
-        }}
-        QToolButton[chromaDockTabCloseButton="true"]:pressed {{
-            color:{theme.danger_border};
         }}
     """
 
@@ -258,6 +304,45 @@ def _build_input_styles(theme: UiTheme) -> str:
             background:transparent;
             color:{theme.text_primary};
             spacing:6px;
+        }}
+        QRadioButton::indicator {{
+            width:16px;
+            height:16px;
+            border-radius:8px;
+        }}
+        QRadioButton::indicator:unchecked {{
+            background:{theme.input_bg};
+            border:1px solid {theme.border_strong};
+        }}
+        QRadioButton::indicator:unchecked:hover {{
+            border:1px solid {theme.accent_hover};
+        }}
+        QRadioButton::indicator:checked {{
+            background:qradialgradient(
+                cx:0.5, cy:0.5, radius:0.58, fx:0.5, fy:0.5,
+                stop:0 {theme.accent},
+                stop:0.38 {theme.accent},
+                stop:0.42 {theme.input_bg},
+                stop:1 {theme.input_bg}
+            );
+            border:1px solid {theme.accent};
+        }}
+        QRadioButton::indicator:checked:hover {{
+            border:1px solid {theme.accent_hover};
+        }}
+        QRadioButton::indicator:disabled:unchecked {{
+            background:{theme.input_disabled_bg};
+            border:1px solid {theme.border};
+        }}
+        QRadioButton::indicator:disabled:checked {{
+            background:qradialgradient(
+                cx:0.5, cy:0.5, radius:0.58, fx:0.5, fy:0.5,
+                stop:0 {theme.text_disabled},
+                stop:0.38 {theme.text_disabled},
+                stop:0.42 {theme.input_disabled_bg},
+                stop:1 {theme.input_disabled_bg}
+            );
+            border:1px solid {theme.border};
         }}
         QRadioButton[chromaRole="canvasOrientation"] {{
             color:{theme.text_secondary};
@@ -377,8 +462,8 @@ def _build_container_styles(theme: UiTheme) -> str:
             color:{theme.text_secondary};
             border:1px solid {theme.tab_border};
             padding:5px 10px;
-            border-top-left-radius:4px;
-            border-top-right-radius:4px;
+            border-top-left-radius:0px;
+            border-top-right-radius:0px;
         }}
         QTabBar::tab:hover {{
             background:{theme.tab_hover_bg};
@@ -396,6 +481,9 @@ def _build_container_styles(theme: UiTheme) -> str:
 def _build_scatter_slider_styles(theme: UiTheme) -> str:
     """散布図色相スライダー専用の stylesheet を返す。"""
     return f"""
+        QSlider#scatterHueSlider {{
+            background:transparent;
+        }}
         QSlider#scatterHueSlider::groove:vertical {{
             border:1px solid {theme.slider_groove_border};
             width:10px;
@@ -423,6 +511,7 @@ def _build_scatter_slider_styles(theme: UiTheme) -> str:
         QLabel#scatterHueValue {{
             color:{theme.text_secondary};
             font-size:11px;
+            background:transparent;
         }}
     """
 

@@ -67,7 +67,7 @@ def _snapshot_from_loaded_image(main_window) -> CanvasPreviewSnapshot | None:
 
 
 def _snapshot_from_latest_result(main_window) -> CanvasPreviewSnapshot | None:
-    """現在の表示内容から画像を返す。"""
+    """最終計算結果として保持している画像を返す。"""
     latest = getattr(main_window, "_latest_result_snapshot", None)
     if not isinstance(latest, dict):
         return None
@@ -77,24 +77,26 @@ def _snapshot_from_latest_result(main_window) -> CanvasPreviewSnapshot | None:
     title = getattr(main_window, "_loaded_file_title_name", "") or "表示中の画像"
     return CanvasPreviewSnapshot(
         bgr=bgr.copy(),
-        source_label="表示中の画像",
+        source_label="最終計算画像",
         title=str(title),
     )
 
 
+def _snapshot_from_current_capture(main_window) -> CanvasPreviewSnapshot | None:
+    """最新結果や読み込み画像がない場合だけ、現在のキャプチャから返す。"""
+    source_label = "選択範囲" if _has_capture_roi(main_window) else "表示中の画像"
+    return _snapshot_from_capture(main_window, source_label=source_label)
+
+
 def build_canvas_preview_snapshot(main_window) -> CanvasPreviewSnapshot | None:
     """優先順位に従ってキャンバスプレビュー用スナップショットを返す。"""
-    if _has_capture_roi(main_window):
-        snapshot = _snapshot_from_capture(main_window, source_label="選択範囲")
-        if snapshot is not None:
-            return snapshot
+    snapshot = _snapshot_from_latest_result(main_window)
+    if snapshot is not None:
+        return snapshot
     snapshot = _snapshot_from_loaded_image(main_window)
     if snapshot is not None:
         return snapshot
-    snapshot = _snapshot_from_capture(main_window, source_label="表示中の画像")
-    if snapshot is not None:
-        return snapshot
-    return _snapshot_from_latest_result(main_window)
+    return _snapshot_from_current_capture(main_window)
 
 
 def show_canvas_preview_window(main_window) -> None:

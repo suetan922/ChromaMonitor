@@ -6,10 +6,25 @@ import os
 
 import numpy as np
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLabel, QMainWindow, QSizePolicy
+from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
+from PySide6.QtWidgets import (
+    QApplication,
+    QLabel,
+    QMainWindow,
+    QPushButton,
+    QSizePolicy,
+    QToolButton,
+    QVBoxLayout,
+)
 
 from chroma_monitor.ui import canvas_preview_dialog
 from chroma_monitor.util import constants as C
+from chroma_monitor.util.theme import build_palette, get_ui_theme
+from chroma_monitor.util.theme_stylesheet import build_app_stylesheet
+from chroma_monitor.views.canvas_preview_constants import (
+    CANVAS_PREVIEW_BACKGROUND_DARK,
+    CANVAS_PREVIEW_BACKGROUND_LIGHT,
+)
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -21,8 +36,11 @@ def _app() -> QApplication:
     return app
 
 
-def test_canvas_preview_dialog_init_completes_and_logs_steps(monkeypatch, tmp_path) -> None:
-    log_path = tmp_path / "canvas_preview_ui_debug.log"
+def test_canvas_preview_dialog_init_completes_and_logs_steps(monkeypatch) -> None:
+    log_dir = os.path.join(os.getcwd(), ".tmp_canvas_preview_tests")
+    os.makedirs(log_dir, exist_ok=True)
+    log_path = os.path.join(log_dir, "canvas_preview_ui_debug.log")
+    monkeypatch.setenv(C.DEBUG_UI_LOG_ENV, "1")
     monkeypatch.setenv(C.DEBUG_UI_LOG_PATH_ENV, str(log_path))
     monkeypatch.setattr(
         canvas_preview_dialog,
@@ -49,7 +67,11 @@ def test_canvas_preview_dialog_init_completes_and_logs_steps(monkeypatch, tmp_pa
     assert dialog.btn_background_dark.isChecked() is False
     assert dialog.slider_preview_zoom.value() == 100
     assert dialog.lbl_preview_zoom_value.text() == "100%"
+    assert dialog.btn_preview_zoom_reset.text() == "100%"
+    assert hasattr(dialog, "btn_preview_zoom_fit") is False
     assert dialog.preview_widget._image.isNull() is False
+    assert hasattr(dialog, "btn_actual") is False
+    assert "全体表示" not in {button.text() for button in dialog.findChildren(QPushButton)}
     assert dialog.isModal() is False
     assert dialog.isSizeGripEnabled() is True
     assert bool(dialog.windowFlags() & Qt.WindowMinimizeButtonHint)
@@ -60,10 +82,98 @@ def test_canvas_preview_dialog_init_completes_and_logs_steps(monkeypatch, tmp_pa
     main_window.close()
     app.processEvents()
 
-    log_text = log_path.read_text(encoding="utf-8")
+    with open(log_path, "r", encoding="utf-8") as handle:
+        log_text = handle.read()
     assert "canvas_preview_apply_initial_state_step_ok" in log_text
     assert "stage='apply_fit_mode'" in log_text
     assert "canvas_preview_apply_initial_state_ok" in log_text
+
+
+def test_canvas_preview_dialog_prefers_saved_background_tone(monkeypatch) -> None:
+    monkeypatch.setattr(
+        canvas_preview_dialog,
+        "load_config",
+        lambda: {
+            C.CFG_CANVAS_RATIO_PRESETS: [],
+            C.CFG_CANVAS_PREVIEW_BACKGROUND_TONE: CANVAS_PREVIEW_BACKGROUND_LIGHT,
+        },
+    )
+
+    app = _app()
+    main_window = QMainWindow()
+    main_window._ui_theme_name = C.UI_THEME_DARK
+    snapshot = canvas_preview_dialog.CanvasPreviewSnapshot(
+        bgr=np.zeros((120, 160, 3), dtype=np.uint8),
+        source_label="test",
+        title="test.png",
+    )
+
+    dialog = canvas_preview_dialog.CanvasPreviewDialog(main_window, snapshot)
+    app.processEvents()
+
+    assert dialog._background_tone == CANVAS_PREVIEW_BACKGROUND_LIGHT
+    assert dialog.btn_background_light.isChecked() is True
+    assert dialog.btn_background_dark.isChecked() is False
+
+    dialog.close()
+    main_window.close()
+    app.processEvents()
+
+
+def test_canvas_preview_dialog_uses_dark_background_by_default_in_dark_theme(monkeypatch) -> None:
+    monkeypatch.setattr(
+        canvas_preview_dialog,
+        "load_config",
+        lambda: {C.CFG_CANVAS_RATIO_PRESETS: []},
+    )
+
+    app = _app()
+    main_window = QMainWindow()
+    main_window._ui_theme_name = C.UI_THEME_DARK
+    snapshot = canvas_preview_dialog.CanvasPreviewSnapshot(
+        bgr=np.zeros((120, 160, 3), dtype=np.uint8),
+        source_label="test",
+        title="test.png",
+    )
+
+    dialog = canvas_preview_dialog.CanvasPreviewDialog(main_window, snapshot)
+    app.processEvents()
+
+    assert dialog._background_tone == CANVAS_PREVIEW_BACKGROUND_DARK
+    assert dialog.btn_background_light.isChecked() is False
+    assert dialog.btn_background_dark.isChecked() is True
+
+    dialog.close()
+    main_window.close()
+    app.processEvents()
+
+
+def test_canvas_preview_dialog_uses_light_background_by_default_in_light_theme(monkeypatch) -> None:
+    monkeypatch.setattr(
+        canvas_preview_dialog,
+        "load_config",
+        lambda: {C.CFG_CANVAS_RATIO_PRESETS: []},
+    )
+
+    app = _app()
+    main_window = QMainWindow()
+    main_window._ui_theme_name = C.UI_THEME_LIGHT
+    snapshot = canvas_preview_dialog.CanvasPreviewSnapshot(
+        bgr=np.zeros((120, 160, 3), dtype=np.uint8),
+        source_label="test",
+        title="test.png",
+    )
+
+    dialog = canvas_preview_dialog.CanvasPreviewDialog(main_window, snapshot)
+    app.processEvents()
+
+    assert dialog._background_tone == CANVAS_PREVIEW_BACKGROUND_LIGHT
+    assert dialog.btn_background_light.isChecked() is True
+    assert dialog.btn_background_dark.isChecked() is False
+
+    dialog.close()
+    main_window.close()
+    app.processEvents()
 
 
 def test_builtin_preset_can_save_name_only_and_user_preset_can_edit_all(monkeypatch) -> None:
@@ -175,6 +285,243 @@ def test_canvas_preview_dialog_uses_generic_export_filename(monkeypatch) -> None
     dialog.close()
     main_window.close()
     app.processEvents()
+
+
+def test_canvas_preview_dialog_center_and_individual_resets_keep_roles_separate(monkeypatch) -> None:
+    monkeypatch.setattr(
+        canvas_preview_dialog,
+        "load_config",
+        lambda: {C.CFG_CANVAS_RATIO_PRESETS: []},
+    )
+
+    app = _app()
+    main_window = QMainWindow()
+    main_window._ui_theme_name = C.UI_THEME_LIGHT
+    snapshot = canvas_preview_dialog.CanvasPreviewSnapshot(
+        bgr=np.zeros((120, 160, 3), dtype=np.uint8),
+        source_label="test",
+        title="test.png",
+    )
+
+    dialog = canvas_preview_dialog.CanvasPreviewDialog(main_window, snapshot)
+    app.processEvents()
+
+    display_layout = dialog.btn_fit.parentWidget().layout()
+    assert isinstance(display_layout, QVBoxLayout)
+    assert display_layout.indexOf(dialog.btn_fit) == 0
+    assert display_layout.indexOf(dialog.btn_fill) == 1
+    assert display_layout.indexOf(dialog.btn_center) == 2
+    assert dialog.btn_fit.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding
+    assert dialog.btn_fill.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding
+    assert dialog.btn_center.sizePolicy().horizontalPolicy() == QSizePolicy.Expanding
+
+    expected_reset_tooltips = {
+        dialog.btn_reset_offset_x: "X位置を初期値に戻す",
+        dialog.btn_reset_offset_y: "Y位置を初期値に戻す",
+        dialog.btn_reset_scale: "拡大率を初期値に戻す",
+    }
+    for button, tooltip in expected_reset_tooltips.items():
+        assert isinstance(button, QToolButton)
+        assert button.text() == ""
+        assert button.toolTip() == tooltip
+        assert button.accessibleName() == tooltip
+        assert button.icon().isNull() is False
+        assert button.iconSize().width() == 28
+        assert button.iconSize().height() == 28
+        assert button.minimumSizeHint().width() >= 20
+        assert button.icon().pixmap(button.iconSize()).isNull() is False
+
+    dialog._set_transform(offset_x=24.0, offset_y=-18.0, scale=1.7)
+    app.processEvents()
+    dialog.btn_center.click()
+    app.processEvents()
+    assert dialog._transform.offset_x == 0.0
+    assert dialog._transform.offset_y == 0.0
+    assert dialog._transform.scale == 1.7
+
+    dialog._set_transform(offset_x=24.0, offset_y=-18.0, scale=1.7)
+    app.processEvents()
+    dialog.btn_reset_offset_x.click()
+    app.processEvents()
+    assert dialog._transform.offset_x == 0.0
+    assert dialog._transform.offset_y == -18.0
+    assert dialog._transform.scale == 1.7
+
+    dialog._set_transform(offset_x=24.0, offset_y=-18.0, scale=1.7)
+    app.processEvents()
+    dialog.btn_reset_offset_y.click()
+    app.processEvents()
+    assert dialog._transform.offset_x == 24.0
+    assert dialog._transform.offset_y == 0.0
+    assert dialog._transform.scale == 1.7
+
+    dialog._set_transform(offset_x=24.0, offset_y=-18.0, scale=1.7)
+    app.processEvents()
+    dialog.btn_reset_scale.click()
+    app.processEvents()
+    assert dialog._transform.offset_x == 24.0
+    assert dialog._transform.offset_y == -18.0
+    assert dialog._transform.scale == 1.0
+
+    dialog.close()
+    main_window.close()
+    app.processEvents()
+
+
+def test_reset_icon_from_palette_returns_icons_for_light_and_dark_themes(monkeypatch) -> None:
+    canvas_preview_dialog._clear_reset_icon_caches()
+    source = QPixmap(24, 24)
+    source.fill(Qt.white)
+    monkeypatch.setattr(
+        canvas_preview_dialog,
+        "_load_reset_icon_source_pixmap",
+        lambda: source,
+    )
+
+    app = _app()
+    for theme_name in (C.UI_THEME_LIGHT, C.UI_THEME_DARK):
+        app.setPalette(build_palette(get_ui_theme(theme_name)))
+        button = QToolButton()
+        button.ensurePolished()
+        icon = canvas_preview_dialog._reset_icon_from_palette(button)
+
+        assert isinstance(icon, QIcon)
+        assert icon.isNull() is False
+        assert icon.pixmap(canvas_preview_dialog._RESET_ICON_SIZE).isNull() is False
+        assert (
+            icon.pixmap(
+                canvas_preview_dialog._RESET_ICON_SIZE,
+                QIcon.Disabled,
+                QIcon.Off,
+            ).isNull()
+            is False
+        )
+    canvas_preview_dialog._clear_reset_icon_caches()
+
+
+def test_source_alpha_bounding_rect_ignores_transparent_padding() -> None:
+    source = QPixmap(64, 64)
+    source.fill(Qt.transparent)
+    painter = QPainter(source)
+    try:
+        painter.fillRect(20, 18, 24, 28, Qt.white)
+    finally:
+        painter.end()
+
+    rect = canvas_preview_dialog._source_alpha_bounding_rect(source)
+
+    assert rect.isValid() is True
+    assert rect.x() == 20
+    assert rect.y() == 18
+    assert rect.width() == 24
+    assert rect.height() == 28
+
+
+def test_tinted_icon_pixmap_keeps_reset_icon_visibly_large_after_crop() -> None:
+    source = QPixmap(64, 64)
+    source.fill(Qt.transparent)
+    painter = QPainter(source)
+    try:
+        painter.fillRect(20, 18, 24, 28, Qt.white)
+    finally:
+        painter.end()
+
+    tinted = canvas_preview_dialog._tinted_icon_pixmap(
+        source,
+        QColor("white"),
+        size=canvas_preview_dialog._RESET_ICON_SIZE,
+        device_pixel_ratio=1.0,
+    )
+    bbox = canvas_preview_dialog._source_alpha_bounding_rect(tinted)
+
+    assert tinted.isNull() is False
+    assert bbox.isValid() is True
+    assert bbox.width() >= 20
+    assert bbox.height() >= 20
+
+
+def test_reset_icon_from_palette_falls_back_to_qstyle_reload_icon_when_asset_missing() -> None:
+    canvas_preview_dialog._clear_reset_icon_caches()
+    app = _app()
+    button = QToolButton()
+    button.ensurePolished()
+
+    original_paths = canvas_preview_dialog._reset_icon_asset_paths
+    try:
+        canvas_preview_dialog._reset_icon_asset_paths = lambda: ()
+        pixmap = canvas_preview_dialog._reset_icon_pixmap(
+            button.palette().color(button.foregroundRole()),
+            size=canvas_preview_dialog._RESET_ICON_SIZE,
+            device_pixel_ratio=float(button.devicePixelRatioF()),
+            widget=button,
+        )
+        icon = canvas_preview_dialog._reset_icon_from_palette(button)
+    finally:
+        canvas_preview_dialog._reset_icon_asset_paths = original_paths
+
+    assert isinstance(pixmap, QPixmap)
+    assert pixmap.isNull() is False
+    assert isinstance(icon, QIcon)
+    assert icon.isNull() is False
+    assert icon.pixmap(canvas_preview_dialog._RESET_ICON_SIZE).isNull() is False
+    canvas_preview_dialog._clear_reset_icon_caches()
+
+
+def test_canvas_preview_dialog_background_toggle_persists_selection(monkeypatch) -> None:
+    saved_configs: list[dict] = []
+    monkeypatch.setattr(
+        canvas_preview_dialog,
+        "load_config",
+        lambda: {C.CFG_CANVAS_RATIO_PRESETS: []},
+    )
+    monkeypatch.setattr(
+        canvas_preview_dialog,
+        "save_config",
+        lambda cfg: saved_configs.append(dict(cfg)),
+    )
+
+    app = _app()
+    main_window = QMainWindow()
+    main_window._ui_theme_name = C.UI_THEME_DARK
+    snapshot = canvas_preview_dialog.CanvasPreviewSnapshot(
+        bgr=np.zeros((120, 160, 3), dtype=np.uint8),
+        source_label="test",
+        title="test.png",
+    )
+
+    dialog = canvas_preview_dialog.CanvasPreviewDialog(main_window, snapshot)
+    app.processEvents()
+    dialog.btn_background_light.click()
+    app.processEvents()
+
+    assert saved_configs
+    assert (
+        saved_configs[-1][C.CFG_CANVAS_PREVIEW_BACKGROUND_TONE]
+        == CANVAS_PREVIEW_BACKGROUND_LIGHT
+    )
+
+    dialog.close()
+    main_window.close()
+    app.processEvents()
+
+
+def test_canvas_preview_dialog_dark_stylesheet_defines_radio_indicator_states() -> None:
+    stylesheet = build_app_stylesheet(get_ui_theme(C.UI_THEME_DARK))
+
+    assert "QRadioButton::indicator:unchecked" in stylesheet
+    assert "QRadioButton::indicator:checked" in stylesheet
+    assert "QRadioButton::indicator:disabled" in stylesheet
+    assert "qradialgradient" in stylesheet
+    assert "QRadioButton::indicator:unchecked:hover" in stylesheet
+
+
+def test_app_stylesheet_uses_attached_baseline_tab_bar_style() -> None:
+    stylesheet = build_app_stylesheet(get_ui_theme(C.UI_THEME_DARK))
+
+    assert 'QTabBar[chromaDockTabBar="true"]::tab' not in stylesheet
+    assert "QTabBar::tab:bottom" not in stylesheet
+    assert "border-top-left-radius:4px" in stylesheet
+    assert "border-top-right-radius:4px" in stylesheet
 
 
 def test_canvas_preview_dialog_uses_single_ratio_list_and_wrapping_info_rows(monkeypatch) -> None:

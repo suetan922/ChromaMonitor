@@ -1,10 +1,10 @@
-"""window_layout_geometry のダイアログ配置回帰テスト。"""
+"""window_layout のダイアログ配置回帰テスト。"""
 
 from __future__ import annotations
 
 from PySide6.QtCore import QRect, QSize, Qt
 
-from chroma_monitor.ui.main_window import window_layout_geometry
+from chroma_monitor.ui.main_window import window_layout
 
 
 class _FakeLayout:
@@ -121,30 +121,32 @@ def test_fit_dialog_to_desktop_centers_hidden_dialog_without_frame_geometry(monk
     dialog = _FakeDialog()
     main_window = _FakeMainWindow()
     monkeypatch.setattr(
-        window_layout_geometry,
+        window_layout,
         "_available_geometry_for_widget",
         lambda _mw, _widget=None: QRect(avail),
     )
 
-    window_layout_geometry.fit_dialog_to_desktop(main_window, dialog, center_on_parent=True)
+    window_layout.fit_dialog_to_desktop(main_window, dialog, center_on_parent=True)
 
-    assert dialog.geometry() == QRect(319, 239, 760, 520)
-    assert dialog.property("_chroma_dialog_position_initialized") is True
+    assert dialog.geometry() == QRect(699, 499, 760, 520)
+    assert dialog.property("_chroma_dialog_position_initialized") is False
 
 
-def test_fit_dialog_to_desktop_keeps_initialized_hidden_dialog_position(monkeypatch) -> None:
+def test_fit_dialog_to_desktop_recenters_initialized_hidden_dialog_without_frame_geometry(
+    monkeypatch,
+) -> None:
     avail = QRect(0, 0, 1600, 900)
     dialog = _FakeDialog(x=340, y=220, position_initialized=True)
     main_window = _FakeMainWindow()
     monkeypatch.setattr(
-        window_layout_geometry,
+        window_layout,
         "_available_geometry_for_widget",
         lambda _mw, _widget=None: QRect(avail),
     )
 
-    window_layout_geometry.fit_dialog_to_desktop(main_window, dialog, center_on_parent=False)
+    window_layout.fit_dialog_to_desktop(main_window, dialog, center_on_parent=False)
 
-    assert dialog.geometry() == QRect(340, 220, 760, 520)
+    assert dialog.geometry() == QRect(699, 499, 760, 520)
 
 
 def test_fit_top_level_widget_to_desktop_uses_hidden_geometry_without_frame_geometry(
@@ -159,17 +161,17 @@ def test_fit_top_level_widget_to_desktop_uses_hidden_geometry_without_frame_geom
         return QRect(avail)
 
     monkeypatch.setattr(
-        window_layout_geometry,
+        window_layout,
         "_available_geometry_for_widget",
         lambda _mw, _widget=None: QRect(avail),
     )
     monkeypatch.setattr(
-        window_layout_geometry,
+        window_layout,
         "screen_union_geometry",
         _screen_union_geometry,
     )
 
-    window_layout_geometry.fit_top_level_widget_to_desktop(
+    window_layout.fit_top_level_widget_to_desktop(
         main_window,
         widget,
         allow_resize=False,
@@ -178,11 +180,3 @@ def test_fit_top_level_widget_to_desktop_uses_hidden_geometry_without_frame_geom
     assert widget.geometry() == QRect(340, 220, 420, 320)
 
 
-def test_prepare_top_level_widget_for_fit_restores_hidden_geometry_after_native_handle() -> None:
-    dialog = _FakeHiddenDialogNeedingNativeHandle(x=340, y=220, width=420, height=320)
-
-    geom = window_layout_geometry._prepare_top_level_widget_for_fit(dialog)
-
-    assert dialog.win_id_calls == 1
-    assert geom == QRect(340, 220, 420, 320)
-    assert dialog.geometry() == QRect(340, 220, 420, 320)

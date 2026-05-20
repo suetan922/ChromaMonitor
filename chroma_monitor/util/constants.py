@@ -341,7 +341,7 @@ VIEW_MIN_HEIGHT = 48
 """ドック/ビューの共通最小高さ(px)。"""
 
 # Debug logging
-DEBUG_UI_LOG_ENABLED = True
+DEBUG_UI_LOG_ENABLED = False
 """UI デバッグログの既定有効状態。"""
 DEBUG_UI_LOG_FILE = "ui_debug.log"
 """UI デバッグログの既定ファイル名。"""
@@ -455,3 +455,4 @@ CFG_LAYOUT_ENGINE_VERSION = "layout_engine_version"
 CFG_LAYOUT_CURRENT = "layout_current"
 CFG_LAYOUT_PRESETS = "layout_presets"
 CFG_CANVAS_RATIO_PRESETS = "canvas_ratio_presets"
+CFG_CANVAS_PREVIEW_BACKGROUND_TONE = "canvas_preview_background_tone"

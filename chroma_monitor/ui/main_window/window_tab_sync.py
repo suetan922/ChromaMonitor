@@ -98,7 +98,6 @@ def _sync_dock_tab_close_button(
 
     button = QToolButton(bar)
     button._chroma_dock_tab_close_button = True
-    button.setProperty("chromaDockTabCloseButton", True)
     button.setText("x")
     button.setToolTip("このタブを閉じる")
     button.setAutoRaise(True)

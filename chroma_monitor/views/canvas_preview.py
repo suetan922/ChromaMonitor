@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import traceback
 
 from PySide6.QtCore import QPoint, QPointF, QRectF, QSize, Qt, Signal
@@ -13,8 +14,6 @@ from ..util.theme import get_ui_theme, qcolor
 from .canvas_preview_constants import (
     CANVAS_PREVIEW_BACKGROUND_DARK,
     CANVAS_PREVIEW_BACKGROUND_LIGHT,
-    CANVAS_PREVIEW_MODE_SPLIT,
-    CanvasSplitPreset,
 )
 from .canvas_preview_math import (
     dominant_drag_axis,
@@ -22,7 +21,6 @@ from .canvas_preview_math import (
     CanvasPreviewTransform,
     image_polygon_points,
     preview_extents,
-    split_line_fractions,
 )
 
 
@@ -95,8 +93,6 @@ class CanvasPreviewWidget(QWidget):
         self._canvas_width = 1
         self._canvas_height = 1
         self._transform = CanvasPreviewTransform()
-        self._preview_mode = ""
-        self._split_preset: CanvasSplitPreset | None = None
         self._view_zoom = 1.0
         self._background_tone = CANVAS_PREVIEW_BACKGROUND_LIGHT
         self._theme_override = None
@@ -200,16 +196,6 @@ class CanvasPreviewWidget(QWidget):
             )
             raise
 
-    def set_preview_mode(self, mode: str) -> None:
-        """将来用のキャンバス/分割モード状態を保持する。"""
-        self._preview_mode = str(mode or "")
-        self.update()
-
-    def set_split_preset(self, split_preset: CanvasSplitPreset | None) -> None:
-        """将来用の分割プリセット状態を保持する。"""
-        self._split_preset = split_preset
-        self.update()
-
     def set_view_zoom(self, zoom: float) -> None:
         """プレビュー全体の表示倍率を更新する。"""
         write_window_layout_debug_log(
@@ -251,45 +237,6 @@ class CanvasPreviewWidget(QWidget):
             return
         self._background_tone = tone_name
         self.update()
-
-    def content_fit_zoom(self) -> float:
-        """画像全体とキャンバス枠が収まる表示倍率を返す。"""
-        viewport = self._viewport_rect()
-        if viewport.isEmpty():
-            return 1.0
-        base_scale = self._fit_canvas_view_scale(viewport)
-        if base_scale <= 0.0:
-            return 1.0
-        canvas_left = -float(self._canvas_width) * 0.5
-        canvas_right = float(self._canvas_width) * 0.5
-        canvas_top = -float(self._canvas_height) * 0.5
-        canvas_bottom = float(self._canvas_height) * 0.5
-        if self._image.isNull():
-            union_width = float(self._canvas_width)
-            union_height = float(self._canvas_height)
-        else:
-            extents = preview_extents(
-                self._image.width(),
-                self._image.height(),
-                self._canvas_width,
-                self._canvas_height,
-                self._transform,
-            )
-            union_width = max(
-                1.0,
-                max(canvas_right, extents.bounds_right) - min(canvas_left, extents.bounds_left),
-            )
-            union_height = max(
-                1.0,
-                max(canvas_bottom, extents.bounds_bottom) - min(canvas_top, extents.bounds_top),
-            )
-        fit_scale = min(
-            float(viewport.width()) / union_width,
-            float(viewport.height()) / union_height,
-        )
-        if fit_scale <= 0.0:
-            return 1.0
-        return max(self._VIEW_ZOOM_MIN, min(self._VIEW_ZOOM_MAX, fit_scale / base_scale))
 
     def preview_image(self) -> QImage:
         """現在のシミュレーション結果をキャンバス範囲だけ画像化する。"""
@@ -354,6 +301,22 @@ class CanvasPreviewWidget(QWidget):
             -self._OUTER_PADDING,
             -self._OUTER_PADDING,
         )
+
+    def _viewport_content_inset(self) -> float:
+        """viewport 枠線と AA の内側だけへ scene を閉じ込める inset を返す。"""
+        return max(1.0, float(self._VIEWPORT_BORDER_WIDTH) * 0.5 + 1.0)
+
+    def _viewport_content_rect(self, viewport_rect: QRectF) -> QRectF:
+        """viewport 枠線の内側だけを scene 描画範囲として返す。"""
+        inset = self._viewport_content_inset()
+        content_rect = QRectF(viewport_rect).adjusted(inset, inset, -inset, -inset)
+        return content_rect if not content_rect.isEmpty() else QRectF()
+
+    def _viewport_rounded_path(self, rect: QRectF, radius: float) -> QPainterPath:
+        """viewport 背景/clip 用の rounded path を返す。"""
+        path = QPainterPath()
+        path.addRoundedRect(rect, max(0.0, float(radius)), max(0.0, float(radius)))
+        return path
 
     def _fit_canvas_view_scale(self, viewport_rect: QRectF | None = None) -> float:
         """キャンバス全体を収める基準縮尺を返す。"""
@@ -442,24 +405,59 @@ class CanvasPreviewWidget(QWidget):
     def _draw_checker_background(self, painter: QPainter, canvas_rect: QRectF, *, theme) -> None:
         """余白確認用のチェック柄背景を描く。"""
         del theme
+        inset = max(float(self._CANVAS_BORDER_HALO_WIDTH), float(self._CANVAS_BORDER_WIDTH)) * 0.5
+        checker_clip_rect = QRectF(canvas_rect).adjusted(inset, inset, -inset, -inset)
+        if checker_clip_rect.isEmpty():
+            return
         light, dark = self._checker_colors()
         painter.save()
-        painter.setClipRect(canvas_rect)
-        cell = self._CHECKER_CELL
-        y_pos = canvas_rect.top()
+        painter.setRenderHint(QPainter.Antialiasing, False)
+        painter.setClipRect(checker_clip_rect)
+        cell = max(1, int(round(self._CHECKER_CELL)))
+        left = int(math.floor(checker_clip_rect.left()))
+        top = int(math.floor(checker_clip_rect.top()))
+        right = int(math.ceil(checker_clip_rect.right()))
+        bottom = int(math.ceil(checker_clip_rect.bottom()))
+        y_pos = top
         row_index = 0
-        while y_pos < canvas_rect.bottom():
-            x_pos = canvas_rect.left()
+        while y_pos < bottom:
+            x_pos = left
             col_index = row_index % 2
-            while x_pos < canvas_rect.right():
+            while x_pos < right:
                 painter.fillRect(
-                    QRectF(x_pos, y_pos, cell, cell),
+                    x_pos,
+                    y_pos,
+                    cell,
+                    cell,
                     light if (col_index % 2 == 0) else dark,
                 )
                 x_pos += cell
                 col_index += 1
             y_pos += cell
             row_index += 1
+        painter.restore()
+
+    def _clear_checker_outside_canvas(
+        self,
+        painter: QPainter,
+        canvas_rect: QRectF,
+        *,
+        theme,
+        clip_rect: QRectF | None,
+    ) -> None:
+        """checker の小数境界はみ出しを最終描画経路で塗り戻す。"""
+        if clip_rect is None or QRectF(clip_rect).isEmpty():
+            return
+        inset = max(float(self._CANVAS_BORDER_HALO_WIDTH), float(self._CANVAS_BORDER_WIDTH)) * 0.5
+        visible_path = QPainterPath()
+        visible_path.addRect(QRectF(clip_rect))
+        canvas_inner_path = QPainterPath()
+        canvas_inner_path.addRect(QRectF(canvas_rect).adjusted(inset, inset, -inset, -inset))
+        outside_path = visible_path.subtracted(canvas_inner_path)
+        if outside_path.isEmpty():
+            return
+        painter.save()
+        painter.fillPath(outside_path, self._viewport_fill_color(theme=theme))
         painter.restore()
 
     def _draw_center_guides(self, painter: QPainter, canvas_rect: QRectF, *, theme) -> None:
@@ -475,27 +473,6 @@ class CanvasPreviewWidget(QWidget):
             QPointF(canvas_rect.left(), canvas_rect.center().y()),
             QPointF(canvas_rect.right(), canvas_rect.center().y()),
         )
-
-    def _draw_split_guides(self, painter: QPainter, canvas_rect: QRectF, *, theme) -> None:
-        """将来用の分割ガイド線描画。通常描画からは呼ばない。"""
-        if self._preview_mode != CANVAS_PREVIEW_MODE_SPLIT or self._split_preset is None:
-            return
-        pen = QPen(qcolor(theme.warning_high, 210))
-        pen.setWidth(1)
-        painter.setPen(pen)
-        for fraction, is_vertical in split_line_fractions(self._split_preset):
-            if is_vertical:
-                x_pos = canvas_rect.left() + canvas_rect.width() * fraction
-                painter.drawLine(
-                    QPointF(x_pos, canvas_rect.top()),
-                    QPointF(x_pos, canvas_rect.bottom()),
-                )
-            else:
-                y_pos = canvas_rect.top() + canvas_rect.height() * fraction
-                painter.drawLine(
-                    QPointF(canvas_rect.left(), y_pos),
-                    QPointF(canvas_rect.right(), y_pos),
-                )
 
     def _contrast_outline_color(self, *, theme, alpha: int):
         """画像上でも視認しやすい輪郭色を返す。"""
@@ -527,12 +504,131 @@ class CanvasPreviewWidget(QWidget):
             ) <= self._CROP_MASK_EPSILON:
                 return QPainterPath()
         image_path = QPainterPath()
+        image_path.setFillRule(Qt.WindingFill)
         image_path.addPolygon(image_polygon)
+        image_path.closeSubpath()
         canvas_path = QPainterPath()
+        canvas_path.setFillRule(Qt.WindingFill)
         canvas_path.addRect(canvas_rect)
         return image_path.subtracted(canvas_path)
 
-    def _draw_crop_overlay(
+    def _draw_transformed_image(
+        self,
+        painter: QPainter,
+        image: QImage,
+        canvas_rect: QRectF,
+        *,
+        clip_rect: QRectF | None,
+        opacity: float = 1.0,
+    ) -> None:
+        """指定画像を現在の画像 transform で描画する。"""
+        if image.isNull():
+            return
+        image_transform = self._image_transform_for_rect(canvas_rect)
+        image_clip_path = QPainterPath()
+        if clip_rect is not None:
+            image_clip_path = self._image_clip_path_for_view_rect(
+                image_transform,
+                QRectF(clip_rect),
+                image_size=image.size(),
+            )
+            if image_clip_path.isEmpty():
+                return
+        painter.save()
+        painter.setOpacity(float(opacity))
+        painter.setTransform(image_transform, False)
+        if clip_rect is not None:
+            # 変換後の view 座標 clip を、画像座標に戻してから適用する。
+            painter.setClipPath(image_clip_path)
+        painter.drawImage(
+            QRectF(0.0, 0.0, float(image.width()), float(image.height())),
+            image,
+        )
+        painter.restore()
+
+    def _draw_transformed_image_with_image_clip(
+        self,
+        painter: QPainter,
+        image: QImage,
+        canvas_rect: QRectF,
+        image_clip_path: QPainterPath,
+        *,
+        opacity: float = 1.0,
+    ) -> None:
+        """画像座標の clip path で変換描画する。"""
+        if image.isNull() or image_clip_path.isEmpty():
+            return
+        painter.save()
+        painter.setOpacity(float(opacity))
+        painter.setTransform(self._image_transform_for_rect(canvas_rect), False)
+        painter.setClipPath(image_clip_path)
+        painter.drawImage(
+            QRectF(0.0, 0.0, float(image.width()), float(image.height())),
+            image,
+        )
+        painter.restore()
+
+    def _image_clip_path_for_view_rect(
+        self,
+        image_transform: QTransform,
+        view_rect: QRectF,
+        *,
+        image_size: QSize,
+    ) -> QPainterPath:
+        """view 座標の矩形 clip を画像座標の path に変換する。"""
+        if view_rect.isEmpty() or image_size.isEmpty():
+            return QPainterPath()
+        inverted, invertible = image_transform.inverted()
+        if not invertible:
+            return QPainterPath()
+        view_path = QPainterPath()
+        view_path.addRect(view_rect)
+        image_clip_path = inverted.map(view_path)
+        image_bounds = QPainterPath()
+        image_bounds.addRect(QRectF(0.0, 0.0, float(image_size.width()), float(image_size.height())))
+        return image_clip_path.intersected(image_bounds)
+
+    def _image_clip_path_for_view_path(
+        self,
+        image_transform: QTransform,
+        view_path: QPainterPath,
+        *,
+        image_size: QSize,
+    ) -> QPainterPath:
+        """view 座標の任意 path を画像座標の clip path に変換する。"""
+        if view_path.isEmpty() or image_size.isEmpty():
+            return QPainterPath()
+        inverted, invertible = image_transform.inverted()
+        if not invertible:
+            return QPainterPath()
+        image_clip_path = inverted.map(view_path)
+        image_bounds = QPainterPath()
+        image_bounds.addRect(QRectF(0.0, 0.0, float(image_size.width()), float(image_size.height())))
+        return image_clip_path.intersected(image_bounds)
+
+    def _draw_normal_image_clipped_to_canvas(
+        self,
+        painter: QPainter,
+        canvas_rect: QRectF,
+        *,
+        clip_rect: QRectF | None,
+    ) -> None:
+        """通常画像をキャンバス内だけに描画する。"""
+        if self._image.isNull():
+            return
+        effective_clip = QRectF(canvas_rect)
+        if clip_rect is not None:
+            effective_clip = effective_clip.intersected(QRectF(clip_rect))
+        if effective_clip.isEmpty():
+            return
+        self._draw_transformed_image(
+            painter,
+            self._image,
+            canvas_rect,
+            clip_rect=effective_clip,
+        )
+
+    def _draw_muted_outside_image(
         self,
         painter: QPainter,
         image_polygon: QPolygonF,
@@ -547,21 +643,28 @@ class CanvasPreviewWidget(QWidget):
         if cropped_path.isEmpty():
             return cropped_path
         if not self._image_grayscale.isNull():
-            painter.save()
+            muted_path = QPainterPath(cropped_path)
             if clip_rect is not None:
-                painter.setClipRect(clip_rect)
-            painter.setClipPath(cropped_path, Qt.IntersectClip)
-            painter.setOpacity(0.46)
-            painter.setTransform(self._image_transform_for_rect(canvas_rect), False)
-            painter.drawImage(
-                QRectF(0.0, 0.0, float(self._image.width()), float(self._image.height())),
-                self._image_grayscale,
+                clip_path = QPainterPath()
+                clip_path.addRect(QRectF(clip_rect))
+                muted_path = muted_path.intersected(clip_path)
+            image_clip_path = self._image_clip_path_for_view_path(
+                self._image_transform_for_rect(canvas_rect),
+                muted_path,
+                image_size=self._image_grayscale.size(),
             )
-            painter.restore()
+            self._draw_transformed_image_with_image_clip(
+                painter,
+                self._image_grayscale,
+                canvas_rect,
+                image_clip_path,
+                opacity=0.50,
+            )
         painter.save()
         if clip_rect is not None:
             painter.setClipRect(clip_rect)
-        painter.fillPath(cropped_path, qcolor("#091018", 108))
+        # tint は view 座標 path として扱い、ここでは painter transform を変更しない。
+        painter.fillPath(cropped_path, qcolor("#091018", 120))
         painter.restore()
         return cropped_path
 
@@ -581,12 +684,14 @@ class CanvasPreviewWidget(QWidget):
             painter.setClipRect(clip_rect)
         halo_pen = QPen(self._contrast_outline_color(theme=theme, alpha=110))
         halo_pen.setWidthF(self._CROP_OUTLINE_HALO_WIDTH)
+        halo_pen.setCapStyle(Qt.RoundCap)
         halo_pen.setJoinStyle(Qt.RoundJoin)
         painter.setPen(halo_pen)
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(cropped_path)
         crop_pen = QPen(qcolor(theme.warning_high, 220))
         crop_pen.setWidthF(self._CROP_OUTLINE_WIDTH)
+        crop_pen.setCapStyle(Qt.RoundCap)
         crop_pen.setJoinStyle(Qt.RoundJoin)
         painter.setPen(crop_pen)
         painter.drawPath(cropped_path)
@@ -667,23 +772,32 @@ class CanvasPreviewWidget(QWidget):
         """キャンバス上の画像、ガイド、補助表示をまとめて描画する。"""
         if include_checker:
             self._draw_checker_background(painter, canvas_rect, theme=theme)
+            self._clear_checker_outside_canvas(
+                painter,
+                canvas_rect,
+                theme=theme,
+                clip_rect=clip_rect,
+            )
         cropped_path = QPainterPath()
         if not self._image.isNull():
-            painter.save()
-            if clip_rect is not None:
-                painter.setClipRect(clip_rect)
-            painter.setTransform(self._image_transform_for_rect(canvas_rect), False)
-            painter.drawImage(
-                QRectF(0.0, 0.0, float(self._image.width()), float(self._image.height())),
-                self._image,
-            )
-            painter.restore()
             if show_outside_mask:
-                cropped_path = self._draw_crop_overlay(
+                cropped_path = self._draw_muted_outside_image(
                     painter,
                     self._image_polygon_for_rect(canvas_rect),
                     canvas_rect,
                     theme=theme,
+                    clip_rect=clip_rect,
+                )
+                self._draw_normal_image_clipped_to_canvas(
+                    painter,
+                    canvas_rect,
+                    clip_rect=clip_rect,
+                )
+            else:
+                self._draw_transformed_image(
+                    painter,
+                    self._image,
+                    canvas_rect,
                     clip_rect=clip_rect,
                 )
         else:
@@ -720,9 +834,7 @@ class CanvasPreviewWidget(QWidget):
             painter.end()
             return
 
-        viewport_pen = QPen(qcolor(theme.border))
-        viewport_pen.setWidthF(self._VIEWPORT_BORDER_WIDTH)
-        painter.setPen(viewport_pen)
+        painter.setPen(Qt.NoPen)
         painter.setBrush(self._viewport_fill_color(theme=theme))
         painter.drawRoundedRect(viewport_rect, self._VIEWPORT_RADIUS, self._VIEWPORT_RADIUS)
 
@@ -731,19 +843,34 @@ class CanvasPreviewWidget(QWidget):
             painter.end()
             return
 
-        viewport_path = QPainterPath()
-        viewport_path.addRoundedRect(viewport_rect, self._VIEWPORT_RADIUS, self._VIEWPORT_RADIUS)
+        viewport_content_rect = self._viewport_content_rect(viewport_rect)
+        if viewport_content_rect.isEmpty():
+            painter.end()
+            return
+        viewport_content_radius = max(
+            0.0,
+            float(self._VIEWPORT_RADIUS) - self._viewport_content_inset(),
+        )
+        viewport_content_path = self._viewport_rounded_path(
+            viewport_content_rect,
+            viewport_content_radius,
+        )
         painter.save()
-        painter.setClipPath(viewport_path)
+        painter.setClipPath(viewport_content_path)
         self._draw_canvas_scene(
             painter,
             canvas_rect,
             theme=theme,
-            clip_rect=viewport_rect,
+            clip_rect=viewport_content_rect,
             include_checker=True,
             show_outside_mask=True,
         )
         painter.restore()
+        viewport_pen = QPen(qcolor(theme.border))
+        viewport_pen.setWidthF(self._VIEWPORT_BORDER_WIDTH)
+        painter.setPen(viewport_pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(viewport_rect, self._VIEWPORT_RADIUS, self._VIEWPORT_RADIUS)
         painter.end()
 
     def _apply_drag_transform(self, transform: CanvasPreviewTransform) -> None:

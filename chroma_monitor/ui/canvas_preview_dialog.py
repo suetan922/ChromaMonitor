@@ -5,12 +5,14 @@ from __future__ import annotations
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, replace
+from pathlib import Path
+import sys
 import traceback
 from uuid import uuid4
 
 import numpy as np
-from PySide6.QtCore import QEvent, QObject, QSignalBlocker, Qt
-from PySide6.QtGui import QImage
+from PySide6.QtCore import QEvent, QObject, QRect, QSize, QSignalBlocker, Qt
+from PySide6.QtGui import QColor, QIcon, QImage, QPainter, QPalette, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QButtonGroup,
@@ -30,7 +32,9 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QScrollArea,
     QSizePolicy,
+    QStyle,
     QSlider,
+    QToolButton,
     QVBoxLayout,
     QWidget,
 )
@@ -42,7 +46,6 @@ from ..util.debug_log import write_window_layout_debug_log
 from ..util.theme import get_ui_theme, refresh_widget_style
 from ..views.canvas_preview import CanvasPreviewWidget
 from ..views.canvas_preview_constants import (
-    CANVAS_FIT_ACTUAL,
     CANVAS_FIT_CONTAIN,
     CANVAS_FIT_COVER,
     CANVAS_FIT_CUSTOM,
@@ -76,6 +79,15 @@ _EDGE_TEXT_ZERO_THRESHOLD_PX = 0.05
 _ROTATION_HALF_TURN_DEG = 180.0
 _ROTATION_FULL_TURN_DEG = 360.0
 _RATIO_COMPARE_EPSILON = 1e-9
+_RESET_BUTTON_SIZE = QSize(36, 36)
+_RESET_ICON_SIZE = QSize(28, 28)
+_RESET_ICON_REL_PATH = Path("assets/icons/arrow-rotate-left-solid.png")
+_RESET_ICON_SOURCE_CACHE: QPixmap | None = None
+_RESET_ICON_SOURCE_BBOX_CACHE: QRect | None = None
+_RESET_ICON_SOURCE_CACHE_KEY: int | None = None
+_RESET_ICON_FALLBACK_CACHE: dict[tuple[int, int], QPixmap] = {}
+_RESET_ICON_PIXMAP_CACHE: dict[tuple[int, int, int, int, int, int], QPixmap] = {}
+_RESET_ICON_CACHE: dict[tuple[int, int, int, int, int], QIcon] = {}
 _THEME_REFRESH_EVENTS = {
     QEvent.PaletteChange,
     QEvent.ApplicationPaletteChange,
@@ -100,6 +112,213 @@ def _qimage_from_bgr(bgr: np.ndarray) -> QImage:
     rgb = np.ascontiguousarray(bgr[:, :, ::-1])
     height, width = rgb.shape[:2]
     return QImage(rgb.data, width, height, width * 3, QImage.Format_RGB888).copy()
+
+
+def _app_resource_base_dir() -> Path:
+    """PyInstaller / 開発実行の両方で asset 基準ディレクトリを返す。"""
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        try:
+            return Path(meipass)
+        except Exception:
+            pass
+    return Path(__file__).resolve().parent.parent.parent
+
+
+def _reset_icon_asset_paths() -> tuple[Path, ...]:
+    """reset icon asset ?????????"""
+    base = _app_resource_base_dir()
+    exe_dir = Path(sys.executable).resolve().parent
+    return (
+        base / _RESET_ICON_REL_PATH,
+        exe_dir / _RESET_ICON_REL_PATH,
+        exe_dir / _RESET_ICON_REL_PATH.name,
+    )
+
+
+def _clear_reset_icon_caches() -> None:
+    """reset icon ?? cache ???????"""
+    global _RESET_ICON_SOURCE_CACHE
+    global _RESET_ICON_SOURCE_BBOX_CACHE
+    global _RESET_ICON_SOURCE_CACHE_KEY
+    _RESET_ICON_SOURCE_CACHE = None
+    _RESET_ICON_SOURCE_BBOX_CACHE = None
+    _RESET_ICON_SOURCE_CACHE_KEY = None
+    _RESET_ICON_FALLBACK_CACHE.clear()
+    _RESET_ICON_PIXMAP_CACHE.clear()
+    _RESET_ICON_CACHE.clear()
+
+
+def _load_reset_icon_source_pixmap() -> QPixmap:
+    """reset icon asset ?????? source pixmap ????"""
+    global _RESET_ICON_SOURCE_CACHE
+    global _RESET_ICON_SOURCE_BBOX_CACHE
+    global _RESET_ICON_SOURCE_CACHE_KEY
+    if _RESET_ICON_SOURCE_CACHE is not None:
+        return QPixmap(_RESET_ICON_SOURCE_CACHE)
+    for path_candidate in _reset_icon_asset_paths():
+        try:
+            if not path_candidate.is_file():
+                continue
+            pixmap = QPixmap(str(path_candidate))
+            if not pixmap.isNull():
+                _RESET_ICON_SOURCE_CACHE = QPixmap(pixmap)
+                _RESET_ICON_SOURCE_BBOX_CACHE = None
+                _RESET_ICON_SOURCE_CACHE_KEY = int(pixmap.cacheKey())
+                return QPixmap(_RESET_ICON_SOURCE_CACHE)
+        except Exception:
+            continue
+    _RESET_ICON_SOURCE_CACHE = QPixmap()
+    _RESET_ICON_SOURCE_BBOX_CACHE = QRect()
+    _RESET_ICON_SOURCE_CACHE_KEY = None
+    return QPixmap()
+
+
+def _source_alpha_bounding_rect(source: QPixmap) -> QRect:
+    """source pixmap ?????? bounding box ????"""
+    global _RESET_ICON_SOURCE_BBOX_CACHE
+    global _RESET_ICON_SOURCE_CACHE_KEY
+    if source.isNull():
+        return QRect()
+    source_cache_key = int(source.cacheKey())
+    if (
+        _RESET_ICON_SOURCE_BBOX_CACHE is not None
+        and _RESET_ICON_SOURCE_CACHE_KEY is not None
+        and source_cache_key == _RESET_ICON_SOURCE_CACHE_KEY
+    ):
+        return QRect(_RESET_ICON_SOURCE_BBOX_CACHE)
+
+    image = source.toImage().convertToFormat(QImage.Format_ARGB32)
+    width = int(image.width())
+    height = int(image.height())
+    if width <= 0 or height <= 0:
+        return QRect()
+
+    bits = image.constBits()
+    alpha = np.frombuffer(bits, dtype=np.uint8)
+    alpha = alpha.reshape((height, int(image.bytesPerLine())))[:, : width * 4]
+    alpha = alpha.reshape((height, width, 4))[:, :, 3]
+    coords = np.argwhere(alpha > 0)
+    if coords.size == 0:
+        rect = QRect()
+    else:
+        min_y, min_x = coords.min(axis=0)
+        max_y, max_x = coords.max(axis=0)
+        rect = QRect(int(min_x), int(min_y), int(max_x - min_x + 1), int(max_y - min_y + 1))
+
+    if (
+        _RESET_ICON_SOURCE_CACHE_KEY is not None
+        and source_cache_key == _RESET_ICON_SOURCE_CACHE_KEY
+    ):
+        _RESET_ICON_SOURCE_BBOX_CACHE = QRect(rect)
+    return rect
+
+
+def _fallback_reset_icon_source_pixmap(widget: QWidget, size: QSize) -> QPixmap:
+    """asset ???? Qt ?? reload icon pixmap ????"""
+    cache_key = (int(size.width()), int(size.height()))
+    cached = _RESET_ICON_FALLBACK_CACHE.get(cache_key)
+    if cached is not None:
+        return QPixmap(cached)
+    if widget.style() is None:
+        return QPixmap()
+    pixmap = widget.style().standardIcon(QStyle.SP_BrowserReload).pixmap(size)
+    _RESET_ICON_FALLBACK_CACHE[cache_key] = QPixmap(pixmap)
+    return QPixmap(pixmap)
+
+
+def _tinted_icon_pixmap(
+    source: QPixmap,
+    color: QColor,
+    *,
+    size: QSize,
+    device_pixel_ratio: float,
+) -> QPixmap:
+    """source pixmap ????? tint ?? pixmap ????"""
+    if source.isNull():
+        return QPixmap()
+    source_rect = _source_alpha_bounding_rect(source)
+    if not source_rect.isValid() or source_rect.isEmpty():
+        source_rect = source.rect()
+    ratio = max(1.0, float(device_pixel_ratio))
+    ratio_milli = max(1, int(round(ratio * 1000.0)))
+    rgba = int(QColor(color).rgba())
+    pixmap_cache_key = (
+        int(source.cacheKey()),
+        rgba,
+        int(size.width()),
+        int(size.height()),
+        ratio_milli,
+        0,
+    )
+    cached = _RESET_ICON_PIXMAP_CACHE.get(pixmap_cache_key)
+    if cached is not None:
+        return QPixmap(cached)
+
+    logical_width = max(1, int(size.width()))
+    logical_height = max(1, int(size.height()))
+    pixmap = QPixmap(int(round(logical_width * ratio)), int(round(logical_height * ratio)))
+    pixmap.setDevicePixelRatio(ratio)
+    pixmap.fill(Qt.transparent)
+
+    painter = QPainter(pixmap)
+    try:
+        painter.setRenderHint(QPainter.SmoothPixmapTransform, True)
+        painter.drawPixmap(pixmap.rect(), source, source_rect)
+        painter.setCompositionMode(QPainter.CompositionMode_SourceIn)
+        painter.fillRect(pixmap.rect(), QColor(color))
+    finally:
+        painter.end()
+    _RESET_ICON_PIXMAP_CACHE[pixmap_cache_key] = QPixmap(pixmap)
+    return pixmap
+
+
+def _reset_icon_pixmap(
+    color: QColor,
+    *,
+    size: QSize,
+    device_pixel_ratio: float,
+    widget: QWidget | None = None,
+) -> QPixmap:
+    """??????????? circular arrow ??????????"""
+    source = _load_reset_icon_source_pixmap()
+    if source.isNull() and widget is not None:
+        source = _fallback_reset_icon_source_pixmap(widget, size)
+    return _tinted_icon_pixmap(
+        source,
+        color,
+        size=size,
+        device_pixel_ratio=device_pixel_ratio,
+    )
+
+
+def _reset_icon_from_palette(widget: QWidget, *, size: QSize = _RESET_ICON_SIZE) -> QIcon:
+    """?? palette ?????????????????"""
+    palette = widget.palette()
+    ratio = float(widget.devicePixelRatioF())
+    ratio_milli = max(1, int(round(ratio * 1000.0)))
+    normal = QColor(palette.color(QPalette.ButtonText))
+    disabled = QColor(palette.color(QPalette.Disabled, QPalette.ButtonText))
+    icon_cache_key = (
+        int(normal.rgba()),
+        int(disabled.rgba()),
+        int(size.width()),
+        int(size.height()),
+        ratio_milli,
+    )
+    cached_icon = _RESET_ICON_CACHE.get(icon_cache_key)
+    if cached_icon is not None:
+        return QIcon(cached_icon)
+
+    normal_pm = _reset_icon_pixmap(normal, size=size, device_pixel_ratio=ratio, widget=widget)
+    disabled_pm = _reset_icon_pixmap(disabled, size=size, device_pixel_ratio=ratio, widget=widget)
+    icon = QIcon()
+    if not normal_pm.isNull():
+        icon.addPixmap(normal_pm, QIcon.Normal, QIcon.Off)
+    if not disabled_pm.isNull():
+        icon.addPixmap(disabled_pm, QIcon.Disabled, QIcon.Off)
+    _RESET_ICON_CACHE[icon_cache_key] = QIcon(icon)
+    return icon
 
 
 def _format_edge_value(value: float) -> str:
@@ -129,6 +348,25 @@ def _load_ratio_presets_from_config() -> list[CanvasRatioPreset]:
     payload = cfg.get(APP_C.CFG_CANVAS_RATIO_PRESETS, [])
     presets = canvas_ratio_presets_from_payload(payload)
     return list(presets or default_canvas_ratio_presets())
+
+
+def _default_background_tone_for_theme(theme_name: str | None) -> str:
+    """テーマ未保存時の透明背景トーン既定値を返す。"""
+    if str(theme_name or "").strip() == APP_C.UI_THEME_DARK:
+        return CANVAS_PREVIEW_BACKGROUND_DARK
+    return CANVAS_PREVIEW_BACKGROUND_LIGHT
+
+
+def _load_background_tone_from_config(theme_name: str | None) -> str:
+    """保存値優先で透明背景トーンを設定から復元する。"""
+    cfg = load_config()
+    tone = str(cfg.get(APP_C.CFG_CANVAS_PREVIEW_BACKGROUND_TONE, "") or "").strip()
+    if tone in {
+        CANVAS_PREVIEW_BACKGROUND_LIGHT,
+        CANVAS_PREVIEW_BACKGROUND_DARK,
+    }:
+        return tone
+    return _default_background_tone_for_theme(theme_name)
 
 
 def _root_exception(exc: BaseException) -> BaseException:
@@ -177,7 +415,7 @@ class CanvasPreviewDialog(QDialog):
             if self._source_image.width() > self._source_image.height()
             else CANVAS_ORIENTATION_PORTRAIT
         )
-        self._background_tone = CANVAS_PREVIEW_BACKGROUND_LIGHT
+        self._background_tone = _load_background_tone_from_config(self._ui_theme_name)
         self._draft_preset: CanvasRatioPreset | None = None
         self._transform = CanvasPreviewTransform()
         self._preview_zoom = 1.0
@@ -310,9 +548,7 @@ class CanvasPreviewDialog(QDialog):
         except Exception as exc:
             self._log_exception("canvas_preview_init_step_fail", exc, stage=stage)
             self._log_exception("canvas_preview_init_error", exc, stage=stage)
-            raise RuntimeError(
-                f"キャンバスプレビュー初期化中に {stage} で失敗しました"
-            ) from exc
+            raise RuntimeError(f"キャンバスプレビュー初期化中に {stage} で失敗しました") from exc
         self._log_debug("canvas_preview_init_step_ok", stage=stage)
 
     def _build_ui_section(self, name: str, builder):
@@ -471,13 +707,11 @@ class CanvasPreviewDialog(QDialog):
         self.lbl_preview_zoom_value = QLabel()
         self.lbl_preview_zoom_value.setFixedWidth(52)
         self.btn_preview_zoom_reset = QPushButton("100%")
-        self.btn_preview_zoom_fit = QPushButton("全体表示")
         self.btn_preview_zoom_reset.clicked.connect(self._reset_preview_zoom)
-        self.btn_preview_zoom_fit.clicked.connect(self._fit_preview_to_content)
+        self.btn_preview_zoom_reset.setToolTip("プレビュー表示倍率だけを 100% に戻します")
         zoom_layout.addWidget(self.slider_preview_zoom, 1)
         zoom_layout.addWidget(self.lbl_preview_zoom_value)
         zoom_layout.addWidget(self.btn_preview_zoom_reset)
-        zoom_layout.addWidget(self.btn_preview_zoom_fit)
         return zoom_row
 
     def _build_background_row(self) -> QWidget:
@@ -518,35 +752,39 @@ class CanvasPreviewDialog(QDialog):
         layout = QVBoxLayout(body)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(10)
-        layout.addWidget(self._build_quick_action_box())
-        layout.addWidget(self._build_adjust_box())
+        layout.addWidget(self._build_display_action_box())
+        layout.addWidget(self._build_adjust_box_with_reset_buttons())
         layout.addWidget(self._build_rotation_box())
         layout.addWidget(self._build_info_box())
         layout.addWidget(self._build_export_box())
         layout.addStretch(1)
         return scroll
 
-    def _build_quick_action_box(self) -> QGroupBox:
-        """基準操作グループを構築する。"""
-        quick_box = QGroupBox("基準操作")
-        quick_grid = QGridLayout(quick_box)
+    def _build_display_action_box(self) -> QGroupBox:
+        """表示操作グループを構築する。"""
+        quick_box = QGroupBox("表示操作")
+        quick_layout = QVBoxLayout(quick_box)
+        quick_layout.setContentsMargins(12, 12, 12, 12)
+        quick_layout.setSpacing(6)
         self.btn_fit = QPushButton("全体を収める")
         self.btn_fill = QPushButton("埋める")
-        self.btn_actual = QPushButton("等倍")
         self.btn_center = QPushButton("中央に戻す")
+        for button in (self.btn_fit, self.btn_fill, self.btn_center):
+            button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_fit.clicked.connect(lambda: self._apply_fit_mode(CANVAS_FIT_CONTAIN))
         self.btn_fill.clicked.connect(lambda: self._apply_fit_mode(CANVAS_FIT_COVER))
-        self.btn_actual.clicked.connect(lambda: self._apply_fit_mode(CANVAS_FIT_ACTUAL))
         self.btn_center.clicked.connect(self._center_image)
-        quick_grid.addWidget(self.btn_fit, 0, 0)
-        quick_grid.addWidget(self.btn_fill, 0, 1)
-        quick_grid.addWidget(self.btn_actual, 1, 0)
-        quick_grid.addWidget(self.btn_center, 1, 1)
+        self.btn_fit.setToolTip("画像全体がキャンバス内に収まる倍率にします")
+        self.btn_fill.setToolTip("キャンバス全体を画像で埋める倍率にします")
+        self.btn_center.setToolTip("X位置とY位置だけを初期位置に戻します")
+        quick_layout.addWidget(self.btn_fit)
+        quick_layout.addWidget(self.btn_fill)
+        quick_layout.addWidget(self.btn_center)
         return quick_box
 
-    def _build_adjust_box(self) -> QGroupBox:
-        """画像位置と拡大率の編集グループを構築する。"""
-        adjust_box = QGroupBox("画像位置と拡大")
+    def _build_adjust_box_with_reset_buttons(self) -> QGroupBox:
+        """位置と拡大率の個別リセット付き調整グループを構築する。"""
+        adjust_box = QGroupBox("位置と拡大率")
         adjust_form = QFormLayout(adjust_box)
         self.spin_offset_x = self._build_double_spin(
             -20000.0,
@@ -569,12 +807,30 @@ class CanvasPreviewDialog(QDialog):
             decimals=1,
             suffix=" %",
         )
+        self.btn_reset_offset_x = self._build_reset_button(
+            self._reset_offset_x,
+            tooltip="X位置を初期値に戻す",
+        )
+        self.btn_reset_offset_y = self._build_reset_button(
+            self._reset_offset_y,
+            tooltip="Y位置を初期値に戻す",
+        )
+        self.btn_reset_scale = self._build_reset_button(
+            self._reset_scale,
+            tooltip="拡大率を初期値に戻す",
+        )
         self.spin_offset_x.valueChanged.connect(self._on_manual_transform_changed)
         self.spin_offset_y.valueChanged.connect(self._on_manual_transform_changed)
         self.spin_scale.valueChanged.connect(self._on_manual_transform_changed)
-        adjust_form.addRow("X位置", self.spin_offset_x)
-        adjust_form.addRow("Y位置", self.spin_offset_y)
-        adjust_form.addRow("拡大率", self.spin_scale)
+        adjust_form.addRow(
+            "X位置", self._build_adjust_spin_row(self.spin_offset_x, self.btn_reset_offset_x)
+        )
+        adjust_form.addRow(
+            "Y位置", self._build_adjust_spin_row(self.spin_offset_y, self.btn_reset_offset_y)
+        )
+        adjust_form.addRow(
+            "拡大率", self._build_adjust_spin_row(self.spin_scale, self.btn_reset_scale)
+        )
         return adjust_box
 
     def _build_rotation_box(self) -> QGroupBox:
@@ -685,6 +941,30 @@ class CanvasPreviewDialog(QDialog):
         spin.setSuffix(str(suffix))
         configure_numeric_input(spin, min_width=84, min_height=30)
         return spin
+
+    def _build_adjust_spin_row(self, spin: QDoubleSpinBox, reset_button: QToolButton) -> QWidget:
+        """数値入力と個別リセットボタンの行を構築する。"""
+        row = QWidget()
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        layout.addWidget(spin, 1)
+        layout.addWidget(reset_button, 0)
+        return row
+
+    def _build_reset_button(self, callback, *, tooltip: str) -> QToolButton:
+        """個別値を初期値へ戻すアイコンボタンを構築する。"""
+        button = QToolButton()
+        button.setToolButtonStyle(Qt.ToolButtonIconOnly)
+        button.setAutoRaise(False)
+        button.setText("")
+        button.setToolTip(str(tooltip))
+        button.setAccessibleName(str(tooltip))
+        button.setIconSize(_RESET_ICON_SIZE)
+        button.setFixedSize(_RESET_BUTTON_SIZE)
+        button.setIcon(_reset_icon_from_palette(button))
+        button.clicked.connect(callback)
+        return button
 
     def _apply_initial_state(self) -> None:
         """初期選択と最初のフィット状態を適用する。"""
@@ -843,6 +1123,12 @@ class CanvasPreviewDialog(QDialog):
         cfg[APP_C.CFG_CANVAS_RATIO_PRESETS] = canvas_ratio_presets_to_payload(self._ratio_presets)
         save_config(cfg)
 
+    def _save_background_tone(self) -> None:
+        """透明背景トーンの現在値を設定へ保存する。"""
+        cfg = load_config()
+        cfg[APP_C.CFG_CANVAS_PREVIEW_BACKGROUND_TONE] = str(self._background_tone)
+        save_config(cfg)
+
     def _preset_list_text(self, preset: CanvasRatioPreset) -> str:
         """一覧表示用の表示名を返す。"""
         return str(preset.name or "").strip() or str(preset.default_name or "").strip()
@@ -898,9 +1184,7 @@ class CanvasPreviewDialog(QDialog):
             self.btn_save_preset.setEnabled(True)
             self.btn_save_preset.setToolTip("")
             self.btn_delete_preset.setEnabled(not is_builtin)
-            self.btn_delete_preset.setToolTip(
-                _BUILTIN_PRESET_DELETE_TOOLTIP if is_builtin else ""
-            )
+            self.btn_delete_preset.setToolTip(_BUILTIN_PRESET_DELETE_TOOLTIP if is_builtin else "")
         except Exception as exc:
             self._log_exception("canvas_preview_sync_preset_editor_fail", exc)
             raise
@@ -909,6 +1193,21 @@ class CanvasPreviewDialog(QDialog):
             preset_name=str(preset.name),
             preset_builtin=bool(is_builtin),
         )
+
+    def _reset_buttons(self) -> tuple[QToolButton, ...]:
+        """個別リセットボタンをまとめて返す。"""
+        buttons = (
+            getattr(self, "btn_reset_offset_x", None),
+            getattr(self, "btn_reset_offset_y", None),
+            getattr(self, "btn_reset_scale", None),
+        )
+        return tuple(button for button in buttons if isinstance(button, QToolButton))
+
+    def _refresh_reset_button_icons(self) -> None:
+        """テーマや DPI に合わせて個別リセットアイコンを描き直す。"""
+        for button in self._reset_buttons():
+            button.setIcon(_reset_icon_from_palette(button))
+            button.setIconSize(_RESET_ICON_SIZE)
 
     def set_theme(self, theme) -> None:
         """テーマ変更をダイアログへ即時反映する。"""
@@ -937,10 +1236,12 @@ class CanvasPreviewDialog(QDialog):
                 self.list_ratio_presets.viewport(),
                 self.btn_background_light,
                 self.btn_background_dark,
+                *self._reset_buttons(),
                 self.preview_widget,
             )
             for widget in widgets:
                 refresh_widget_style(widget)
+            self._refresh_reset_button_icons()
             self.list_ratio_presets.viewport().update()
             self.preview_widget.update()
             self.update()
@@ -1036,6 +1337,18 @@ class CanvasPreviewDialog(QDialog):
         """位置だけを中央へ戻す。"""
         self._set_transform(offset_x=0.0, offset_y=0.0, preserve_fit_mode=True)
 
+    def _reset_offset_x(self) -> None:
+        """X位置だけを初期値へ戻す。"""
+        self._set_transform(offset_x=0.0, preserve_fit_mode=True)
+
+    def _reset_offset_y(self) -> None:
+        """Y位置だけを初期値へ戻す。"""
+        self._set_transform(offset_y=0.0, preserve_fit_mode=True)
+
+    def _reset_scale(self) -> None:
+        """拡大率だけを初期値へ戻す。"""
+        self._set_transform(scale=1.0)
+
     def _rotate_by(self, delta_deg: float) -> None:
         """相対回転を適用する。"""
         rotation = float(self._transform.rotation_deg) + float(delta_deg)
@@ -1052,10 +1365,6 @@ class CanvasPreviewDialog(QDialog):
     def _reset_preview_zoom(self) -> None:
         """プレビュー全体の表示倍率を 100% に戻す。"""
         self._set_preview_zoom(1.0)
-
-    def _fit_preview_to_content(self) -> None:
-        """画像全体とキャンバス枠が見える表示倍率へ戻す。"""
-        self._set_preview_zoom(self.preview_widget.content_fit_zoom())
 
     def _preset_index_in(self, presets: list[CanvasRatioPreset]) -> int:
         """現在選択中 ID の index を一覧内から返す。"""
@@ -1103,7 +1412,9 @@ class CanvasPreviewDialog(QDialog):
                 include_canvas=True,
             )
         except Exception as exc:
-            self._log_exception("canvas_preview_sync_view_and_labels_fail", exc, include_canvas=True)
+            self._log_exception(
+                "canvas_preview_sync_view_and_labels_fail", exc, include_canvas=True
+            )
             raise
         self._log_debug("canvas_preview_sync_view_and_labels_ok", include_canvas=True)
 
@@ -1121,9 +1432,7 @@ class CanvasPreviewDialog(QDialog):
         self.btn_background_light.setChecked(
             self._background_tone == CANVAS_PREVIEW_BACKGROUND_LIGHT
         )
-        self.btn_background_dark.setChecked(
-            self._background_tone == CANVAS_PREVIEW_BACKGROUND_DARK
-        )
+        self.btn_background_dark.setChecked(self._background_tone == CANVAS_PREVIEW_BACKGROUND_DARK)
 
     def _sync_preview_zoom_label(self) -> None:
         """プレビュー倍率ラベルだけを同期する。"""
@@ -1404,6 +1713,7 @@ class CanvasPreviewDialog(QDialog):
             else CANVAS_PREVIEW_BACKGROUND_LIGHT
         )
         self.preview_widget.set_background_tone(self._background_tone)
+        self._save_background_tone()
 
     def _on_orientation_toggled(self) -> None:
         """向き切替を反映する。"""

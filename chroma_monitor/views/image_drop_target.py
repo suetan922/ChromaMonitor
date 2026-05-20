@@ -8,6 +8,84 @@ from PySide6.QtWidgets import QLabel, QWidget
 from ..util.theme import get_ui_theme, qcolor
 
 
+def _overlay_style_payload(theme_name: str | None) -> tuple[tuple[int, ...], str]:
+    """テーマ名から overlay style の比較キーと stylesheet を作る。"""
+    theme = get_ui_theme(theme_name)
+    fill = qcolor(theme.panel_bg, 176)
+    border = qcolor(theme.accent, 132)
+    text = qcolor(theme.text_primary)
+    style_key = (
+        fill.red(),
+        fill.green(),
+        fill.blue(),
+        fill.alpha(),
+        border.red(),
+        border.green(),
+        border.blue(),
+        border.alpha(),
+        text.red(),
+        text.green(),
+        text.blue(),
+        text.alpha(),
+    )
+    stylesheet = (
+        "font-size:14px; font-weight:600; border-radius:6px;"
+        f"background:rgba({fill.red()}, {fill.green()}, {fill.blue()}, {fill.alpha()});"
+        f"border:2px dashed rgba({border.red()}, {border.green()}, {border.blue()}, {border.alpha()});"
+        f"color:rgba({text.red()}, {text.green()}, {text.blue()}, {text.alpha()});"
+    )
+    return style_key, stylesheet
+
+
+def _apply_overlay_label_style(
+    overlay: QLabel,
+    *,
+    theme_name: str | None,
+    cached_key: tuple[int, ...] | None,
+) -> tuple[int, ...]:
+    """必要なときだけ overlay stylesheet を再適用する。"""
+    style_key, stylesheet = _overlay_style_payload(theme_name)
+    if style_key != cached_key:
+        overlay.setStyleSheet(stylesheet)
+    return style_key
+
+
+def _set_overlay_visible(
+    overlay: QLabel,
+    visible: bool,
+    *,
+    raise_when_visible: bool = False,
+) -> None:
+    """表示状態だけが変わるときだけ overlay visibility を更新する。"""
+    target_visible = bool(visible)
+    if overlay.isVisible() != target_visible:
+        overlay.setVisible(target_visible)
+    if target_visible and raise_when_visible:
+        overlay.raise_()
+
+
+def _extract_supported_drop_paths(
+    mime_data,
+    path_filter: Callable[[str], bool],
+) -> list[str]:
+    """mime data から重複を除いた対応ファイル一覧を取り出す。"""
+    if mime_data is None or not bool(mime_data.hasUrls()):
+        return []
+    paths: list[str] = []
+    seen: set[str] = set()
+    for url in mime_data.urls():
+        if url is None or not bool(url.isLocalFile()):
+            continue
+        path = str(url.toLocalFile() or "").strip()
+        if not path or path in seen:
+            continue
+        if not bool(path_filter(path)):
+            continue
+        seen.add(path)
+        paths.append(path)
+    return paths
+
+
 class ImageDropTargetController(QObject):
     """既存 widget に drag & drop オーバーレイと受付処理を追加する。"""
 
@@ -31,6 +109,7 @@ class ImageDropTargetController(QObject):
         self._overlay.setWordWrap(True)
         self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._overlay.hide()
+        self._overlay_style_key: tuple[int, ...] | None = None
         self._apply_overlay_style()
         self._sync_overlay_geometry()
         widget.setAcceptDrops(True)
@@ -39,15 +118,10 @@ class ImageDropTargetController(QObject):
     def _apply_overlay_style(self) -> None:
         """現在テーマに合わせてオーバーレイを描画する。"""
         theme_name = getattr(self._widget.window(), "_ui_theme_name", None)
-        theme = get_ui_theme(theme_name)
-        fill = qcolor(theme.panel_bg, 176)
-        border = qcolor(theme.accent, 132)
-        text = qcolor(theme.text_primary)
-        self._overlay.setStyleSheet(
-            "font-size:14px; font-weight:600; border-radius:6px;"
-            f"background:rgba({fill.red()}, {fill.green()}, {fill.blue()}, {fill.alpha()});"
-            f"border:2px dashed rgba({border.red()}, {border.green()}, {border.blue()}, {border.alpha()});"
-            f"color:rgba({text.red()}, {text.green()}, {text.blue()}, {text.alpha()});"
+        self._overlay_style_key = _apply_overlay_label_style(
+            self._overlay,
+            theme_name=theme_name,
+            cached_key=self._overlay_style_key,
         )
 
     def _sync_overlay_geometry(self) -> None:
@@ -57,25 +131,11 @@ class ImageDropTargetController(QObject):
 
     def _show_overlay(self, visible: bool) -> None:
         """オーバーレイの一時表示を切り替える。"""
-        self._overlay.setVisible(bool(visible))
+        _set_overlay_visible(self._overlay, visible)
 
     def _extract_supported_paths(self, mime_data) -> list[str]:
         """mime data から対応画像ファイルのみ抽出する。"""
-        if mime_data is None or not bool(mime_data.hasUrls()):
-            return []
-        paths: list[str] = []
-        seen: set[str] = set()
-        for url in mime_data.urls():
-            if url is None or not bool(url.isLocalFile()):
-                continue
-            path = str(url.toLocalFile() or "").strip()
-            if not path or path in seen:
-                continue
-            if not bool(self._path_filter(path)):
-                continue
-            seen.add(path)
-            paths.append(path)
-        return paths
+        return _extract_supported_drop_paths(mime_data, self._path_filter)
 
     def _accepts(self, mime_data) -> tuple[bool, list[str]]:
         """現在の drag / drop を受け付けるか返す。"""
@@ -234,6 +294,7 @@ class DockAreaImageDropController(QObject):
         self._overlay.setWordWrap(True)
         self._overlay.setAttribute(Qt.WA_TransparentForMouseEvents, True)
         self._overlay.hide()
+        self._overlay_style_key: tuple[int, ...] | None = None
         self._apply_overlay_style()
         self._sync_overlay_geometry()
         self._install_watch_targets()
@@ -254,15 +315,10 @@ class DockAreaImageDropController(QObject):
     def _apply_overlay_style(self) -> None:
         """現在テーマに合わせてオーバーレイを描画する。"""
         theme_name = getattr(self._main_window, "_ui_theme_name", None)
-        theme = get_ui_theme(theme_name)
-        fill = qcolor(theme.panel_bg, 176)
-        border = qcolor(theme.accent, 132)
-        text = qcolor(theme.text_primary)
-        self._overlay.setStyleSheet(
-            "font-size:14px; font-weight:600; border-radius:6px;"
-            f"background:rgba({fill.red()}, {fill.green()}, {fill.blue()}, {fill.alpha()});"
-            f"border:2px dashed rgba({border.red()}, {border.green()}, {border.blue()}, {border.alpha()});"
-            f"color:rgba({text.red()}, {text.green()}, {text.blue()}, {text.alpha()});"
+        self._overlay_style_key = _apply_overlay_label_style(
+            self._overlay,
+            theme_name=theme_name,
+            cached_key=self._overlay_style_key,
         )
 
     def _dock_area_rect(self) -> QRect:
@@ -288,27 +344,11 @@ class DockAreaImageDropController(QObject):
     def _show_overlay(self, visible: bool) -> None:
         """overlay の表示を切り替える。"""
         visible = bool(visible) and not self._dock_area_rect().isNull()
-        self._overlay.setVisible(visible)
-        if visible:
-            self._overlay.raise_()
+        _set_overlay_visible(self._overlay, visible, raise_when_visible=True)
 
     def _extract_supported_paths(self, mime_data) -> list[str]:
         """mime data から対応画像ファイルのみ抽出する。"""
-        if mime_data is None or not bool(mime_data.hasUrls()):
-            return []
-        paths: list[str] = []
-        seen: set[str] = set()
-        for url in mime_data.urls():
-            if url is None or not bool(url.isLocalFile()):
-                continue
-            path = str(url.toLocalFile() or "").strip()
-            if not path or path in seen:
-                continue
-            if not bool(self._path_filter(path)):
-                continue
-            seen.add(path)
-            paths.append(path)
-        return paths
+        return _extract_supported_drop_paths(mime_data, self._path_filter)
 
     def _event_pos_in_main_window(self, obj, event) -> QPoint:
         """drag event 座標を main window ローカル座標へ変換する。"""

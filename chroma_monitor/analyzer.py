@@ -164,6 +164,7 @@ class AnalyzerWorker(QObject):
         self._was_stable: bool = False
         self._cooldown_until: float = 0.0
         self._force_emit_once: bool = False
+        self._force_graph_update_once: bool = False
         # 複数画面の論理<->物理座標対応は画面構成が変わるまで再利用する。
         self._screen_monitor_map_cache: Optional[dict] = None
         self._screen_monitor_map_signature: tuple = ()
@@ -242,6 +243,11 @@ class AnalyzerWorker(QObject):
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
         self.status.emit("計測開始")
+
+    def request_graph_refresh_once(self) -> None:
+        """Force exactly one graph refresh on the next loop."""
+        with self._state_lock:
+            self._force_graph_update_once = True
 
     def stop(self):
         """解析スレッドへ停止要求を出す。"""
@@ -603,6 +609,9 @@ class AnalyzerWorker(QObject):
         self, cfg: AnalyzerConfig, bgr: np.ndarray
     ) -> tuple[bool, bool]:
         """更新モードに応じて通知可否とグラフ更新可否を返す。"""
+        with self._state_lock:
+            force_graph_update = self._force_graph_update_once
+            self._force_graph_update_once = False
         if cfg.mode == C.UPDATE_MODE_CHANGE:
             emit_now = self._should_emit_in_change_mode(
                 bgr,
@@ -610,11 +619,15 @@ class AnalyzerWorker(QObject):
                 cfg=cfg,
             )
             # changeモードで発火したときは全ビューを同じタイミングで更新
+            if force_graph_update:
+                emit_now = True
             return bool(emit_now), bool(emit_now)
 
         # intervalモードでは graph_every 間隔でグラフ更新する。
         self._frame += 1
         graph_update = self._frame % cfg.graph_every == 0
+        if force_graph_update:
+            graph_update = True
         return True, bool(graph_update)
 
     def _frame_decision_for_loop(

@@ -81,8 +81,7 @@ def _abort_live_start(
     if bool(warning):
         QMessageBox.warning(main_window, "画像解析", message)
     # checkable QPushButton は click 時点で ON になるため、失敗時は明示的に戻す。
-    set_run_toggle_state(main_window, False)
-    main_window.btn_stop_bar.setChecked(False)
+    _sync_live_run_toggle_state(main_window)
 
 
 def set_image_analysis_busy(main_window, busy: bool):

@@ -143,6 +143,7 @@ def build_toolbar(main_window) -> None:
     main_window.act_load_image_from_clipboard.triggered.connect(
         main_window.on_load_image_from_clipboard
     )
+    ensure_menu_popup_width(main_window, load_menu)
     main_window.btn_load_image_bar.setMenu(load_menu)
     toolbar.addWidget(main_window.btn_start_bar)
     toolbar.addWidget(main_window.btn_stop_bar)
@@ -170,9 +171,6 @@ def setup_preview_and_docks(main_window) -> None:
     main_window.slider_scatter_hue_center.valueChanged.connect(main_window.apply_scatter_settings)
     main_window._sync_scatter_filter_controls()
     for dock in main_window._dock_map.values():
-        dock.visibilityChanged.connect(
-            lambda _visible, self=main_window: self._sync_worker_view_flags()
-        )
         dock.topLevelChanged.connect(
             lambda visible, d=dock, self=main_window: self._on_dock_top_level_changed(
                 d,

@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import math
 import os
 
-from PySide6.QtCore import QPoint, Qt
+from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
 from PySide6.QtGui import QImage, QPainter
 from PySide6.QtWidgets import QApplication
 
@@ -46,13 +47,148 @@ def _relative_luminance(color) -> float:
     )
 
 
+def _first_point_in_path(path) -> QPointF | None:
+    bounds = path.boundingRect()
+    left = int(math.floor(bounds.left()))
+    top = int(math.floor(bounds.top()))
+    right = int(math.ceil(bounds.right()))
+    bottom = int(math.ceil(bounds.bottom()))
+    for y_pos in range(top, bottom + 1):
+        for x_pos in range(left, right + 1):
+            point = QPointF(float(x_pos) + 0.5, float(y_pos) + 0.5)
+            if path.contains(point):
+                return point
+    return None
+
+
+def _path_from_polygon(polygon) -> object:
+    from PySide6.QtGui import QPainterPath
+
+    path = QPainterPath()
+    path.setFillRule(Qt.WindingFill)
+    path.addPolygon(polygon)
+    path.closeSubpath()
+    return path
+
+
+def _sample_points_in_path(
+    path,
+    *,
+    canvas_rect,
+    require_inside_canvas: bool,
+    visible_rect=None,
+    limit: int = 3,
+) -> list[QPointF]:
+    points: list[QPointF] = []
+    bounds = path.boundingRect()
+    left = int(math.floor(bounds.left()))
+    top = int(math.floor(bounds.top()))
+    right = int(math.ceil(bounds.right()))
+    bottom = int(math.ceil(bounds.bottom()))
+    for y_pos in range(top, bottom + 1, 4):
+        for x_pos in range(left, right + 1, 4):
+            point = QPointF(float(x_pos) + 0.5, float(y_pos) + 0.5)
+            if not path.contains(point):
+                continue
+            if not all(
+                path.contains(QPointF(point.x() + dx, point.y() + dy))
+                for dx, dy in ((-6.0, 0.0), (6.0, 0.0), (0.0, -6.0), (0.0, 6.0))
+            ):
+                continue
+            if visible_rect is not None and not visible_rect.adjusted(4.0, 4.0, -4.0, -4.0).contains(point):
+                continue
+            inside_canvas = canvas_rect.contains(point)
+            if inside_canvas != require_inside_canvas:
+                continue
+            if inside_canvas:
+                if not canvas_rect.adjusted(28.0, 28.0, -28.0, -28.0).contains(point):
+                    continue
+                if abs(point.x() - canvas_rect.center().x()) < 8.0:
+                    continue
+                if abs(point.y() - canvas_rect.center().y()) < 8.0:
+                    continue
+            else:
+                near_canvas_x = canvas_rect.left() - 4.0 <= point.x() <= canvas_rect.right() + 4.0
+                near_canvas_y = canvas_rect.top() - 4.0 <= point.y() <= canvas_rect.bottom() + 4.0
+                if near_canvas_x and near_canvas_y:
+                    continue
+            points.append(point)
+            if len(points) >= int(limit):
+                return points
+    if points:
+        return points
+    raise AssertionError("sample points not found")
+
+
+def _assert_render_keeps_canvas_inside_normal_and_outside_muted(
+    *,
+    image_size: tuple[int, int],
+    canvas_size: tuple[int, int],
+    transform: CanvasPreviewTransform,
+    view_zoom: float = 1.0,
+) -> None:
+    app = _app()
+    widget = CanvasPreviewWidget()
+    widget.set_theme(get_ui_theme(C.UI_THEME_LIGHT))
+    widget.resize(760, 620)
+
+    source = QImage(image_size[0], image_size[1], QImage.Format_RGB32)
+    source.fill(qcolor("#4AA5FF"))
+    widget.set_source_image(source)
+    widget.set_canvas_pixels(*canvas_size)
+    widget.set_view_zoom(view_zoom)
+    widget.set_transform_state(transform)
+    widget.show()
+    app.processEvents()
+
+    canvas_rect = widget._canvas_rect()
+    visible_rect = widget._viewport_rect()
+    image_path = _path_from_polygon(widget._image_polygon_for_rect(canvas_rect))
+    inside_points = _sample_points_in_path(
+        image_path,
+        canvas_rect=canvas_rect,
+        require_inside_canvas=True,
+        visible_rect=visible_rect,
+    )
+    outside_points = _sample_points_in_path(
+        widget._cropped_image_path(widget._image_polygon_for_rect(canvas_rect), canvas_rect),
+        canvas_rect=canvas_rect,
+        require_inside_canvas=False,
+        visible_rect=visible_rect,
+    )
+    rendered = _render_widget(widget)
+
+    source_color = qcolor("#4AA5FF")
+
+    inside_colors = [
+        rendered.pixelColor(int(point.x()), int(point.y()))
+        for point in inside_points
+    ]
+    outside_colors = [
+        rendered.pixelColor(int(point.x()), int(point.y()))
+        for point in outside_points
+    ]
+    for inside_color in inside_colors:
+        assert abs(inside_color.red() - source_color.red()) <= 12
+        assert abs(inside_color.green() - source_color.green()) <= 12
+        assert abs(inside_color.blue() - source_color.blue()) <= 12
+    min_inside_saturation = min(color.saturation() for color in inside_colors)
+    min_inside_luminance = min(_relative_luminance(color) for color in inside_colors)
+    for outside_color in outside_colors:
+        assert outside_color.saturation() < min_inside_saturation
+        assert _relative_luminance(outside_color) < min_inside_luminance
+
+    widget.close()
+    app.processEvents()
+
+
 def test_canvas_preview_outside_region_is_muted_and_has_red_crop_outline() -> None:
     app = _app()
     widget = CanvasPreviewWidget()
     widget.set_theme(get_ui_theme(C.UI_THEME_LIGHT))
     widget.resize(480, 360)
 
-    source = QImage(240, 120, QImage.Format_RGB32)
+    source = QImage(240, 240, QImage.Format_RGB32)
     source.fill(qcolor("#4AA5FF"))
     widget.set_source_image(source)
     widget.set_canvas_pixels(120, 120)
@@ -156,6 +292,79 @@ def test_canvas_preview_does_not_mask_inside_area_when_edge_aligned() -> None:
     app.processEvents()
 
 
+def test_canvas_preview_masks_only_outside_when_image_shifted_left_up() -> None:
+    _assert_render_keeps_canvas_inside_normal_and_outside_muted(
+        image_size=(1046, 1503),
+        canvas_size=(1127, 1503),
+        transform=CanvasPreviewTransform(offset_x=-498.9, offset_y=-93.3, scale=1.0),
+    )
+
+
+def test_canvas_preview_masks_only_outside_when_image_shifted_left_up_farther() -> None:
+    _assert_render_keeps_canvas_inside_normal_and_outside_muted(
+        image_size=(1046, 1503),
+        canvas_size=(1127, 1503),
+        transform=CanvasPreviewTransform(offset_x=-470.9, offset_y=-312.5, scale=1.0),
+    )
+
+
+def test_canvas_preview_masks_only_outside_when_image_shifted_right_down() -> None:
+    _assert_render_keeps_canvas_inside_normal_and_outside_muted(
+        image_size=(1046, 1503),
+        canvas_size=(1127, 1503),
+        transform=CanvasPreviewTransform(offset_x=498.9, offset_y=93.3, scale=1.0),
+    )
+
+
+def test_canvas_preview_masks_only_outside_with_rotation() -> None:
+    _assert_render_keeps_canvas_inside_normal_and_outside_muted(
+        image_size=(320, 220),
+        canvas_size=(240, 240),
+        transform=CanvasPreviewTransform(offset_x=20.0, offset_y=-18.0, scale=1.25, rotation_deg=27.0),
+    )
+
+
+def test_canvas_preview_masks_only_outside_with_view_zoom() -> None:
+    _assert_render_keeps_canvas_inside_normal_and_outside_muted(
+        image_size=(320, 220),
+        canvas_size=(240, 240),
+        transform=CanvasPreviewTransform(offset_x=-42.0, offset_y=20.0, scale=1.2),
+        view_zoom=0.8,
+    )
+
+
+def test_canvas_preview_crop_path_stays_outside_canvas_with_rotation_and_zoom() -> None:
+    app = _app()
+    widget = CanvasPreviewWidget()
+    widget.set_theme(get_ui_theme(C.UI_THEME_LIGHT))
+    widget.resize(520, 420)
+
+    source = QImage(220, 140, QImage.Format_RGB32)
+    source.fill(qcolor("#4AA5FF"))
+    widget.set_source_image(source)
+    widget.set_canvas_pixels(120, 120)
+    widget.set_view_zoom(1.6)
+    widget.set_transform_state(
+        CanvasPreviewTransform(offset_x=18.0, offset_y=-12.0, scale=1.35, rotation_deg=27.0)
+    )
+
+    canvas_rect = widget._canvas_rect()
+    cropped_path = widget._cropped_image_path(
+        widget._image_polygon_for_rect(canvas_rect),
+        canvas_rect,
+    )
+    outside_point = _first_point_in_path(cropped_path)
+
+    assert cropped_path.isEmpty() is False
+    assert outside_point is not None
+    assert canvas_rect.contains(outside_point) is False
+    assert cropped_path.contains(outside_point) is True
+    assert cropped_path.contains(canvas_rect.center()) is False
+
+    widget.close()
+    app.processEvents()
+
+
 def test_canvas_preview_background_tone_switches_checker_only() -> None:
     app = _app()
     widget = CanvasPreviewWidget()
@@ -208,6 +417,200 @@ def test_canvas_preview_background_tone_switches_checker_only() -> None:
     assert _relative_luminance(light_color) > _relative_luminance(dark_color)
     assert light_viewport_color == dark_viewport_color
     assert light_outer_color == dark_outer_color
+
+    widget.close()
+    app.processEvents()
+
+
+def _assert_checker_tiles_are_clipped_inside_canvas(tone: str) -> None:
+    app = _app()
+    widget = CanvasPreviewWidget()
+    widget.set_theme(get_ui_theme(C.UI_THEME_LIGHT))
+    widget.set_background_tone(tone)
+    widget.set_source_image(QImage(1046, 1503, QImage.Format_RGB32))
+    widget.set_canvas_pixels(1503, 1503)
+    widget.set_view_zoom(3.0)
+    widget.set_transform_state(
+        CanvasPreviewTransform(
+            offset_x=0.7515,
+            offset_y=329.41205,
+            scale=1.4383393881453153,
+        )
+    )
+
+    base_color = qcolor("#335577")
+    image = QImage(220, 220, QImage.Format_ARGB32_Premultiplied)
+    image.fill(base_color)
+    painter = QPainter(image)
+    try:
+        canvas_rect = QRectF(40.35, 38.65, 140.3, 140.3)
+        widget._draw_checker_background(painter, canvas_rect, theme=get_ui_theme(C.UI_THEME_LIGHT))
+    finally:
+        painter.end()
+
+    checker_colors = {color.rgb() for color in widget._checker_colors()}
+    inset = max(widget._CANVAS_BORDER_HALO_WIDTH, widget._CANVAS_BORDER_WIDTH) * 0.5
+    inside_color = image.pixelColor(
+        int(canvas_rect.left() + inset + 8.0),
+        int(canvas_rect.top() + inset + 8.0),
+    )
+    outside_points = (
+        (int(canvas_rect.left()) - 1, int(canvas_rect.center().y())),
+        (int(canvas_rect.left()) - 3, int(canvas_rect.center().y())),
+        (int(canvas_rect.right()) + 1, int(canvas_rect.center().y())),
+        (int(canvas_rect.right()) + 3, int(canvas_rect.center().y())),
+        (int(canvas_rect.center().x()), int(canvas_rect.top()) - 1),
+        (int(canvas_rect.center().x()), int(canvas_rect.top()) - 3),
+        (int(canvas_rect.center().x()), int(canvas_rect.bottom()) + 1),
+        (int(canvas_rect.center().x()), int(canvas_rect.bottom()) + 3),
+    )
+
+    assert inside_color.rgb() in checker_colors
+    for x_pos, y_pos in outside_points:
+        assert image.pixelColor(x_pos, y_pos).rgb() == base_color.rgb()
+
+    widget.close()
+    app.processEvents()
+
+
+def test_canvas_preview_checker_tiles_do_not_bleed_outside_canvas_light_tone() -> None:
+    _assert_checker_tiles_are_clipped_inside_canvas(CANVAS_PREVIEW_BACKGROUND_LIGHT)
+
+
+def test_canvas_preview_checker_tiles_do_not_bleed_outside_canvas_dark_tone() -> None:
+    _assert_checker_tiles_are_clipped_inside_canvas(CANVAS_PREVIEW_BACKGROUND_DARK)
+
+
+def _assert_checker_tiles_do_not_bleed_in_final_render(tone: str) -> None:
+    app = _app()
+    widget = CanvasPreviewWidget()
+    widget.set_theme(get_ui_theme(C.UI_THEME_LIGHT))
+    widget.resize(2400, 620)
+    widget.set_background_tone(tone)
+
+    source = QImage(1046, 1503, QImage.Format_ARGB32_Premultiplied)
+    source.fill(Qt.transparent)
+    widget.set_source_image(source)
+    widget.set_canvas_pixels(1503, 1503)
+    widget.set_view_zoom(3.0)
+    widget.set_transform_state(
+        CanvasPreviewTransform(
+            offset_x=0.7515,
+            offset_y=329.41205,
+            scale=1.4383393881453153,
+        )
+    )
+    widget.show()
+    app.processEvents()
+
+    rendered = _render_widget(widget)
+    canvas_rect = widget._canvas_rect()
+    checker_colors = {color.rgb() for color in widget._checker_colors()}
+    inset = max(widget._CANVAS_BORDER_HALO_WIDTH, widget._CANVAS_BORDER_WIDTH) * 0.5
+    sample_y = int(widget._viewport_rect().top() + 96)
+    inside_x = int(canvas_rect.left() + inset + 18)
+    inside_color = rendered.pixelColor(inside_x, sample_y)
+    outside_points = (
+        (int(math.floor(canvas_rect.left())) - 1, sample_y),
+        (int(math.floor(canvas_rect.left())) - 2, sample_y),
+        (int(math.floor(canvas_rect.left())) - 3, sample_y),
+        (int(math.ceil(canvas_rect.right())) + 1, sample_y),
+        (int(math.ceil(canvas_rect.right())) + 2, sample_y),
+        (int(math.ceil(canvas_rect.right())) + 3, sample_y),
+    )
+
+    assert inside_color.rgb() in checker_colors
+    for x_pos, y_pos in outside_points:
+        assert rendered.pixelColor(x_pos, y_pos).rgb() not in checker_colors
+
+    widget.close()
+    app.processEvents()
+
+
+def test_canvas_preview_checker_tiles_do_not_bleed_in_final_render_light_tone() -> None:
+    _assert_checker_tiles_do_not_bleed_in_final_render(CANVAS_PREVIEW_BACKGROUND_LIGHT)
+
+
+def test_canvas_preview_checker_tiles_do_not_bleed_in_final_render_dark_tone() -> None:
+    _assert_checker_tiles_do_not_bleed_in_final_render(CANVAS_PREVIEW_BACKGROUND_DARK)
+
+
+def test_canvas_preview_viewport_border_stays_above_checker_at_high_zoom() -> None:
+    app = _app()
+    widget = CanvasPreviewWidget()
+    widget.set_theme(get_ui_theme(C.UI_THEME_LIGHT))
+    widget.resize(760, 620)
+
+    source = QImage(1046, 1503, QImage.Format_ARGB32_Premultiplied)
+    source.fill(Qt.transparent)
+    widget.set_source_image(source)
+    widget.set_canvas_pixels(1503, 1503)
+    widget.set_view_zoom(3.0)
+    widget.set_transform_state(
+        CanvasPreviewTransform(
+            offset_x=0.7515,
+            offset_y=329.41205,
+            scale=1.4383393881453153,
+        )
+    )
+    widget.show()
+    app.processEvents()
+
+    rendered = _render_widget(widget)
+    viewport_rect = widget._viewport_rect()
+    checker_colors = {color.rgb() for color in widget._checker_colors()}
+    border_points = (
+        (int(viewport_rect.left()), int(viewport_rect.center().y())),
+        (int(viewport_rect.right()), int(viewport_rect.center().y())),
+        (int(viewport_rect.center().x()), int(viewport_rect.top())),
+        (int(viewport_rect.center().x()), int(viewport_rect.bottom())),
+    )
+    inside_color = rendered.pixelColor(
+        int(viewport_rect.left() + 24),
+        int(viewport_rect.top() + 48),
+    )
+
+    assert inside_color.rgb() in checker_colors
+    for x_pos, y_pos in border_points:
+        assert rendered.pixelColor(x_pos, y_pos).rgb() not in checker_colors
+
+    widget.close()
+    app.processEvents()
+
+
+def test_canvas_preview_scene_is_clipped_inside_viewport_border_at_high_zoom() -> None:
+    app = _app()
+    widget = CanvasPreviewWidget()
+    widget.set_theme(get_ui_theme(C.UI_THEME_LIGHT))
+    widget.resize(760, 620)
+
+    source = QImage(700, 427, QImage.Format_ARGB32_Premultiplied)
+    source.fill(Qt.transparent)
+    widget.set_source_image(source)
+    widget.set_canvas_pixels(700, 525)
+    widget.set_view_zoom(3.0)
+    widget.set_transform_state(CanvasPreviewTransform())
+    widget.show()
+    app.processEvents()
+
+    rendered = _render_widget(widget)
+    viewport_rect = widget._viewport_rect()
+    content_rect = widget._viewport_content_rect(viewport_rect)
+    checker_colors = {color.rgb() for color in widget._checker_colors()}
+    border_probe_points = (
+        (int(viewport_rect.left() + 1), int(viewport_rect.center().y())),
+        (int(viewport_rect.right() - 1), int(viewport_rect.center().y())),
+        (int(viewport_rect.center().x()), int(viewport_rect.top() + 1)),
+        (int(viewport_rect.center().x()), int(viewport_rect.bottom() - 1)),
+    )
+    content_color = rendered.pixelColor(
+        int(content_rect.left() + 48),
+        int(content_rect.top() + 48),
+    )
+
+    assert content_color.rgb() in checker_colors
+    for x_pos, y_pos in border_probe_points:
+        assert rendered.pixelColor(x_pos, y_pos).rgb() not in checker_colors
 
     widget.close()
     app.processEvents()
