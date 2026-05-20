@@ -126,7 +126,7 @@ def _app_resource_base_dir() -> Path:
 
 
 def _reset_icon_asset_paths() -> tuple[Path, ...]:
-    """reset icon asset ?????????"""
+    """reset icon asset の候補パスを返す。"""
     base = _app_resource_base_dir()
     exe_dir = Path(sys.executable).resolve().parent
     return (
@@ -137,7 +137,7 @@ def _reset_icon_asset_paths() -> tuple[Path, ...]:
 
 
 def _clear_reset_icon_caches() -> None:
-    """reset icon ?? cache ???????"""
+    """reset icon 用キャッシュをクリアする。"""
     global _RESET_ICON_SOURCE_CACHE
     global _RESET_ICON_SOURCE_BBOX_CACHE
     global _RESET_ICON_SOURCE_CACHE_KEY
@@ -150,7 +150,7 @@ def _clear_reset_icon_caches() -> None:
 
 
 def _load_reset_icon_source_pixmap() -> QPixmap:
-    """reset icon asset ?????? source pixmap ????"""
+    """reset icon asset を読み込み、source pixmap を返す。"""
     global _RESET_ICON_SOURCE_CACHE
     global _RESET_ICON_SOURCE_BBOX_CACHE
     global _RESET_ICON_SOURCE_CACHE_KEY
@@ -175,7 +175,7 @@ def _load_reset_icon_source_pixmap() -> QPixmap:
 
 
 def _source_alpha_bounding_rect(source: QPixmap) -> QRect:
-    """source pixmap ?????? bounding box ????"""
+    """source pixmap の不透明領域の bounding rect を返す。"""
     global _RESET_ICON_SOURCE_BBOX_CACHE
     global _RESET_ICON_SOURCE_CACHE_KEY
     if source.isNull():
@@ -215,7 +215,7 @@ def _source_alpha_bounding_rect(source: QPixmap) -> QRect:
 
 
 def _fallback_reset_icon_source_pixmap(widget: QWidget, size: QSize) -> QPixmap:
-    """asset ???? Qt ?? reload icon pixmap ????"""
+    """asset 不達時に Qt 標準 reload icon pixmap を返す。"""
     cache_key = (int(size.width()), int(size.height()))
     cached = _RESET_ICON_FALLBACK_CACHE.get(cache_key)
     if cached is not None:
@@ -234,7 +234,7 @@ def _tinted_icon_pixmap(
     size: QSize,
     device_pixel_ratio: float,
 ) -> QPixmap:
-    """source pixmap ????? tint ?? pixmap ????"""
+    """source pixmap を指定色で tint した pixmap を返す。"""
     if source.isNull():
         return QPixmap()
     source_rect = _source_alpha_bounding_rect(source)
@@ -280,7 +280,7 @@ def _reset_icon_pixmap(
     device_pixel_ratio: float,
     widget: QWidget | None = None,
 ) -> QPixmap:
-    """??????????? circular arrow ??????????"""
+    """reset icon pixmap を palette 色で生成する。"""
     source = _load_reset_icon_source_pixmap()
     if source.isNull() and widget is not None:
         source = _fallback_reset_icon_source_pixmap(widget, size)
@@ -293,7 +293,7 @@ def _reset_icon_pixmap(
 
 
 def _reset_icon_from_palette(widget: QWidget, *, size: QSize = _RESET_ICON_SIZE) -> QIcon:
-    """?? palette ?????????????????"""
+    """palette から通常/無効状態の reset icon を生成する。"""
     palette = widget.palette()
     ratio = float(widget.devicePixelRatioF())
     ratio_milli = max(1, int(round(ratio * 1000.0)))

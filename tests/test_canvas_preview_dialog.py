@@ -520,8 +520,8 @@ def test_app_stylesheet_uses_attached_baseline_tab_bar_style() -> None:
 
     assert 'QTabBar[chromaDockTabBar="true"]::tab' not in stylesheet
     assert "QTabBar::tab:bottom" not in stylesheet
-    assert "border-top-left-radius:4px" in stylesheet
-    assert "border-top-right-radius:4px" in stylesheet
+    assert "border-top-left-radius:0px" in stylesheet
+    assert "border-top-right-radius:0px" in stylesheet
 
 
 def test_canvas_preview_dialog_uses_single_ratio_list_and_wrapping_info_rows(monkeypatch) -> None:

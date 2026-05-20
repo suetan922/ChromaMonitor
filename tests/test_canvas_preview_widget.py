@@ -71,6 +71,14 @@ def _path_from_polygon(polygon) -> object:
     return path
 
 
+def _rect_path(rect: QRectF):
+    from PySide6.QtGui import QPainterPath
+
+    path = QPainterPath()
+    path.addRect(rect)
+    return path
+
+
 def _sample_points_in_path(
     path,
     *,
@@ -126,6 +134,7 @@ def _assert_render_keeps_canvas_inside_normal_and_outside_muted(
     canvas_size: tuple[int, int],
     transform: CanvasPreviewTransform,
     view_zoom: float = 1.0,
+    expect_visible_outside: bool = True,
 ) -> None:
     app = _app()
     widget = CanvasPreviewWidget()
@@ -150,12 +159,6 @@ def _assert_render_keeps_canvas_inside_normal_and_outside_muted(
         require_inside_canvas=True,
         visible_rect=visible_rect,
     )
-    outside_points = _sample_points_in_path(
-        widget._cropped_image_path(widget._image_polygon_for_rect(canvas_rect), canvas_rect),
-        canvas_rect=canvas_rect,
-        require_inside_canvas=False,
-        visible_rect=visible_rect,
-    )
     rendered = _render_widget(widget)
 
     source_color = qcolor("#4AA5FF")
@@ -164,19 +167,75 @@ def _assert_render_keeps_canvas_inside_normal_and_outside_muted(
         rendered.pixelColor(int(point.x()), int(point.y()))
         for point in inside_points
     ]
-    outside_colors = [
-        rendered.pixelColor(int(point.x()), int(point.y()))
-        for point in outside_points
-    ]
     for inside_color in inside_colors:
         assert abs(inside_color.red() - source_color.red()) <= 12
         assert abs(inside_color.green() - source_color.green()) <= 12
         assert abs(inside_color.blue() - source_color.blue()) <= 12
-    min_inside_saturation = min(color.saturation() for color in inside_colors)
-    min_inside_luminance = min(_relative_luminance(color) for color in inside_colors)
-    for outside_color in outside_colors:
-        assert outside_color.saturation() < min_inside_saturation
-        assert _relative_luminance(outside_color) < min_inside_luminance
+    if expect_visible_outside:
+        outside_points = _sample_points_in_path(
+            widget._cropped_image_path(widget._image_polygon_for_rect(canvas_rect), canvas_rect),
+            canvas_rect=canvas_rect,
+            require_inside_canvas=False,
+            visible_rect=visible_rect,
+        )
+        outside_colors = [
+            rendered.pixelColor(int(point.x()), int(point.y()))
+            for point in outside_points
+        ]
+        min_inside_saturation = min(color.saturation() for color in inside_colors)
+        min_inside_luminance = min(_relative_luminance(color) for color in inside_colors)
+        for outside_color in outside_colors:
+            assert outside_color.saturation() < min_inside_saturation
+            assert _relative_luminance(outside_color) < min_inside_luminance
+
+    widget.close()
+    app.processEvents()
+
+
+def _assert_render_keeps_inside_image_normal_when_canvas_has_margins(
+    *,
+    image_size: tuple[int, int],
+    canvas_size: tuple[int, int],
+    transform: CanvasPreviewTransform,
+    view_zoom: float,
+) -> None:
+    app = _app()
+    widget = CanvasPreviewWidget()
+    widget.set_theme(get_ui_theme(C.UI_THEME_LIGHT))
+    widget.resize(760, 620)
+
+    source = QImage(image_size[0], image_size[1], QImage.Format_RGB32)
+    source.fill(qcolor("#4AA5FF"))
+    widget.set_source_image(source)
+    widget.set_canvas_pixels(*canvas_size)
+    widget.set_view_zoom(view_zoom)
+    widget.set_transform_state(transform)
+    widget.show()
+    app.processEvents()
+
+    canvas_rect = widget._canvas_rect()
+    visible_rect = widget._viewport_rect()
+    image_polygon = widget._image_polygon_for_rect(canvas_rect)
+    image_path = _path_from_polygon(image_polygon)
+    cropped_path = widget._cropped_image_path(image_polygon, canvas_rect)
+
+    assert cropped_path.isEmpty() is True
+
+    inside_points = _sample_points_in_path(
+        image_path,
+        canvas_rect=canvas_rect,
+        require_inside_canvas=True,
+        visible_rect=visible_rect,
+        limit=4,
+    )
+    rendered = _render_widget(widget)
+    source_color = qcolor("#4AA5FF")
+
+    for point in inside_points:
+        color = rendered.pixelColor(int(point.x()), int(point.y()))
+        assert abs(color.red() - source_color.red()) <= 12
+        assert abs(color.green() - source_color.green()) <= 12
+        assert abs(color.blue() - source_color.blue()) <= 12
 
     widget.close()
     app.processEvents()
@@ -333,6 +392,52 @@ def test_canvas_preview_masks_only_outside_with_view_zoom() -> None:
     )
 
 
+def test_canvas_preview_keeps_inside_image_normal_when_canvas_is_taller_than_source() -> None:
+    _assert_render_keeps_inside_image_normal_when_canvas_has_margins(
+        image_size=(700, 427),
+        canvas_size=(700, 525),
+        transform=CanvasPreviewTransform(offset_x=0.0, offset_y=0.0, scale=1.0),
+        view_zoom=3.0,
+    )
+
+
+def test_canvas_preview_masks_only_outside_when_image_is_larger_than_canvas() -> None:
+    _assert_render_keeps_canvas_inside_normal_and_outside_muted(
+        image_size=(240, 240),
+        canvas_size=(120, 120),
+        transform=CanvasPreviewTransform(offset_x=0.0, offset_y=0.0, scale=1.0),
+        view_zoom=1.0,
+    )
+
+
+def test_canvas_preview_masks_only_outside_with_rotation_offset_and_zoom_regression() -> None:
+    _assert_render_keeps_canvas_inside_normal_and_outside_muted(
+        image_size=(320, 220),
+        canvas_size=(240, 240),
+        transform=CanvasPreviewTransform(offset_x=28.0, offset_y=-22.0, scale=1.22, rotation_deg=24.0),
+        view_zoom=1.8,
+        expect_visible_outside=False,
+    )
+
+
+def test_canvas_preview_masks_only_outside_with_large_negative_offsets() -> None:
+    _assert_render_keeps_canvas_inside_normal_and_outside_muted(
+        image_size=(1046, 1503),
+        canvas_size=(1127, 1503),
+        transform=CanvasPreviewTransform(offset_x=-470.9, offset_y=-312.5, scale=1.0),
+        view_zoom=1.0,
+    )
+
+
+def test_canvas_preview_masks_only_outside_with_large_positive_offsets() -> None:
+    _assert_render_keeps_canvas_inside_normal_and_outside_muted(
+        image_size=(1046, 1503),
+        canvas_size=(1127, 1503),
+        transform=CanvasPreviewTransform(offset_x=470.9, offset_y=312.5, scale=1.0),
+        view_zoom=1.0,
+    )
+
+
 def test_canvas_preview_crop_path_stays_outside_canvas_with_rotation_and_zoom() -> None:
     app = _app()
     widget = CanvasPreviewWidget()
@@ -347,19 +452,65 @@ def test_canvas_preview_crop_path_stays_outside_canvas_with_rotation_and_zoom() 
     widget.set_transform_state(
         CanvasPreviewTransform(offset_x=18.0, offset_y=-12.0, scale=1.35, rotation_deg=27.0)
     )
+    widget.show()
+    app.processEvents()
 
     canvas_rect = widget._canvas_rect()
+    visible_rect = widget._viewport_rect()
+    image_polygon = widget._image_polygon_for_rect(canvas_rect)
+    image_path = _path_from_polygon(image_polygon)
     cropped_path = widget._cropped_image_path(
-        widget._image_polygon_for_rect(canvas_rect),
+        image_polygon,
         canvas_rect,
     )
     outside_point = _first_point_in_path(cropped_path)
+    inside_points = _sample_points_in_path(
+        image_path,
+        canvas_rect=canvas_rect,
+        require_inside_canvas=True,
+        visible_rect=visible_rect,
+        limit=4,
+    )
 
     assert cropped_path.isEmpty() is False
     assert outside_point is not None
     assert canvas_rect.contains(outside_point) is False
     assert cropped_path.contains(outside_point) is True
     assert cropped_path.contains(canvas_rect.center()) is False
+    assert all(not cropped_path.contains(point) for point in inside_points)
+
+    widget.close()
+    app.processEvents()
+
+
+def test_canvas_preview_shows_no_normal_image_when_image_polygon_is_fully_outside_canvas() -> None:
+    app = _app()
+    widget = CanvasPreviewWidget()
+    widget.set_theme(get_ui_theme(C.UI_THEME_LIGHT))
+    widget.resize(520, 420)
+
+    source = QImage(120, 120, QImage.Format_RGB32)
+    source.fill(qcolor("#4AA5FF"))
+    widget.set_source_image(source)
+    widget.set_canvas_pixels(120, 120)
+    widget.set_transform_state(
+        CanvasPreviewTransform(offset_x=260.0, offset_y=0.0, scale=1.0)
+    )
+    widget.show()
+    app.processEvents()
+
+    canvas_rect = widget._canvas_rect()
+    image_path = _path_from_polygon(widget._image_polygon_for_rect(canvas_rect))
+    canvas_path = _rect_path(canvas_rect)
+    rendered = _render_widget(widget)
+    center_color = rendered.pixelColor(
+        int(round(canvas_rect.center().x())),
+        int(round(canvas_rect.center().y())),
+    )
+    source_color = qcolor("#4AA5FF")
+
+    assert image_path.intersected(canvas_path).isEmpty() is True
+    assert abs(center_color.red() - source_color.red()) > 20 or abs(center_color.green() - source_color.green()) > 20 or abs(center_color.blue() - source_color.blue()) > 20
 
     widget.close()
     app.processEvents()

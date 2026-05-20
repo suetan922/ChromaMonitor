@@ -72,20 +72,20 @@ def test_build_app_stylesheet_includes_dark_theme_selectors() -> None:
         assert token in dark
 
     focus_block = (
-        "QToolButton#fileLoadSplitButton:focus {{\n"
+        "QToolButton#fileLoadSplitButton:focus {\n"
         "            outline:none;\n"
         f"            background:{dark_theme.panel_alt_bg};\n"
         f"            border:1px solid {dark_theme.border_strong};\n"
         f"            color:{dark_theme.text_primary};\n"
-        "        }}"
+        "        }"
     )
     open_block = (
-        "QToolButton#fileLoadSplitButton:open {{\n"
+        "QToolButton#fileLoadSplitButton:open {\n"
         "            outline:none;\n"
         f"            background:{dark_theme.button_pressed_bg};\n"
         f"            border:1px solid {dark_theme.border_strong};\n"
         f"            color:{dark_theme.text_primary};\n"
-        "        }}"
+        "        }"
     )
     assert focus_block in dark
     assert open_block in dark
