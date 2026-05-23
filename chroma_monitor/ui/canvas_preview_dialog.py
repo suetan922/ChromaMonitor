@@ -167,6 +167,7 @@ def _load_reset_icon_source_pixmap() -> QPixmap:
         return QPixmap(_RESET_ICON_SOURCE_CACHE)
     # 候補パスを順に試し、最初に読めた asset を canonical source として採用する。
     for path_candidate in _reset_icon_asset_paths():
+        # ファイル有無や読み込み失敗は個別に握り、次候補の探索を続ける。
         try:
             if not path_candidate.is_file():
                 continue
@@ -217,6 +218,7 @@ def _source_alpha_bounding_rect(source: QPixmap) -> QRect:
     if coords.size == 0:
         rect = QRect()
     else:
+        # 不透明画素がある場合は、その最小矩形だけを bbox として返す。
         min_y, min_x = coords.min(axis=0)
         max_y, max_x = coords.max(axis=0)
         rect = QRect(int(min_x), int(min_y), int(max_x - min_x + 1), int(max_y - min_y + 1))
@@ -362,15 +364,15 @@ def _format_edge_value(value: float) -> str:
 
 
 def _format_edge_values(left: float, top: float, right: float, bottom: float) -> str:
-    """上下左右量を 1 行文字列へ整形する。"""
+    """上下左右量を読みやすい 2 行文字列へ整形する。"""
     values = (float(left), float(top), float(right), float(bottom))
     # 4 辺とも 0 近傍なら、余白や切れは無いものとして簡潔に返す。
     if all(abs(value) < _EDGE_TEXT_ZERO_THRESHOLD_PX for value in values):
         return "なし"
-    # 辺ごとの差を見やすくするため、左右上下を固定順で並べる。
+    # 辺ごとの差を見やすくするため、左右上下を上下 2 行へ分けて並べる。
     return (
-        f"左 {_format_edge_value(left)} / 上 {_format_edge_value(top)} / "
-        f"右 {_format_edge_value(right)} / 下 {_format_edge_value(bottom)}"
+        f"左: {_format_edge_value(left)} / 上: {_format_edge_value(top)}\n"
+        f"右: {_format_edge_value(right)} / 下: {_format_edge_value(bottom)}"
     )
 
 
@@ -801,6 +803,7 @@ class CanvasPreviewDialog(QDialog):
         self.btn_background_dark = QPushButton("黒")
         # 背景ボタンは排他的 toggle としてまとめ、テーマ切替と同じ見た目へ寄せる。
         for button in (self.btn_background_light, self.btn_background_dark):
+            # どちらのボタンも同じ toggle ロールを持たせ、スタイルを統一する。
             button.setCheckable(True)
             button.setProperty("chromaRole", "canvasPreviewToggle")
         self.background_group = QButtonGroup(self)
@@ -848,6 +851,7 @@ class CanvasPreviewDialog(QDialog):
         self.btn_fill = QPushButton("埋める")
         self.btn_center = QPushButton("中央に戻す")
         for button in (self.btn_fit, self.btn_fill, self.btn_center):
+            # 3 ボタンとも横幅だけ伸ばし、高さは固定して押しやすさを揃える。
             button.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         self.btn_fit.clicked.connect(lambda: self._apply_fit_mode(CANVAS_FIT_CONTAIN))
         self.btn_fill.clicked.connect(lambda: self._apply_fit_mode(CANVAS_FIT_COVER))
@@ -952,6 +956,9 @@ class CanvasPreviewDialog(QDialog):
         info_grid.setHorizontalSpacing(12)
         info_grid.setVerticalSpacing(6)
         info_grid.setColumnStretch(1, 1)
+        # 余剰高さは末尾の空行へ逃がし、既存 4 行は上側へ詰めて保つ。
+        info_grid.setRowStretch(4, 1)
+        info_grid.setAlignment(Qt.AlignTop)
 
         self.lbl_info_source_size = self._build_info_value_label()
         self.lbl_info_canvas_size = self._build_info_value_label(emphasis=True)
@@ -1373,6 +1380,7 @@ class CanvasPreviewDialog(QDialog):
                 self.preview_widget,
             )
             for widget in widgets:
+                # テーマ影響を受ける widget 群を順に polish し、見た目を更新する。
                 refresh_widget_style(widget)
             self._refresh_reset_button_icons()
             self.list_ratio_presets.viewport().update()
@@ -1407,6 +1415,7 @@ class CanvasPreviewDialog(QDialog):
         if not preserve_fit_mode:
             self._fit_mode = CANVAS_FIT_CUSTOM
         elif self._fit_mode == CANVAS_FIT_COVER:
+            # cover 維持中だけ、回転後の空白を避ける最低 scale を再確認する。
             self._ensure_cover_scale()
         self._sync_view_and_labels()
 
@@ -1756,6 +1765,7 @@ class CanvasPreviewDialog(QDialog):
             updated = replace(current, name=updated_name)
             ratio_changed = False
         else:
+            # user preset は比率値も保存対象なので、編集欄の数値を取り込む。
             ratio_w, ratio_h = self._editor_ratio_values()
             updated = replace(
                 current,
@@ -1773,11 +1783,13 @@ class CanvasPreviewDialog(QDialog):
             self._ratio_presets.append(updated)
             self._draft_preset = None
         elif current.is_builtin:
+            # built-in は preset ID を維持したまま、一覧内の該当要素だけ差し替える。
             self._ratio_presets = [
                 updated if preset.preset_id == current.preset_id else preset
                 for preset in self._ratio_presets
             ]
         else:
+            # 保存済み user preset は ID を頼りに既存要素を上書きする。
             self._replace_saved_user_preset(current.preset_id, updated)
         self._preset_id = updated.preset_id
         # 保存後は一覧・設定・preview を current state に合わせて同期し直す。
@@ -1801,6 +1813,7 @@ class CanvasPreviewDialog(QDialog):
             if user_presets:
                 self._preset_id = user_presets[-1].preset_id
             else:
+                # user preset が尽きた場合は、既定プリセットへ安全に戻す。
                 self._preset_id = find_canvas_ratio_preset(
                     DEFAULT_CANVAS_RATIO_PRESET_ID,
                     self._ratio_presets,
@@ -1833,6 +1846,7 @@ class CanvasPreviewDialog(QDialog):
             next_index = min(index, len(user_preset_ids) - 1)
             self._preset_id = user_preset_ids[next_index]
         else:
+            # user preset 全削除後は、既定プリセットを次の選択先にする。
             self._preset_id = find_canvas_ratio_preset(
                 DEFAULT_CANVAS_RATIO_PRESET_ID,
                 self._ratio_presets,
@@ -1913,6 +1927,7 @@ class CanvasPreviewDialog(QDialog):
             return
         if sender is self.radio_portrait and not self.radio_portrait.isChecked():
             return
+        # ON 側のラジオに従って orientation を決め、向き変更を確定する。
         self._orientation = (
             CANVAS_ORIENTATION_PORTRAIT
             if self.radio_portrait.isChecked()

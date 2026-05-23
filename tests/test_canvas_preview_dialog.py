@@ -673,10 +673,29 @@ def test_canvas_preview_dialog_right_column_keeps_info_stretched_and_export_bott
     assert right_layout.itemAt(4).widget().title() == "保存"
     assert right_layout.stretch(3) == 1
     assert right_layout.stretch(4) == 0
+    info_layout = right_layout.itemAt(3).widget().layout()
+    assert info_layout.rowStretch(4) == 1
+    assert bool(info_layout.alignment() & Qt.AlignTop)
 
     dialog.close()
     main_window.close()
     app.processEvents()
+
+
+def test_canvas_preview_dialog_formats_edge_values_as_two_lines() -> None:
+    """余白量と切れ量の表示が上下 2 行へ分かれることを確認する。"""
+    # 4 辺に値がある場合は、左上と右下を 2 行へ分けて読みやすく整形する。
+    text = canvas_preview_dialog._format_edge_values(12.0, 34.0, 56.0, 78.0)
+
+    lines = text.splitlines()
+    assert len(lines) == 2
+    assert "左:" in lines[0]
+    assert "上:" in lines[0]
+    assert "右:" in lines[1]
+    assert "下:" in lines[1]
+
+    # 4 辺とも実質ゼロなら、既存どおり「なし」を返す。
+    assert canvas_preview_dialog._format_edge_values(0.0, 0.0, 0.0, 0.0) == "なし"
 
 
 def test_canvas_preview_dialog_export_button_position_stays_stable_when_info_text_changes(
@@ -708,17 +727,17 @@ def test_canvas_preview_dialog_export_button_position_stays_stable_when_info_tex
 
     dialog._set_info_label_text(
         dialog.lbl_info_margin,
-        "left 12345 px / right 12345 px\n top 9876 px / bottom 9876 px",
+        "左: 12345 px / 上: 9876 px\n右: 12345 px / 下: 9876 px",
     )
     dialog._set_info_label_text(
         dialog.lbl_info_crop,
-        "left 22222 px / right 22222 px\n top 33333 px / bottom 33333 px",
+        "左: 22222 px / 上: 33333 px\n右: 22222 px / 下: 33333 px",
     )
     app.processEvents()
     long_y = dialog.btn_export_preview.mapTo(dialog, QPoint(0, 0)).y()
 
-    dialog._set_info_label_text(dialog.lbl_info_margin, "0 px")
-    dialog._set_info_label_text(dialog.lbl_info_crop, "0 px")
+    dialog._set_info_label_text(dialog.lbl_info_margin, "なし")
+    dialog._set_info_label_text(dialog.lbl_info_crop, "なし")
     app.processEvents()
     short_y = dialog.btn_export_preview.mapTo(dialog, QPoint(0, 0)).y()
 

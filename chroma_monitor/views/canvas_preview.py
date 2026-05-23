@@ -1076,6 +1076,7 @@ class CanvasPreviewWidget(QWidget):
             if self._drag_axis_lock == "x":
                 delta_y = 0.0
             elif self._drag_axis_lock == "y":
+                # Y 優勢と判定されたら、X 方向の移動を止めて縦移動に固定する。
                 delta_x = 0.0
         else:
             # Shift を離したら軸固定を解除し、自由移動へ戻す。
