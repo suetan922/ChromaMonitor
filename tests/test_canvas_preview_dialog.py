@@ -30,6 +30,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 
 def _app() -> QApplication:
+    """offscreen テスト用の `QApplication` を返す。"""
+    # 既存アプリを再利用し、テストごとの多重初期化を避ける。
     app = QApplication.instance()
     if app is None:
         app = QApplication([])
@@ -37,6 +39,8 @@ def _app() -> QApplication:
 
 
 def test_canvas_preview_dialog_init_completes_and_logs_steps(monkeypatch) -> None:
+    """ダイアログ初期化が完了し、主要初期化ログが残ることを確認する。"""
+    # 起動回帰として、初期状態とログ出力の両方をまとめて固定する。
     log_dir = os.path.join(os.getcwd(), ".tmp_canvas_preview_tests")
     os.makedirs(log_dir, exist_ok=True)
     log_path = os.path.join(log_dir, "canvas_preview_ui_debug.log")
@@ -91,6 +95,8 @@ def test_canvas_preview_dialog_init_completes_and_logs_steps(monkeypatch) -> Non
 
 
 def test_canvas_preview_dialog_preview_zoom_clamps_to_100_percent(monkeypatch) -> None:
+    """preview zoom が 100% 上限へ clamp されることを確認する。"""
+    # UI slider と内部倍率の両方が 100% 上限へ揃うことを見る。
     monkeypatch.setattr(
         canvas_preview_dialog,
         "load_config",
@@ -123,6 +129,8 @@ def test_canvas_preview_dialog_preview_zoom_clamps_to_100_percent(monkeypatch) -
 
 
 def test_canvas_preview_dialog_prefers_saved_background_tone(monkeypatch) -> None:
+    """保存済み背景トーンがテーマ既定値より優先されることを確認する。"""
+    # config 保存値がある場合の復元優先順位を固定する。
     monkeypatch.setattr(
         canvas_preview_dialog,
         "load_config",
@@ -154,6 +162,8 @@ def test_canvas_preview_dialog_prefers_saved_background_tone(monkeypatch) -> Non
 
 
 def test_canvas_preview_dialog_uses_dark_background_by_default_in_dark_theme(monkeypatch) -> None:
+    """ダークテーマ既定では暗背景トーンが選ばれることを確認する。"""
+    # 保存値が無い場合のテーマ依存既定値を固定する。
     monkeypatch.setattr(
         canvas_preview_dialog,
         "load_config",
@@ -182,6 +192,8 @@ def test_canvas_preview_dialog_uses_dark_background_by_default_in_dark_theme(mon
 
 
 def test_canvas_preview_dialog_uses_light_background_by_default_in_light_theme(monkeypatch) -> None:
+    """ライトテーマ既定では明背景トーンが選ばれることを確認する。"""
+    # ライトテーマ時の既定背景が暗背景へ誤って寄らないことを見る。
     monkeypatch.setattr(
         canvas_preview_dialog,
         "load_config",
@@ -210,6 +222,8 @@ def test_canvas_preview_dialog_uses_light_background_by_default_in_light_theme(m
 
 
 def test_builtin_preset_can_save_name_only_and_user_preset_can_edit_all(monkeypatch) -> None:
+    """組み込みプリセットは名称のみ、ユーザープリセットは全項目編集できることを確認する。"""
+    # built-in と user preset の編集権限差が保たれていることを固定する。
     saved_configs: list[dict] = []
     monkeypatch.setattr(
         canvas_preview_dialog,
@@ -295,6 +309,8 @@ def test_builtin_preset_can_save_name_only_and_user_preset_can_edit_all(monkeypa
 
 
 def test_canvas_preview_dialog_uses_generic_export_filename(monkeypatch) -> None:
+    """保存時に汎用的な既定ファイル名が使われることを確認する。"""
+    # 入力元 title があっても、エクスポート名は既定ルールへ揃うことを見る。
     monkeypatch.setattr(
         canvas_preview_dialog,
         "load_config",
@@ -321,6 +337,8 @@ def test_canvas_preview_dialog_uses_generic_export_filename(monkeypatch) -> None
 
 
 def test_canvas_preview_dialog_center_and_individual_resets_keep_roles_separate(monkeypatch) -> None:
+    """中央戻しと個別 reset が担当する transform 要素を混同しないことを確認する。"""
+    # X/Y/scale の reset 役割分離が崩れていないことを固定する。
     monkeypatch.setattr(
         canvas_preview_dialog,
         "load_config",
@@ -402,6 +420,8 @@ def test_canvas_preview_dialog_center_and_individual_resets_keep_roles_separate(
 
 
 def test_reset_icon_from_palette_returns_icons_for_light_and_dark_themes(monkeypatch) -> None:
+    """reset icon がライト/ダーク両テーマで生成できることを確認する。"""
+    # palette 依存 icon 生成がテーマ差分に耐えることを見る。
     canvas_preview_dialog._clear_reset_icon_caches()
     source = QPixmap(24, 24)
     source.fill(Qt.white)
@@ -433,6 +453,8 @@ def test_reset_icon_from_palette_returns_icons_for_light_and_dark_themes(monkeyp
 
 
 def test_source_alpha_bounding_rect_ignores_transparent_padding() -> None:
+    """alpha bbox 計算が透明余白を除外することを確認する。"""
+    # PNG 余白込み縮小で点状にならないための前提を固定する。
     source = QPixmap(64, 64)
     source.fill(Qt.transparent)
     painter = QPainter(source)
@@ -451,6 +473,8 @@ def test_source_alpha_bounding_rect_ignores_transparent_padding() -> None:
 
 
 def test_tinted_icon_pixmap_keeps_reset_icon_visibly_large_after_crop() -> None:
+    """tint 後 icon が透明余白込みで極端に小さくならないことを確認する。"""
+    # bbox crop 後の icon が実用的な大きさを保つことを見る。
     source = QPixmap(64, 64)
     source.fill(Qt.transparent)
     painter = QPainter(source)
@@ -474,6 +498,8 @@ def test_tinted_icon_pixmap_keeps_reset_icon_visibly_large_after_crop() -> None:
 
 
 def test_reset_icon_from_palette_falls_back_to_qstyle_reload_icon_when_asset_missing() -> None:
+    """asset 不達時に Qt 標準 reload icon へ fallback することを確認する。"""
+    # 手描き fallback に戻らず、標準 icon 経路が使われることを固定する。
     canvas_preview_dialog._clear_reset_icon_caches()
     app = _app()
     button = QToolButton()
@@ -501,6 +527,8 @@ def test_reset_icon_from_palette_falls_back_to_qstyle_reload_icon_when_asset_mis
 
 
 def test_canvas_preview_dialog_background_toggle_persists_selection(monkeypatch) -> None:
+    """背景トーン切替が preview 反映と設定保存へつながることを確認する。"""
+    # toggle 操作後の state と save payload が一致することを確認する。
     saved_configs: list[dict] = []
     monkeypatch.setattr(
         canvas_preview_dialog,
@@ -539,6 +567,8 @@ def test_canvas_preview_dialog_background_toggle_persists_selection(monkeypatch)
 
 
 def test_canvas_preview_dialog_dark_stylesheet_defines_radio_indicator_states() -> None:
+    """ダークテーマ stylesheet にラジオ indicator 状態が含まれることを確認する。"""
+    # 向き切替ラジオの見た目定義が欠けていないことを固定する。
     stylesheet = build_app_stylesheet(get_ui_theme(C.UI_THEME_DARK))
 
     assert "QRadioButton::indicator:unchecked" in stylesheet
@@ -549,6 +579,8 @@ def test_canvas_preview_dialog_dark_stylesheet_defines_radio_indicator_states() 
 
 
 def test_app_stylesheet_uses_attached_baseline_tab_bar_style() -> None:
+    """tab bar が現行の角なし基準スタイルを使うことを確認する。"""
+    # theme test と同じ期待値で、attached baseline の見た目を固定する。
     stylesheet = build_app_stylesheet(get_ui_theme(C.UI_THEME_DARK))
 
     assert 'QTabBar[chromaDockTabBar="true"]::tab' not in stylesheet
@@ -558,6 +590,8 @@ def test_app_stylesheet_uses_attached_baseline_tab_bar_style() -> None:
 
 
 def test_canvas_preview_dialog_uses_single_ratio_list_and_wrapping_info_rows(monkeypatch) -> None:
+    """比率一覧が単一リストで、情報ラベルが折り返し対応していることを確認する。"""
+    # 左右カラムの UI 構成が現行設計どおりかを固定する。
     monkeypatch.setattr(
         canvas_preview_dialog,
         "load_config",
@@ -606,6 +640,8 @@ def test_canvas_preview_dialog_uses_single_ratio_list_and_wrapping_info_rows(mon
 def test_canvas_preview_dialog_right_column_keeps_info_stretched_and_export_bottom_fixed(
     monkeypatch,
 ) -> None:
+    """右カラムで情報欄が伸び、保存欄が末尾固定されることを確認する。"""
+    # 右カラムの伸縮責務が崩れてチラつかない構造を固定する。
     monkeypatch.setattr(
         canvas_preview_dialog,
         "load_config",
@@ -646,6 +682,8 @@ def test_canvas_preview_dialog_right_column_keeps_info_stretched_and_export_bott
 def test_canvas_preview_dialog_export_button_position_stays_stable_when_info_text_changes(
     monkeypatch,
 ) -> None:
+    """情報テキストが変わっても保存ボタン位置が揺れないことを確認する。"""
+    # 右カラムのレイアウト安定化が効いていることを座標で確認する。
     monkeypatch.setattr(
         canvas_preview_dialog,
         "load_config",
@@ -695,6 +733,8 @@ def test_canvas_preview_dialog_export_button_position_stays_stable_when_info_tex
 def test_canvas_preview_dialog_new_user_preset_starts_editable_and_keeps_fixed_ratio_label(
     monkeypatch,
 ) -> None:
+    """新規ユーザープリセットが編集可能状態で始まることを確認する。"""
+    # draft preset 開始時の編集可否とラベル表示ルールを固定する。
     saved_payloads: list[dict] = []
     monkeypatch.setattr(
         canvas_preview_dialog,
@@ -761,6 +801,8 @@ def test_canvas_preview_dialog_new_user_preset_starts_editable_and_keeps_fixed_r
 def test_canvas_preview_dialog_uses_same_label_rule_for_builtin_special_and_user_presets(
     monkeypatch,
 ) -> None:
+    """組み込み特殊プリセットとユーザープリセットで同じ表示名規則を使うことを確認する。"""
+    # preset 種別ごとの表示名分岐が増えていないことを確認する。
     monkeypatch.setattr(
         canvas_preview_dialog,
         "load_config",
