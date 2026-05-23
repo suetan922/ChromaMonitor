@@ -483,6 +483,91 @@ def test_canvas_preview_crop_path_stays_outside_canvas_with_rotation_and_zoom() 
     app.processEvents()
 
 
+def test_canvas_preview_crop_path_with_clip_rect_stays_outside_canvas_and_viewport() -> None:
+    app = _app()
+    widget = CanvasPreviewWidget()
+    widget.set_theme(get_ui_theme(C.UI_THEME_LIGHT))
+    widget.resize(520, 420)
+
+    source = QImage(240, 240, QImage.Format_RGB32)
+    source.fill(qcolor("#4AA5FF"))
+    widget.set_source_image(source)
+    widget.set_canvas_pixels(120, 120)
+    widget.set_view_zoom(3.0)
+    widget.set_transform_state(
+        CanvasPreviewTransform(offset_x=18.0, offset_y=-12.0, scale=1.0, rotation_deg=0.0)
+    )
+    widget.show()
+    app.processEvents()
+
+    canvas_rect = widget._canvas_rect()
+    viewport_content_rect = widget._viewport_content_rect(widget._viewport_rect())
+    image_polygon = widget._image_polygon_for_rect(canvas_rect)
+    image_path = _path_from_polygon(image_polygon)
+    cropped_path = widget._cropped_image_path(
+        image_polygon,
+        canvas_rect,
+        clip_rect=viewport_content_rect,
+    )
+    inside_points = _sample_points_in_path(
+        image_path,
+        canvas_rect=canvas_rect,
+        require_inside_canvas=True,
+        visible_rect=viewport_content_rect,
+        limit=4,
+    )
+    assert all(not cropped_path.contains(point) for point in inside_points)
+    assert cropped_path.contains(canvas_rect.center()) is False
+    assert cropped_path.subtracted(_rect_path(viewport_content_rect)).isEmpty() is True
+    if not cropped_path.isEmpty():
+        outside_points = _sample_points_in_path(
+            cropped_path,
+            canvas_rect=canvas_rect,
+            require_inside_canvas=False,
+            visible_rect=viewport_content_rect,
+            limit=3,
+        )
+        assert all(viewport_content_rect.contains(point) for point in outside_points)
+
+    widget.close()
+    app.processEvents()
+
+
+def test_canvas_preview_view_zoom_clamps_to_100_percent_and_canvas_fits_content_rect() -> None:
+    app = _app()
+    widget = CanvasPreviewWidget()
+    widget.set_theme(get_ui_theme(C.UI_THEME_LIGHT))
+    widget.resize(760, 620)
+
+    source = QImage(700, 427, QImage.Format_RGB32)
+    source.fill(qcolor("#4AA5FF"))
+    widget.set_source_image(source)
+    widget.set_canvas_pixels(700, 525)
+    widget.set_view_zoom(3.0)
+    widget.show()
+    app.processEvents()
+
+    viewport_rect = widget._viewport_rect()
+    content_rect = widget._viewport_content_rect(viewport_rect)
+    canvas_rect = widget._canvas_rect()
+
+    assert widget._view_zoom == 1.0
+    assert content_rect.contains(canvas_rect)
+
+    widget.close()
+    app.processEvents()
+
+
+def test_canvas_preview_masks_only_outside_with_rotation_offset_and_max_view_zoom() -> None:
+    _assert_render_keeps_canvas_inside_normal_and_outside_muted(
+        image_size=(320, 220),
+        canvas_size=(240, 240),
+        transform=CanvasPreviewTransform(offset_x=22.0, offset_y=-16.0, scale=1.24, rotation_deg=26.0),
+        view_zoom=3.0,
+        expect_visible_outside=False,
+    )
+
+
 def test_canvas_preview_shows_no_normal_image_when_image_polygon_is_fully_outside_canvas() -> None:
     app = _app()
     widget = CanvasPreviewWidget()
@@ -709,6 +794,7 @@ def test_canvas_preview_viewport_border_stays_above_checker_at_high_zoom() -> No
 
     rendered = _render_widget(widget)
     viewport_rect = widget._viewport_rect()
+    canvas_rect = widget._canvas_rect()
     checker_colors = {color.rgb() for color in widget._checker_colors()}
     border_points = (
         (int(viewport_rect.left()), int(viewport_rect.center().y())),
@@ -717,8 +803,8 @@ def test_canvas_preview_viewport_border_stays_above_checker_at_high_zoom() -> No
         (int(viewport_rect.center().x()), int(viewport_rect.bottom())),
     )
     inside_color = rendered.pixelColor(
-        int(viewport_rect.left() + 24),
-        int(viewport_rect.top() + 48),
+        int(canvas_rect.left() + 24),
+        int(canvas_rect.top() + 48),
     )
 
     assert inside_color.rgb() in checker_colors

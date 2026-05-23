@@ -69,7 +69,7 @@ class CanvasPreviewWidget(QWidget):
     _VIEWPORT_RADIUS = 14.0
     _CHECKER_CELL = 18.0
     _VIEW_ZOOM_MIN = 0.1
-    _VIEW_ZOOM_MAX = 3.0
+    _VIEW_ZOOM_MAX = 1.0
     _IMAGE_SCALE_MIN = 0.01
     _IMAGE_SCALE_MAX = 16.0
     _WHEEL_FACTOR = 1.12
@@ -333,7 +333,10 @@ class CanvasPreviewWidget(QWidget):
         viewport = self._viewport_rect()
         if viewport.width() <= 0.0 or viewport.height() <= 0.0:
             return QRectF()
-        scale = self._fit_canvas_view_scale(viewport) * float(self._view_zoom)
+        fit_viewport = self._viewport_content_rect(viewport)
+        if fit_viewport.isEmpty():
+            fit_viewport = viewport
+        scale = self._fit_canvas_view_scale(fit_viewport) * float(self._view_zoom)
         draw_width = float(self._canvas_width) * scale
         draw_height = float(self._canvas_height) * scale
         return QRectF(
@@ -484,6 +487,8 @@ class CanvasPreviewWidget(QWidget):
         self,
         image_polygon: QPolygonF,
         canvas_rect: QRectF,
+        *,
+        clip_rect: QRectF | None = None,
     ) -> QPainterPath:
         """キャンバス外へはみ出した画像部分だけの path を返す。"""
         if image_polygon.isEmpty():
@@ -507,10 +512,24 @@ class CanvasPreviewWidget(QWidget):
         image_path.setFillRule(Qt.WindingFill)
         image_path.addPolygon(image_polygon)
         image_path.closeSubpath()
+        visible_image_path = QPainterPath(image_path)
+        if clip_rect is not None:
+            visible_path = QPainterPath()
+            visible_path.setFillRule(Qt.WindingFill)
+            visible_path.addRect(QRectF(clip_rect))
+            visible_image_path = visible_image_path.intersected(visible_path)
+            if visible_image_path.isEmpty():
+                return QPainterPath()
+        canvas_mask_rect = QRectF(canvas_rect).adjusted(
+            -self._CROP_MASK_EPSILON,
+            -self._CROP_MASK_EPSILON,
+            self._CROP_MASK_EPSILON,
+            self._CROP_MASK_EPSILON,
+        )
         canvas_path = QPainterPath()
         canvas_path.setFillRule(Qt.WindingFill)
-        canvas_path.addRect(canvas_rect)
-        return image_path.subtracted(canvas_path)
+        canvas_path.addRect(canvas_mask_rect)
+        return visible_image_path.subtracted(canvas_path)
 
     def _draw_transformed_image(
         self,
@@ -616,16 +635,28 @@ class CanvasPreviewWidget(QWidget):
         """通常画像をキャンバス内だけに描画する。"""
         if self._image.isNull():
             return
-        effective_clip = QRectF(canvas_rect)
+        view_path = QPainterPath()
+        view_path.setFillRule(Qt.WindingFill)
+        view_path.addRect(QRectF(canvas_rect))
         if clip_rect is not None:
-            effective_clip = effective_clip.intersected(QRectF(clip_rect))
-        if effective_clip.isEmpty():
+            clip_path = QPainterPath()
+            clip_path.setFillRule(Qt.WindingFill)
+            clip_path.addRect(QRectF(clip_rect))
+            view_path = view_path.intersected(clip_path)
+        if view_path.isEmpty():
             return
-        self._draw_transformed_image(
+        image_clip_path = self._image_clip_path_for_view_path(
+            self._image_transform_for_rect(canvas_rect),
+            view_path,
+            image_size=self._image.size(),
+        )
+        if image_clip_path.isEmpty():
+            return
+        self._draw_transformed_image_with_image_clip(
             painter,
             self._image,
             canvas_rect,
-            clip_rect=effective_clip,
+            image_clip_path,
         )
 
     def _draw_muted_outside_image(
@@ -639,7 +670,11 @@ class CanvasPreviewWidget(QWidget):
     ) -> QPainterPath:
         """キャンバス外へはみ出した画像領域を暗く、少し落ち着かせて示す。"""
         _ = theme
-        cropped_path = self._cropped_image_path(image_polygon, canvas_rect)
+        cropped_path = self._cropped_image_path(
+            image_polygon,
+            canvas_rect,
+            clip_rect=clip_rect,
+        )
         if cropped_path.isEmpty():
             return cropped_path
         if not self._image_grayscale.isNull():

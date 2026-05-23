@@ -5,7 +5,7 @@ from __future__ import annotations
 import os
 
 import numpy as np
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QPoint, Qt
 from PySide6.QtGui import QColor, QIcon, QPainter, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
@@ -65,6 +65,7 @@ def test_canvas_preview_dialog_init_completes_and_logs_steps(monkeypatch) -> Non
     assert dialog.radio_portrait.isChecked() is False
     assert dialog.btn_background_light.isChecked() is True
     assert dialog.btn_background_dark.isChecked() is False
+    assert dialog.slider_preview_zoom.maximum() == 100
     assert dialog.slider_preview_zoom.value() == 100
     assert dialog.lbl_preview_zoom_value.text() == "100%"
     assert dialog.btn_preview_zoom_reset.text() == "100%"
@@ -87,6 +88,38 @@ def test_canvas_preview_dialog_init_completes_and_logs_steps(monkeypatch) -> Non
     assert "canvas_preview_apply_initial_state_step_ok" in log_text
     assert "stage='apply_fit_mode'" in log_text
     assert "canvas_preview_apply_initial_state_ok" in log_text
+
+
+def test_canvas_preview_dialog_preview_zoom_clamps_to_100_percent(monkeypatch) -> None:
+    monkeypatch.setattr(
+        canvas_preview_dialog,
+        "load_config",
+        lambda: {C.CFG_CANVAS_RATIO_PRESETS: []},
+    )
+
+    app = _app()
+    main_window = QMainWindow()
+    main_window._ui_theme_name = None
+    snapshot = canvas_preview_dialog.CanvasPreviewSnapshot(
+        bgr=np.zeros((120, 160, 3), dtype=np.uint8),
+        source_label="test",
+        title="test.png",
+    )
+
+    dialog = canvas_preview_dialog.CanvasPreviewDialog(main_window, snapshot)
+    app.processEvents()
+
+    dialog._set_preview_zoom(3.0)
+    app.processEvents()
+
+    assert dialog._preview_zoom == 1.0
+    assert dialog.slider_preview_zoom.maximum() == 100
+    assert dialog.slider_preview_zoom.value() == 100
+    assert dialog.lbl_preview_zoom_value.text() == "100%"
+
+    dialog.close()
+    main_window.close()
+    app.processEvents()
 
 
 def test_canvas_preview_dialog_prefers_saved_background_tone(monkeypatch) -> None:
@@ -564,6 +597,95 @@ def test_canvas_preview_dialog_uses_single_ratio_list_and_wrapping_info_rows(mon
     assert "元画像サイズ" in {
         label.text() for label in dialog.findChildren(QLabel)
     }
+
+    dialog.close()
+    main_window.close()
+    app.processEvents()
+
+
+def test_canvas_preview_dialog_right_column_keeps_info_stretched_and_export_bottom_fixed(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        canvas_preview_dialog,
+        "load_config",
+        lambda: {C.CFG_CANVAS_RATIO_PRESETS: []},
+    )
+
+    app = _app()
+    main_window = QMainWindow()
+    main_window._ui_theme_name = None
+    snapshot = canvas_preview_dialog.CanvasPreviewSnapshot(
+        bgr=np.zeros((120, 160, 3), dtype=np.uint8),
+        source_label="test",
+        title="test.png",
+    )
+
+    dialog = canvas_preview_dialog.CanvasPreviewDialog(main_window, snapshot)
+    dialog.resize(1180, 780)
+    dialog.show()
+    app.processEvents()
+
+    right_scroll = dialog.layout().itemAt(2).widget()
+    right_layout = right_scroll.widget().layout()
+
+    assert right_layout.count() == 5
+    assert right_layout.itemAt(0).widget().title() == "表示操作"
+    assert right_layout.itemAt(1).widget().title() == "位置と拡大率"
+    assert right_layout.itemAt(2).widget().title() == "回転"
+    assert right_layout.itemAt(3).widget().title() == "情報"
+    assert right_layout.itemAt(4).widget().title() == "保存"
+    assert right_layout.stretch(3) == 1
+    assert right_layout.stretch(4) == 0
+
+    dialog.close()
+    main_window.close()
+    app.processEvents()
+
+
+def test_canvas_preview_dialog_export_button_position_stays_stable_when_info_text_changes(
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        canvas_preview_dialog,
+        "load_config",
+        lambda: {C.CFG_CANVAS_RATIO_PRESETS: []},
+    )
+
+    app = _app()
+    main_window = QMainWindow()
+    main_window._ui_theme_name = None
+    snapshot = canvas_preview_dialog.CanvasPreviewSnapshot(
+        bgr=np.zeros((120, 160, 3), dtype=np.uint8),
+        source_label="test",
+        title="test.png",
+    )
+
+    dialog = canvas_preview_dialog.CanvasPreviewDialog(main_window, snapshot)
+    dialog.resize(1180, 780)
+    dialog.show()
+    app.processEvents()
+
+    base_y = dialog.btn_export_preview.mapTo(dialog, QPoint(0, 0)).y()
+
+    dialog._set_info_label_text(
+        dialog.lbl_info_margin,
+        "left 12345 px / right 12345 px\n top 9876 px / bottom 9876 px",
+    )
+    dialog._set_info_label_text(
+        dialog.lbl_info_crop,
+        "left 22222 px / right 22222 px\n top 33333 px / bottom 33333 px",
+    )
+    app.processEvents()
+    long_y = dialog.btn_export_preview.mapTo(dialog, QPoint(0, 0)).y()
+
+    dialog._set_info_label_text(dialog.lbl_info_margin, "0 px")
+    dialog._set_info_label_text(dialog.lbl_info_crop, "0 px")
+    app.processEvents()
+    short_y = dialog.btn_export_preview.mapTo(dialog, QPoint(0, 0)).y()
+
+    assert long_y == base_y
+    assert short_y == base_y
 
     dialog.close()
     main_window.close()

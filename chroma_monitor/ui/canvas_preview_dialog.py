@@ -69,7 +69,7 @@ from ..views.canvas_preview_math import (
 )
 
 _PREVIEW_ZOOM_MIN_PERCENT = 10
-_PREVIEW_ZOOM_MAX_PERCENT = 300
+_PREVIEW_ZOOM_MAX_PERCENT = 100
 _PRESET_RATIO_MIN = 0.01
 _PRESET_RATIO_MAX = 9999.0
 _PRESET_RATIO_DECIMALS = 2
@@ -755,9 +755,8 @@ class CanvasPreviewDialog(QDialog):
         layout.addWidget(self._build_display_action_box())
         layout.addWidget(self._build_adjust_box_with_reset_buttons())
         layout.addWidget(self._build_rotation_box())
-        layout.addWidget(self._build_info_box())
-        layout.addWidget(self._build_export_box())
-        layout.addStretch(1)
+        layout.addWidget(self._build_info_box(), 1)
+        layout.addWidget(self._build_export_box(), 0)
         return scroll
 
     def _build_display_action_box(self) -> QGroupBox:
@@ -874,8 +873,8 @@ class CanvasPreviewDialog(QDialog):
 
         self.lbl_info_source_size = self._build_info_value_label()
         self.lbl_info_canvas_size = self._build_info_value_label(emphasis=True)
-        self.lbl_info_margin = self._build_info_value_label()
-        self.lbl_info_crop = self._build_info_value_label()
+        self.lbl_info_margin = self._build_info_value_label(reserved_lines=2)
+        self.lbl_info_crop = self._build_info_value_label(reserved_lines=2)
 
         self._add_info_row(info_grid, 0, "元画像サイズ", self.lbl_info_source_size)
         self._add_info_row(info_grid, 1, "キャンバスサイズ", self.lbl_info_canvas_size)
@@ -892,7 +891,12 @@ class CanvasPreviewDialog(QDialog):
         export_layout.addWidget(self.btn_export_preview)
         return export_box
 
-    def _build_info_value_label(self, *, emphasis: bool = False) -> QLabel:
+    def _build_info_value_label(
+        self,
+        *,
+        emphasis: bool = False,
+        reserved_lines: int = 1,
+    ) -> QLabel:
         """情報欄の値ラベルを構築する。"""
         label = QLabel()
         label.setWordWrap(True)
@@ -900,6 +904,9 @@ class CanvasPreviewDialog(QDialog):
         label.setProperty("chromaRole", "detailText")
         label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Minimum)
         label.setMinimumWidth(0)
+        label.setMinimumHeight(
+            max(0, label.fontMetrics().lineSpacing() * max(1, int(reserved_lines)))
+        )
         if emphasis:
             font = label.font()
             font.setBold(True)
@@ -922,7 +929,6 @@ class CanvasPreviewDialog(QDialog):
         """情報ラベルへ値と補助 tooltip を設定する。"""
         label.setText(str(text))
         label.setToolTip(str(text))
-        label.updateGeometry()
 
     def _build_double_spin(
         self,
