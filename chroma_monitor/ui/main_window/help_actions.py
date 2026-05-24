@@ -10,7 +10,7 @@ from PySide6.QtWidgets import QMenuBar
 
 from ...util import constants as C
 
-_APP_VERSION = "0.1.0"
+_APP_VERSION = "0.2.0"
 _LATEST_RELEASE_API_URL = f"https://api.github.com/repos/{C.APP_GITHUB_REPOSITORY}/releases/latest"
 _UPDATE_CHECK_TIMEOUT_MS = 5000
 
